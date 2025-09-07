@@ -48,6 +48,9 @@ def load_games() -> pd.DataFrame:
     if not os.path.exists(INPUT_XLSX):
         return pd.DataFrame()
     df = pd.read_excel(INPUT_XLSX)
+    df = df.dropna(how='all')
+    if 'Name' in df.columns:
+        df = df[df['Name'].notna()]
     if 'Rating Count' in df.columns:
         df = df.sort_values(by='Rating Count', ascending=False)
     df = df.reset_index(drop=True)
