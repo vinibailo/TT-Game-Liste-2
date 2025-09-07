@@ -119,17 +119,43 @@ def api_game():
         save_progress()
         return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
     row = games_df.iloc[index]
-    cover_path = find_cover(row)
+    seq_id = f"{progress['seq_index']:07d}"
+    processed_row = None
+    if os.path.exists(PROCESSED_XLSX):
+        try:
+            proc_df = pd.read_excel(PROCESSED_XLSX)
+            match = proc_df[proc_df['ID'] == seq_id]
+            if not match.empty:
+                processed_row = match.iloc[0]
+        except Exception:
+            processed_row = None
+
+    if processed_row is not None:
+        cover_path = processed_row.get('Cover Path') or find_cover(row)
+    else:
+        cover_path = find_cover(row)
+
     cover_data = None
     if cover_path:
         img = open_image_auto_rotate(cover_path)
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
         cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
-    data = {
-        'index': int(index),
-        'total': total_games,
-        'game': {
+
+    if processed_row is not None:
+        genres = [g.strip() for g in str(processed_row.get('Genres', '')).split(',') if g.strip()]
+        modes = [g.strip() for g in str(processed_row.get('Game Modes', '')).split(',') if g.strip()]
+        game_fields = {
+            'Name': processed_row.get('Name', ''),
+            'Summary': processed_row.get('Summary', ''),
+            'FirstLaunchDate': processed_row.get('First Launch Date', ''),
+            'Developers': processed_row.get('Developers', ''),
+            'Publishers': processed_row.get('Publishers', ''),
+            'Genres': genres,
+            'GameModes': modes,
+        }
+    else:
+        game_fields = {
             'Name': row.get('Name', ''),
             'Summary': row.get('Summary', ''),
             'FirstLaunchDate': row.get('First Launch Date', ''),
@@ -137,7 +163,12 @@ def api_game():
             'Publishers': row.get('Publishers', ''),
             'Genres': row.get('Genres', ''),
             'GameModes': row.get('Game Modes', ''),
-        },
+        }
+
+    data = {
+        'index': int(index),
+        'total': total_games,
+        'game': game_fields,
         'cover': cover_data,
         'seq': progress['seq_index'],
     }
@@ -199,6 +230,7 @@ def api_save():
 
     if os.path.exists(PROCESSED_XLSX):
         df = pd.read_excel(PROCESSED_XLSX)
+        df = df[df['ID'] != seq_id]
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     else:
         df = pd.DataFrame([row])
@@ -231,6 +263,22 @@ def api_skip():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
+    save_progress()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/back', methods=['POST'])
+def api_back():
+    data = request.get_json(silent=True) or {}
+    upload_name = data.get('upload_name')
+    if upload_name:
+        up_path = os.path.join(UPLOAD_DIR, upload_name)
+        if os.path.exists(up_path):
+            os.remove(up_path)
+    if progress['current_index'] > 0:
+        progress['current_index'] -= 1
+    if progress['seq_index'] > 1:
+        progress['seq_index'] -= 1
     save_progress()
     return jsonify({'status': 'ok'})
 

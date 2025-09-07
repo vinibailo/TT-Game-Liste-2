@@ -130,6 +130,11 @@ function skipGame() {
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
 }
 
+function backGame() {
+    fetch('/api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+}
+
 document.getElementById('imageUpload').addEventListener('change', function(){
     const file = this.files[0];
     if (!file) return;
@@ -142,6 +147,7 @@ document.getElementById('imageUpload').addEventListener('change', function(){
 
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);
+document.getElementById('back').addEventListener('click', backGame);
 document.getElementById('revert-image').addEventListener('click', function(){
     if (originalImage) {
         setImage(originalImage);
