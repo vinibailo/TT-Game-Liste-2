@@ -3,6 +3,7 @@ let currentIndex = 0;
 let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices;
+const imageUploadInput = document.getElementById('imageUpload');
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
@@ -127,16 +128,20 @@ function setImage(dataUrl) {
         if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
             alert('Imagem menor que 1080px será ampliada.');
         }
+        document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
         updatePreview();
     };
     img.src = dataUrl;
+    imageUploadInput.value = '';
 }
 
 function clearImage() {
     if (cropper) { cropper.destroy(); cropper = null; }
     document.getElementById('image').src = '';
     document.getElementById('preview').src = '';
+    document.getElementById('image-resolution').textContent = '';
     currentUpload = null;
+    imageUploadInput.value = '';
     saveSession();
 }
 
@@ -209,7 +214,7 @@ function resetFields() {
     });
 }
 
-document.getElementById('imageUpload').addEventListener('change', function(){
+imageUploadInput.addEventListener('change', function(){
     const file = this.files[0];
     if (!file) return;
     const formData = new FormData();
