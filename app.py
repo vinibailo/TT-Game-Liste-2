@@ -8,7 +8,7 @@ from typing import Any
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
 import pandas as pd
-import openai
+from openai import OpenAI
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_XLSX = 'processed_games.xlsx'
@@ -20,7 +20,7 @@ COVERS_DIR = 'covers_out'
 app = Flask(__name__)
 
 # Configure OpenAI using API key from environment
-openai.api_key = os.environ.get('OPENAI_API_KEY', '')
+client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -105,10 +105,10 @@ def ensure_dirs() -> None:
 
 def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
-    if not game_name or not openai.api_key:
+    if not game_name or not os.environ.get('OPENAI_API_KEY'):
         return ''
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model='gpt-3.5-turbo',
             messages=[
                 {
@@ -126,7 +126,7 @@ def generate_pt_summary(game_name: str) -> str:
             temperature=0.7,
             max_tokens=120,
         )
-        return response['choices'][0]['message']['content'].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         app.logger.error(f"OpenAI error: {e}")
         return ''
@@ -156,7 +156,7 @@ def api_game():
     processed_row = None
     if os.path.exists(PROCESSED_XLSX):
         try:
-            proc_df = pd.read_excel(PROCESSED_XLSX)
+            proc_df = pd.read_excel(PROCESSED_XLSX, dtype=str)
             match = proc_df[proc_df['ID'] == seq_id]
             if not match.empty:
                 processed_row = match.iloc[0]
@@ -272,7 +272,7 @@ def api_save():
     }
 
     if os.path.exists(PROCESSED_XLSX):
-        df = pd.read_excel(PROCESSED_XLSX)
+        df = pd.read_excel(PROCESSED_XLSX, dtype=str)
         df = df[df['ID'] != seq_id]
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     else:
