@@ -188,14 +188,16 @@ def api_game():
             'GameModes': modes,
         }
     else:
+        genres = [g.strip() for g in str(row.get('Genres', '')).split(',') if g.strip()]
+        modes = [g.strip() for g in str(row.get('Game Modes', '')).split(',') if g.strip()]
         game_fields = {
             'Name': row.get('Name', ''),
             'Summary': row.get('Summary', ''),
             'FirstLaunchDate': row.get('First Launch Date', ''),
             'Developers': row.get('Developers', ''),
             'Publishers': row.get('Publishers', ''),
-            'Genres': row.get('Genres', ''),
-            'GameModes': row.get('Game Modes', ''),
+            'Genres': genres,
+            'GameModes': modes,
         }
 
     data = {
