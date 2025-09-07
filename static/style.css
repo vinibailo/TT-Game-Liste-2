@@ -1,11 +1,11 @@
 :root {
-  --md-sys-color-background: #121212;
-  --md-sys-color-surface: #1e1e1e;
-  --md-sys-color-on-surface: #e0e0e0;
-  --md-sys-color-primary: #bb86fc;
-  --md-sys-color-secondary: #03dac6;
-  --md-sys-color-outline: #3f3f3f;
-  --md-sys-color-primary-contrast: #000;
+  --md-sys-color-background: #1B242F;
+  --md-sys-color-surface: #13253C;
+  --md-sys-color-on-surface: #D4D2D5;
+  --md-sys-color-primary: #C44536;
+  --md-sys-color-secondary: #CFD11A;
+  --md-sys-color-outline: #222222;
+  --md-sys-color-primary-contrast: #D4D2D5;
 }
 
 html, body {
@@ -204,5 +204,35 @@ button#back {
   .container {
     flex-direction: column;
   }
+}
+
+/* Choices.js dark theme overrides */
+.choices {
+  background: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
+}
+
+.choices__inner {
+  background: var(--md-sys-color-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+}
+
+.choices__list--dropdown,
+.choices__list[aria-expanded] {
+  background: var(--md-sys-color-surface);
+  border: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+}
+
+.choices__item--selectable.is-highlighted {
+  background: var(--md-sys-color-secondary);
+  color: #000;
+}
+
+.choices__list--multiple .choices__item {
+  background: var(--md-sys-color-primary);
+  border: 1px solid var(--md-sys-color-primary);
+  color: var(--md-sys-color-primary-contrast);
 }
 

@@ -8,7 +8,7 @@ from typing import Any
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
 import pandas as pd
-from openai import OpenAI
+import openai
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_XLSX = 'processed_games.xlsx'
@@ -19,8 +19,8 @@ COVERS_DIR = 'covers_out'
 
 app = Flask(__name__)
 
-# Initialize OpenAI client using API key from environment
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+# Configure OpenAI using API key from environment
+openai.api_key = os.environ.get('OPENAI_API_KEY', '')
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -105,10 +105,10 @@ def ensure_dirs() -> None:
 
 def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
-    if not game_name or not client.api_key:
+    if not game_name or not openai.api_key:
         return ''
     try:
-        response = client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model='gpt-3.5-turbo',
             messages=[
                 {
@@ -126,8 +126,9 @@ def generate_pt_summary(game_name: str) -> str:
             temperature=0.7,
             max_tokens=120,
         )
-        return response.choices[0].message.content.strip()
-    except Exception:
+        return response['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        app.logger.error(f"OpenAI error: {e}")
         return ''
 
 
