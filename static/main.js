@@ -153,8 +153,9 @@ function loadGame() {
         }
         currentIndex = data.index;
         document.getElementById('game-name').textContent = data.game.Name || '';
-        document.getElementById('caption').textContent = `Jogo ${data.index+1} de ${data.total}`;
-        document.getElementById('progress').style.width = `${(data.index+1)/data.total*100}%`;
+        const processed = (data.seq || 1) - 1;
+        document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
+        document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
         document.getElementById('name').value = data.game.Name || '';
         document.getElementById('summary').value = data.game.Summary || '';
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
