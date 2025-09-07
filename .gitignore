@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+processed_games.xlsx
+progress.json
+uploaded_sources/*
+processed_covers/*
+covers_out/*
+!uploaded_sources/.gitkeep
+!processed_covers/.gitkeep
+!covers_out/.gitkeep

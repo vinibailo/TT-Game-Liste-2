@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Game Editor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.js"></script>
+</head>
+<body>
+    <header>
+        <h2 id="game-name"></h2>
+        <div id="caption"></div>
+        <div class="progress-bar"><div id="progress"></div></div>
+    </header>
+    <div class="container">
+        <div class="left">
+            <form id="game-form">
+                <label>Name
+                    <input type="text" id="name" />
+                </label>
+                <label>Summary
+                    <textarea id="summary"></textarea>
+                </label>
+                <label>First Launch Date
+                    <input type="text" id="first-launch" />
+                </label>
+                <label>Developers
+                    <input type="text" id="developers" />
+                </label>
+                <label>Publishers
+                    <input type="text" id="publishers" />
+                </label>
+                <label>Genres
+                    <select id="genres" multiple></select>
+                </label>
+                <label>Game Modes
+                    <select id="modes" multiple></select>
+                </label>
+                <div id="preview-container">
+                    <img id="preview" />
+                </div>
+                <div class="buttons">
+                    <button type="button" id="save" style="background-color:#28a745;color:white;">Save</button>
+                    <button type="button" id="skip" style="background-color:#ffc107;color:white;">Skip</button>
+                </div>
+            </form>
+        </div>
+        <div class="right">
+            <input type="file" id="imageUpload" accept="image/*" />
+            <div class="image-wrapper">
+                <img id="image" />
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>
