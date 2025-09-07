@@ -124,7 +124,14 @@ function setImage(dataUrl) {
     const img = document.getElementById('image');
     img.onload = function(){
         if (cropper) cropper.destroy();
-        cropper = new Cropper(img, {aspectRatio:1, viewMode:2, crop:updatePreview, background:false});
+        cropper = new Cropper(img, {
+            aspectRatio: 1,
+            viewMode: 2,
+            autoCropArea: 1,
+            modal: false,
+            crop: updatePreview,
+            background: false
+        });
         if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
             alert('Imagem menor que 1080px será ampliada.');
         }
@@ -181,7 +188,7 @@ function saveGame() {
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
     fetch('/api/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, fields: fields, image: dataUrl, upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); currentUpload = null; });
 }
 
 function skipGame() {
@@ -189,7 +196,12 @@ function skipGame() {
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
 }
 
-function backGame() {
+function nextGame() {
+    fetch('/api/next', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+}
+
+function previousGame() {
     fetch('/api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
 }
@@ -234,7 +246,8 @@ genBtn.addEventListener('click', generateSummary);
 
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);
-document.getElementById('back').addEventListener('click', backGame);
+document.getElementById('next').addEventListener('click', nextGame);
+document.getElementById('previous').addEventListener('click', previousGame);
 document.getElementById('reset').addEventListener('click', resetFields);
 document.getElementById('revert-image').addEventListener('click', function(){
     fetch(`/api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{

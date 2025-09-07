@@ -144,7 +144,7 @@ button#skip {
   color: #000;
 }
 
-button#back {
+button#previous {
   background: var(--md-sys-color-outline);
   color: var(--md-sys-color-on-surface);
 }
@@ -165,6 +165,28 @@ button#back {
 .cropper-bg {
   background-color: #808080 !important;
   background-image: none !important;
+}
+
+.cropper-modal {
+  background-color: transparent !important;
+}
+
+.cropper-face {
+  background: transparent !important;
+}
+
+.cropper-view-box {
+  outline: 2px solid var(--md-sys-color-secondary) !important;
+  box-shadow: none !important;
+}
+
+.cropper-line,
+.cropper-point {
+  background-color: var(--md-sys-color-secondary) !important;
+}
+
+.cropper-dashed {
+  border-color: var(--md-sys-color-secondary) !important;
 }
 
 .right {

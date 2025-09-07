@@ -4,6 +4,8 @@ import uuid
 import base64
 import io
 from typing import Any
+from threading import Lock
+from tempfile import NamedTemporaryFile
 
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
@@ -21,6 +23,23 @@ app = Flask(__name__)
 
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+
+# Lock to avoid concurrent reads/writes to the processed Excel file
+xlsx_lock = Lock()
+
+
+def safe_write_excel(df: pd.DataFrame, path: str, **kwargs) -> None:
+    """Write DataFrame to Excel atomically to avoid corrupt files."""
+    dir_name = os.path.dirname(path) or '.'
+    tmp = NamedTemporaryFile(delete=False, suffix='.xlsx', dir=dir_name)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        df.to_excel(tmp_path, **kwargs)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -64,7 +83,8 @@ def load_progress(total_rows: int) -> dict:
     progress = {'current_index': 0, 'seq_index': 1, 'skip_queue': []}
     if os.path.exists(PROCESSED_XLSX):
         try:
-            processed = pd.read_excel(PROCESSED_XLSX)
+            with xlsx_lock:
+                processed = pd.read_excel(PROCESSED_XLSX)
             progress['seq_index'] = len(processed) + 1
             progress['current_index'] = len(processed)
         except Exception:
@@ -166,7 +186,8 @@ def api_game():
     processed_row = None
     if os.path.exists(PROCESSED_XLSX):
         try:
-            proc_df = pd.read_excel(PROCESSED_XLSX, dtype=str)
+            with xlsx_lock:
+                proc_df = pd.read_excel(PROCESSED_XLSX, dtype=str)
             if 'Source Index' in proc_df.columns:
                 match = proc_df[proc_df['Source Index'] == str(index)]
                 if not match.empty:
@@ -295,21 +316,22 @@ def api_save():
     upload_name = data.get('upload_name')
     seq_id = f"{progress['seq_index']:07d}"
     df = pd.DataFrame()
-    if os.path.exists(PROCESSED_XLSX):
-        df = pd.read_excel(PROCESSED_XLSX, dtype=str)
-        if 'Source Index' in df.columns:
-            existing = df[df['Source Index'] == str(index)]
-            if not existing.empty:
-                seq_id = existing.iloc[0]['ID']
-                df = df[df['Source Index'] != str(index)]
+    with xlsx_lock:
+        if os.path.exists(PROCESSED_XLSX):
+            df = pd.read_excel(PROCESSED_XLSX, dtype=str)
+            if 'Source Index' in df.columns:
+                existing = df[df['Source Index'] == str(index)]
+                if not existing.empty:
+                    seq_id = existing.iloc[0]['ID']
+                    df = df[df['Source Index'] != str(index)]
+                else:
+                    df = df[df['ID'] != seq_id]
+                    progress['seq_index'] += 1
             else:
                 df = df[df['ID'] != seq_id]
                 progress['seq_index'] += 1
         else:
-            df = df[df['ID'] != seq_id]
             progress['seq_index'] += 1
-    else:
-        progress['seq_index'] += 1
 
     cover_path = ''
     width = height = 0
@@ -340,16 +362,14 @@ def api_save():
         'Height': height,
     }
 
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_excel(PROCESSED_XLSX, index=False)
+    with xlsx_lock:
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        safe_write_excel(df, PROCESSED_XLSX, index=False)
 
     if upload_name:
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
-
-    if index == progress['current_index']:
-        progress['current_index'] += 1
     progress['skip_queue'] = [s for s in progress['skip_queue'] if s['index'] != index]
     save_progress()
     return jsonify({'status': 'ok'})
@@ -369,6 +389,20 @@ def api_skip():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
+    save_progress()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/next', methods=['POST'])
+def api_next():
+    data = request.get_json(silent=True) or {}
+    upload_name = data.get('upload_name')
+    if upload_name:
+        up_path = os.path.join(UPLOAD_DIR, upload_name)
+        if os.path.exists(up_path):
+            os.remove(up_path)
+    if progress['current_index'] < total_games:
+        progress['current_index'] += 1
     save_progress()
     return jsonify({'status': 'ok'})
 
