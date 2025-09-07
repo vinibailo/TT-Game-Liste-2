@@ -81,6 +81,15 @@ label {
   font-size: 0.9rem;
 }
 
+.select-row {
+  display: flex;
+  gap: 12px;
+}
+
+.select-row label {
+  flex: 1;
+}
+
 input, textarea, select {
   background: var(--md-sys-color-surface);
   border: 1px solid var(--md-sys-color-outline);
