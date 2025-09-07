@@ -105,31 +105,29 @@ def ensure_dirs() -> None:
 
 def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
-    if not game_name or not os.environ.get('OPENAI_API_KEY'):
-        return ''
-    try:
-        response = client.chat.completions.create(
-            model='gpt-3.5-turbo',
-            messages=[
-                {
-                    'role': 'system',
-                    'content': (
-                        'Você é um assistente que cria sinopses curtas de jogos '
-                        'em português do Brasil sem revelar spoilers.'
-                    ),
-                },
-                {
-                    'role': 'user',
-                    'content': f"Escreva uma sinopse simples para o jogo '{game_name}'.",
-                },
-            ],
-            temperature=0.7,
-            max_tokens=120,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        app.logger.error(f"OpenAI error: {e}")
-        return ''
+    if not game_name:
+        raise ValueError("game_name is required")
+    if not os.environ.get('OPENAI_API_KEY'):
+        raise RuntimeError("OPENAI_API_KEY not set")
+    response = client.chat.completions.create(
+        model='gpt-3.5-turbo',
+        messages=[
+            {
+                'role': 'system',
+                'content': (
+                    'Você é um assistente que cria sinopses curtas de jogos '
+                    'em português do Brasil sem revelar spoilers.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': f"Escreva uma sinopse simples para o jogo '{game_name}'.",
+            },
+        ],
+        temperature=0.7,
+        max_tokens=120,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # initial load
@@ -215,8 +213,12 @@ def api_game():
 def api_summary():
     data = request.get_json(force=True)
     game_name = data.get('game_name', '')
-    summary_pt = generate_pt_summary(game_name)
-    return jsonify({'summary': summary_pt})
+    try:
+        summary_pt = generate_pt_summary(game_name)
+        return jsonify({'summary': summary_pt})
+    except Exception as e:
+        app.logger.exception("Summary generation failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/upload', methods=['POST'])

@@ -98,11 +98,14 @@ function generateSummary() {
         if (res.summary) {
             document.getElementById('summary').value = res.summary;
             saveSession();
+        } else if (res.error) {
+            console.error(res.error);
+            alert(res.error);
         } else {
             alert('Não foi possível gerar o resumo.');
         }
     })
-    .catch(() => alert('Erro ao gerar resumo.'))
+    .catch(err => { console.error(err); alert('Erro ao gerar resumo.'); })
     .finally(() => {
         btn.disabled = false;
         btn.textContent = 'Gerar Resumo';
