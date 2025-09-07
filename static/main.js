@@ -2,6 +2,7 @@ let cropper = null;
 let currentIndex = 0;
 let currentUpload = null;
 let originalImage = null;
+let genresChoices, modesChoices;
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
@@ -39,11 +40,9 @@ function populateSelect(id, options) {
     });
 }
 
-function setMultiSelect(id, values) {
-    const sel = document.getElementById(id);
-    Array.from(sel.options).forEach(opt => {
-        opt.selected = values && values.includes(opt.value);
-    });
+function setChoices(instance, values) {
+    instance.removeActiveItems();
+    instance.setValue(values || []);
 }
 
 function collectFields() {
@@ -53,8 +52,8 @@ function collectFields() {
         FirstLaunchDate: document.getElementById('first-launch').value,
         Developers: document.getElementById('developers').value,
         Publishers: document.getElementById('publishers').value,
-        Genres: Array.from(document.getElementById('genres').selectedOptions).map(o=>o.value),
-        GameModes: Array.from(document.getElementById('modes').selectedOptions).map(o=>o.value)
+        Genres: genresChoices.getValue(true),
+        GameModes: modesChoices.getValue(true)
     };
 }
 
@@ -78,14 +77,17 @@ function restoreSession() {
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
     document.getElementById('developers').value = data.fields.Developers;
     document.getElementById('publishers').value = data.fields.Publishers;
-    setMultiSelect('genres', data.fields.Genres);
-    setMultiSelect('modes', data.fields.GameModes);
+    setChoices(genresChoices, data.fields.Genres);
+    setChoices(modesChoices, data.fields.GameModes);
     if (data.image) setImage(data.image);
     currentUpload = data.upload_name;
 }
 
 function generateSummary() {
     const name = document.getElementById('name').value;
+    const btn = document.getElementById('generate-summary');
+    btn.disabled = true;
+    btn.textContent = 'Gerando...';
     fetch('/api/summary', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -96,7 +98,14 @@ function generateSummary() {
         if (res.summary) {
             document.getElementById('summary').value = res.summary;
             saveSession();
+        } else {
+            alert('Não foi possível gerar o resumo.');
         }
+    })
+    .catch(() => alert('Erro ao gerar resumo.'))
+    .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Gerar Resumo';
     });
 }
 
@@ -143,8 +152,8 @@ function loadGame() {
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
         document.getElementById('developers').value = data.game.Developers || '';
         document.getElementById('publishers').value = data.game.Publishers || '';
-        setMultiSelect('genres', Array.isArray(data.game.Genres)?data.game.Genres:[]);
-        setMultiSelect('modes', Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
+        setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
+        setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
         if (data.cover) {
             setImage(data.cover);
             originalImage = data.cover;
@@ -206,10 +215,14 @@ document.getElementById('revert-image').addEventListener('click', function(){
     saveSession();
 });
 
-['name','summary','first-launch','developers','publishers','genres','modes'].forEach(id => {
+['name','summary','first-launch','developers','publishers'].forEach(id => {
     document.getElementById(id).addEventListener('change', saveSession);
 });
 
 populateSelect('genres', genresList);
 populateSelect('modes', modesList);
+genresChoices = new Choices('#genres', { removeItemButton: true });
+modesChoices = new Choices('#modes', { removeItemButton: true });
+genresChoices.passedElement.element.addEventListener('change', saveSession);
+modesChoices.passedElement.element.addEventListener('change', saveSession);
 loadGame();
