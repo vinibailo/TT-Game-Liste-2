@@ -163,14 +163,19 @@ def api_game():
         save_progress()
         return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
     row = games_df.iloc[index]
-    seq_id = f"{progress['seq_index']:07d}"
     processed_row = None
     if os.path.exists(PROCESSED_XLSX):
         try:
             proc_df = pd.read_excel(PROCESSED_XLSX, dtype=str)
-            match = proc_df[proc_df['ID'] == seq_id]
-            if not match.empty:
-                processed_row = match.iloc[0]
+            if 'Source Index' in proc_df.columns:
+                match = proc_df[proc_df['Source Index'] == str(index)]
+                if not match.empty:
+                    processed_row = match.iloc[0]
+            else:
+                seq_id = f"{progress['seq_index']:07d}"
+                match = proc_df[proc_df['ID'] == seq_id]
+                if not match.empty:
+                    processed_row = match.iloc[0]
         except Exception:
             processed_row = None
 
@@ -288,8 +293,24 @@ def api_save():
     fields = data.get('fields', {})
     image_b64 = data.get('image')
     upload_name = data.get('upload_name')
-
     seq_id = f"{progress['seq_index']:07d}"
+    df = pd.DataFrame()
+    if os.path.exists(PROCESSED_XLSX):
+        df = pd.read_excel(PROCESSED_XLSX, dtype=str)
+        if 'Source Index' in df.columns:
+            existing = df[df['Source Index'] == str(index)]
+            if not existing.empty:
+                seq_id = existing.iloc[0]['ID']
+                df = df[df['Source Index'] != str(index)]
+            else:
+                df = df[df['ID'] != seq_id]
+                progress['seq_index'] += 1
+        else:
+            df = df[df['ID'] != seq_id]
+            progress['seq_index'] += 1
+    else:
+        progress['seq_index'] += 1
+
     cover_path = ''
     width = height = 0
     if image_b64:
@@ -306,6 +327,7 @@ def api_save():
 
     row = {
         'ID': seq_id,
+        'Source Index': str(index),
         'Name': fields.get('Name', ''),
         'Summary': fields.get('Summary', ''),
         'First Launch Date': fields.get('FirstLaunchDate', ''),
@@ -318,12 +340,7 @@ def api_save():
         'Height': height,
     }
 
-    if os.path.exists(PROCESSED_XLSX):
-        df = pd.read_excel(PROCESSED_XLSX, dtype=str)
-        df = df[df['ID'] != seq_id]
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    else:
-        df = pd.DataFrame([row])
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df.to_excel(PROCESSED_XLSX, index=False)
 
     if upload_name:
@@ -331,7 +348,6 @@ def api_save():
         if os.path.exists(up_path):
             os.remove(up_path)
 
-    progress['seq_index'] += 1
     if index == progress['current_index']:
         progress['current_index'] += 1
     progress['skip_queue'] = [s for s in progress['skip_queue'] if s['index'] != index]
@@ -367,8 +383,6 @@ def api_back():
             os.remove(up_path)
     if progress['current_index'] > 0:
         progress['current_index'] -= 1
-    if progress['seq_index'] > 1:
-        progress['seq_index'] -= 1
     save_progress()
     return jsonify({'status': 'ok'})
 
