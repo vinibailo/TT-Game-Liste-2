@@ -188,6 +188,27 @@ function backGame() {
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
 }
 
+function resetFields() {
+    fetch(`/api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
+        document.getElementById('name').value = data.game.Name || '';
+        document.getElementById('summary').value = data.game.Summary || '';
+        document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
+        document.getElementById('developers').value = data.game.Developers || '';
+        document.getElementById('publishers').value = data.game.Publishers || '';
+        setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
+        setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
+        if (data.cover) {
+            setImage(data.cover);
+            originalImage = data.cover;
+        } else {
+            clearImage();
+            originalImage = null;
+        }
+        currentUpload = null;
+        saveSession();
+    });
+}
+
 document.getElementById('imageUpload').addEventListener('change', function(){
     const file = this.files[0];
     if (!file) return;
@@ -208,14 +229,19 @@ genBtn.addEventListener('click', generateSummary);
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);
 document.getElementById('back').addEventListener('click', backGame);
+document.getElementById('reset').addEventListener('click', resetFields);
 document.getElementById('revert-image').addEventListener('click', function(){
-    if (originalImage) {
-        setImage(originalImage);
-    } else {
-        clearImage();
-    }
-    currentUpload = null;
-    saveSession();
+    fetch(`/api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
+        if (data.cover) {
+            setImage(data.cover);
+            originalImage = data.cover;
+        } else {
+            clearImage();
+            originalImage = null;
+        }
+        currentUpload = null;
+        saveSession();
+    });
 });
 
 ['name','summary','first-launch','developers','publishers'].forEach(id => {

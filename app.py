@@ -103,6 +103,14 @@ def ensure_dirs() -> None:
         os.makedirs(d, exist_ok=True)
 
 
+def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
+    """Return a list of comma-separated values from the first matching key."""
+    for key in keys:
+        if key in row.index:
+            return [g.strip() for g in str(row.get(key, '')).split(',') if g.strip()]
+    return []
+
+
 def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
     if not game_name:
@@ -121,11 +129,13 @@ def generate_pt_summary(game_name: str) -> str:
             },
             {
                 'role': 'user',
-                'content': f"Escreva uma sinopse simples para o jogo '{game_name}'.",
+                'content': (
+                    f"Escreva uma sinopse um pouco mais longa (3 a 5 frases) para o jogo '{game_name}'."
+                ),
             },
         ],
         temperature=0.7,
-        max_tokens=120,
+        max_tokens=200,
     )
     return response.choices[0].message.content.strip()
 
@@ -174,8 +184,8 @@ def api_game():
         cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
 
     if processed_row is not None:
-        genres = [g.strip() for g in str(processed_row.get('Genres', '')).split(',') if g.strip()]
-        modes = [g.strip() for g in str(processed_row.get('Game Modes', '')).split(',') if g.strip()]
+        genres = extract_list(processed_row, ['Genres', 'Genre'])
+        modes = extract_list(processed_row, ['Game Modes', 'Mode'])
         game_fields = {
             'Name': processed_row.get('Name', ''),
             'Summary': processed_row.get('Summary', ''),
@@ -186,8 +196,8 @@ def api_game():
             'GameModes': modes,
         }
     else:
-        genres = [g.strip() for g in str(row.get('Genres', '')).split(',') if g.strip()]
-        modes = [g.strip() for g in str(row.get('Game Modes', '')).split(',') if g.strip()]
+        genres = extract_list(row, ['Genres', 'Genre'])
+        modes = extract_list(row, ['Game Modes', 'Mode'])
         game_fields = {
             'Name': row.get('Name', ''),
             'Summary': row.get('Summary', ''),
@@ -207,6 +217,38 @@ def api_game():
     }
     save_progress()
     return jsonify(data)
+
+
+@app.route('/api/game/<int:index>/raw')
+def api_game_raw(index: int):
+    if index < 0 or index >= total_games:
+        return jsonify({'error': 'invalid index'}), 404
+    row = games_df.iloc[index]
+    cover_path = find_cover(row)
+    cover_data = None
+    if cover_path:
+        img = open_image_auto_rotate(cover_path)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    genres = extract_list(row, ['Genres', 'Genre'])
+    modes = extract_list(row, ['Game Modes', 'Mode'])
+    game_fields = {
+        'Name': row.get('Name', ''),
+        'Summary': row.get('Summary', ''),
+        'FirstLaunchDate': row.get('First Launch Date', ''),
+        'Developers': row.get('Developers', ''),
+        'Publishers': row.get('Publishers', ''),
+        'Genres': genres,
+        'GameModes': modes,
+    }
+    return jsonify({
+        'index': int(index),
+        'total': total_games,
+        'game': game_fields,
+        'cover': cover_data,
+        'seq': progress['seq_index'],
+    })
 
 
 @app.route('/api/summary', methods=['POST'])
