@@ -1,6 +1,7 @@
 let cropper = null;
 let currentIndex = 0;
 let currentUpload = null;
+let originalImage = null;
 const genresList = ['Ação e Aventura','RPG','Horror de Sobrevivência','Puzzle','Plataforma','Shooter'];
 const modesList = ['Single-player','Co-op','PvP'];
 
@@ -69,7 +70,7 @@ function setImage(dataUrl) {
     const img = document.getElementById('image');
     img.onload = function(){
         if (cropper) cropper.destroy();
-        cropper = new Cropper(img, {aspectRatio:1, viewMode:2, crop:updatePreview});
+        cropper = new Cropper(img, {aspectRatio:1, viewMode:2, crop:updatePreview, background:false});
         if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
             alert('Imagem menor que 1080px será ampliada.');
         }
@@ -105,8 +106,10 @@ function loadGame() {
         setMultiSelect('modes', Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
         if (data.cover) {
             setImage(data.cover);
+            originalImage = data.cover;
         } else {
             clearImage();
+            originalImage = null;
         }
         currentUpload = null;
         restoreSession();
@@ -139,6 +142,15 @@ document.getElementById('imageUpload').addEventListener('change', function(){
 
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);
+document.getElementById('revert-image').addEventListener('click', function(){
+    if (originalImage) {
+        setImage(originalImage);
+    } else {
+        clearImage();
+    }
+    currentUpload = null;
+    saveSession();
+});
 
 ['name','summary','first-launch','developers','publishers','genres','modes'].forEach(id => {
     document.getElementById(id).addEventListener('change', saveSession);

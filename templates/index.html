@@ -18,6 +18,15 @@
     <div class="container">
         <div class="left">
             <form id="game-form">
+                <div class="top-row">
+                    <div id="preview-container">
+                        <img id="preview" />
+                    </div>
+                    <div class="buttons">
+                        <button type="button" id="save">Save</button>
+                        <button type="button" id="skip">Skip</button>
+                    </div>
+                </div>
                 <label>Name
                     <input type="text" id="name" />
                 </label>
@@ -39,17 +48,11 @@
                 <label>Game Modes
                     <select id="modes" multiple></select>
                 </label>
-                <div id="preview-container">
-                    <img id="preview" />
-                </div>
-                <div class="buttons">
-                    <button type="button" id="save">Save</button>
-                    <button type="button" id="skip">Skip</button>
-                </div>
             </form>
         </div>
         <div class="right">
             <input type="file" id="imageUpload" accept="image/*" />
+            <button type="button" id="revert-image">Revert Image</button>
             <div class="image-wrapper">
                 <img id="image" />
             </div>
