@@ -2,8 +2,33 @@ let cropper = null;
 let currentIndex = 0;
 let currentUpload = null;
 let originalImage = null;
-const genresList = ['Ação e Aventura','RPG','Horror de Sobrevivência','Puzzle','Plataforma','Shooter'];
-const modesList = ['Single-player','Co-op','PvP'];
+const genresList = [
+    'Ação e Aventura',
+    'Cartas e Tabuleiro',
+    'Clássicos',
+    'Família e Crianças',
+    'Luta',
+    'Indie',
+    'Multijogador',
+    'Plataformas',
+    'Quebra-cabeça e Trivia',
+    'Corrida e Voo',
+    'RPG',
+    'Tiro',
+    'Simulação',
+    'Esportes',
+    'Estratégia',
+    'Horror de Sobrevivência',
+    'Mundo Aberto',
+    'Outros'
+];
+const modesList = [
+    'Single-player',
+    'Multiplayer local',
+    'Multiplayer online',
+    'Cooperativo (Co-op)',
+    'Competitivo (PvP)'
+];
 
 function populateSelect(id, options) {
     const sel = document.getElementById(id);
@@ -60,11 +85,11 @@ function restoreSession() {
 }
 
 function generateSummary() {
-    const english = document.getElementById('summary').value;
+    const name = document.getElementById('name').value;
     fetch('/api/summary', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({english_summary: english})
+        body: JSON.stringify({game_name: name})
     })
     .then(r => r.json())
     .then(res => {

@@ -8,7 +8,7 @@ from typing import Any
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
 import pandas as pd
-import openai
+from openai import OpenAI
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_XLSX = 'processed_games.xlsx'
@@ -19,7 +19,8 @@ COVERS_DIR = 'covers_out'
 
 app = Flask(__name__)
 
-openai.api_key = os.environ.get('OPENAI_API_KEY', '')
+# Initialize OpenAI client using API key from environment
+client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -102,20 +103,30 @@ def ensure_dirs() -> None:
         os.makedirs(d, exist_ok=True)
 
 
-def generate_pt_summary(english_summary: str) -> str:
-    if not english_summary or not openai.api_key:
+def generate_pt_summary(game_name: str) -> str:
+    """Generate a simple spoiler-free Portuguese summary for a game by name."""
+    if not game_name or not client.api_key:
         return ''
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model='gpt-3.5-turbo',
             messages=[
-                {'role': 'system', 'content': 'Você é um assistente que resume descrições de jogos em português do Brasil.'},
-                {'role': 'user', 'content': english_summary},
+                {
+                    'role': 'system',
+                    'content': (
+                        'Você é um assistente que cria sinopses curtas de jogos '
+                        'em português do Brasil sem revelar spoilers.'
+                    ),
+                },
+                {
+                    'role': 'user',
+                    'content': f"Escreva uma sinopse simples para o jogo '{game_name}'.",
+                },
             ],
-            temperature=0.5,
+            temperature=0.7,
             max_tokens=120,
         )
-        return response['choices'][0]['message']['content'].strip()
+        return response.choices[0].message.content.strip()
     except Exception:
         return ''
 
@@ -200,8 +211,8 @@ def api_game():
 @app.route('/api/summary', methods=['POST'])
 def api_summary():
     data = request.get_json(force=True)
-    english_summary = data.get('english_summary', '')
-    summary_pt = generate_pt_summary(english_summary)
+    game_name = data.get('game_name', '')
+    summary_pt = generate_pt_summary(game_name)
     return jsonify({'summary': summary_pt})
 
 
