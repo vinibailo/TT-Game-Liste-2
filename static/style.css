@@ -135,6 +135,11 @@ button#skip {
   color: #000;
 }
 
+button#back {
+  background: var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+}
+
 .top-row {
   display: flex;
   justify-content: space-between;
