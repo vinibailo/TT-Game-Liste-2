@@ -101,20 +101,20 @@ input:focus, textarea:focus, select:focus {
 }
 
 #preview-container {
-  margin-top: auto;
+  margin-top: 0;
   text-align: center;
 }
 
 #preview {
   max-width: 100%;
   max-height: 200px;
-  margin-top: 8px;
+  margin-top: 0;
   border-radius: 8px;
   background: var(--md-sys-color-surface);
 }
 
 .buttons {
-  margin-top: 8px;
+  margin-top: 0;
   display: flex;
   gap: 8px;
   justify-content: flex-end;
@@ -133,6 +133,24 @@ button {
 button#skip {
   background: var(--md-sys-color-secondary);
   color: #000;
+}
+
+.top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+
+
+#revert-image {
+  margin-bottom: 8px;
+}
+
+.cropper-bg {
+  background-color: #808080 !important;
+  background-image: none !important;
 }
 
 .right {
