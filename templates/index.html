@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Game Editor</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
     <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.js"></script>
 </head>
@@ -41,8 +43,8 @@
                     <img id="preview" />
                 </div>
                 <div class="buttons">
-                    <button type="button" id="save" style="background-color:#28a745;color:white;">Save</button>
-                    <button type="button" id="skip" style="background-color:#ffc107;color:white;">Skip</button>
+                    <button type="button" id="save">Save</button>
+                    <button type="button" id="skip">Skip</button>
                 </div>
             </form>
         </div>
