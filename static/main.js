@@ -59,6 +59,22 @@ function restoreSession() {
     currentUpload = data.upload_name;
 }
 
+function generateSummary() {
+    const english = document.getElementById('summary').value;
+    fetch('/api/summary', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({english_summary: english})
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.summary) {
+            document.getElementById('summary').value = res.summary;
+            saveSession();
+        }
+    });
+}
+
 function updatePreview() {
     if (!cropper) return;
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
@@ -144,6 +160,13 @@ document.getElementById('imageUpload').addEventListener('change', function(){
         .then(r=>r.json())
         .then(res => { currentUpload = res.filename; setImage(res.data); });
 });
+
+const genBtn = document.createElement('button');
+genBtn.type = 'button';
+genBtn.id = 'generate-summary';
+genBtn.textContent = 'Gerar Resumo';
+document.getElementById('summary').parentNode.appendChild(genBtn);
+genBtn.addEventListener('click', generateSummary);
 
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);

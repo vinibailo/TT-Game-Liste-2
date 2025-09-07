@@ -8,6 +8,7 @@ from typing import Any
 from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
 import pandas as pd
+import openai
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_XLSX = 'processed_games.xlsx'
@@ -17,6 +18,8 @@ PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
 
 app = Flask(__name__)
+
+openai.api_key = os.environ.get('OPENAI_API_KEY', '')
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -99,6 +102,24 @@ def ensure_dirs() -> None:
         os.makedirs(d, exist_ok=True)
 
 
+def generate_pt_summary(english_summary: str) -> str:
+    if not english_summary or not openai.api_key:
+        return ''
+    try:
+        response = openai.ChatCompletion.create(
+            model='gpt-3.5-turbo',
+            messages=[
+                {'role': 'system', 'content': 'Você é um assistente que resume descrições de jogos em português do Brasil.'},
+                {'role': 'user', 'content': english_summary},
+            ],
+            temperature=0.5,
+            max_tokens=120,
+        )
+        return response['choices'][0]['message']['content'].strip()
+    except Exception:
+        return ''
+
+
 # initial load
 ensure_dirs()
 games_df = load_games()
@@ -174,6 +195,14 @@ def api_game():
     }
     save_progress()
     return jsonify(data)
+
+
+@app.route('/api/summary', methods=['POST'])
+def api_summary():
+    data = request.get_json(force=True)
+    english_summary = data.get('english_summary', '')
+    summary_pt = generate_pt_summary(english_summary)
+    return jsonify({'summary': summary_pt})
 
 
 @app.route('/api/upload', methods=['POST'])
