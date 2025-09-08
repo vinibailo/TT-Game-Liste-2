@@ -101,7 +101,7 @@ function generateSummary() {
     const btn = document.getElementById('generate-summary');
     btn.disabled = true;
     btn.textContent = 'Gerando...';
-    fetch('/api/summary', {
+    fetch('api/summary', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({game_name: name})
@@ -165,7 +165,7 @@ function clearImage() {
 }
 
 function loadGame() {
-    fetch('/api/game').then(r=>r.json()).then(data => {
+    fetch('api/game').then(r=>r.json()).then(data => {
         if (data.done) {
             document.body.innerHTML = `<h2>${data.message}</h2>`;
             return;
@@ -203,7 +203,7 @@ function saveGame() {
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
-    fetch('/api/save', {
+    fetch('api/save', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({index: currentIndex, fields: fields, image: dataUrl, upload_name: currentUpload})
@@ -219,7 +219,7 @@ function saveGame() {
 }
 
 function skipGame() {
-    fetch('/api/skip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, upload_name: currentUpload})})
+    fetch('api/skip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
       .catch(err => {
           console.error(err);
@@ -228,7 +228,7 @@ function skipGame() {
 }
 
 function nextGame() {
-    fetch('/api/next', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+    fetch('api/next', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
       .catch(err => {
           console.error(err);
@@ -237,7 +237,7 @@ function nextGame() {
 }
 
 function previousGame() {
-    fetch('/api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+    fetch('api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
       .catch(err => {
           console.error(err);
@@ -246,7 +246,7 @@ function previousGame() {
 }
 
 function resetFields() {
-    fetch(`/api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
+    fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         document.getElementById('name').value = data.game.Name || '';
         document.getElementById('summary').value = data.game.Summary || '';
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
@@ -275,7 +275,7 @@ imageUploadInput.addEventListener('change', function(){
     if (!file) return;
     const formData = new FormData();
     formData.append('file', file);
-    fetch('/api/upload', {method:'POST', body: formData})
+    fetch('api/upload', {method:'POST', body: formData})
         .then(r=>r.json())
         .then(res => { currentUpload = res.filename; setImage(res.data); })
         .catch(err => {
@@ -297,7 +297,7 @@ document.getElementById('next').addEventListener('click', nextGame);
 document.getElementById('previous').addEventListener('click', previousGame);
 document.getElementById('reset').addEventListener('click', resetFields);
 document.getElementById('revert-image').addEventListener('click', function(){
-    fetch(`/api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
+    fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         if (data.cover) {
             setImage(data.cover);
             originalImage = data.cover;
