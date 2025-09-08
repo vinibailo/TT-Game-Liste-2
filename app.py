@@ -19,7 +19,7 @@ UPLOAD_DIR = 'uploaded_sources'
 PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
 
-app = Flask(__name__, static_folder='frontend/dist/assets', static_url_path='/assets', template_folder='frontend/dist')
+app = Flask(__name__)
 
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
@@ -173,7 +173,7 @@ save_progress()
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', total=total_games)
 
 
 @app.route('/api/game')
