@@ -110,6 +110,7 @@ def next_game_index() -> int:
         if item['countdown'] <= 0:
             index = item['index']
             del progress['skip_queue'][i]
+            progress['current_index'] = index
             save_progress()
             return index
     return progress['current_index']
@@ -421,6 +422,21 @@ def api_skip():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
+    save_progress()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/set_index', methods=['POST'])
+def api_set_index():
+    data = request.get_json(silent=True) or {}
+    index = int(data.get('index', 0))
+    upload_name = data.get('upload_name')
+    if upload_name:
+        up_path = os.path.join(UPLOAD_DIR, upload_name)
+        if os.path.exists(up_path):
+            os.remove(up_path)
+    if 0 <= index <= total_games:
+        progress['current_index'] = index
     save_progress()
     return jsonify({'status': 'ok'})
 

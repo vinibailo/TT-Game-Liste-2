@@ -242,7 +242,8 @@ function skipGame() {
 }
 
 function nextGame() {
-    fetch('api/next', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+    const idx = currentIndex + 1;
+    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: idx, upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
       .catch(err => {
           console.error(err);
@@ -251,7 +252,8 @@ function nextGame() {
 }
 
 function previousGame() {
-    fetch('api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
+    const idx = currentIndex - 1;
+    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: idx, upload_name: currentUpload})})
       .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
       .catch(err => {
           console.error(err);
