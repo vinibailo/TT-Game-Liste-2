@@ -59,6 +59,11 @@ function collectFields() {
     };
 }
 
+function setNavDisabled(state) {
+    document.getElementById('next').disabled = state;
+    document.getElementById('previous').disabled = state;
+}
+
 function saveSession() {
     const imgSrc = document.getElementById('image').src;
     const data = {
@@ -165,7 +170,8 @@ function clearImage() {
 }
 
 function loadGame() {
-    fetch('api/game')
+    setNavDisabled(true);
+    return fetch('api/game')
         .then(async r => {
             const txt = await r.text();
             try { return JSON.parse(txt); }
@@ -209,7 +215,8 @@ function loadGame() {
         .catch(err => {
             console.error(err.stack || err);
             showAlert('Failed to load game: ' + err.message, 'warning');
-        });
+        })
+        .finally(() => setNavDisabled(false));
 }
 
 function saveGame() {
@@ -243,22 +250,28 @@ function skipGame() {
 
 function nextGame() {
     const idx = currentIndex + 1;
-    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: idx, upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
+    currentIndex = idx;
+    setNavDisabled(true);
+    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, upload_name: currentUpload})})
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); return loadGame(); })
       .catch(err => {
           console.error(err);
           showAlert('Failed to move to next game: ' + err.message, 'warning');
-      });
+      })
+      .finally(() => setNavDisabled(false));
 }
 
 function previousGame() {
     const idx = currentIndex - 1;
-    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: idx, upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
+    currentIndex = idx;
+    setNavDisabled(true);
+    fetch('api/set_index', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, upload_name: currentUpload})})
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); return loadGame(); })
       .catch(err => {
           console.error(err);
           showAlert('Failed to move to previous game: ' + err.message, 'warning');
-      });
+      })
+      .finally(() => setNavDisabled(false));
 }
 
 function resetFields() {
