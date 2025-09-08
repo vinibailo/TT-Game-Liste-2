@@ -3,9 +3,9 @@ import json
 import uuid
 import base64
 import io
+import sqlite3
 from typing import Any
 from threading import Lock
-from tempfile import NamedTemporaryFile
 
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from PIL import Image, ExifTags
@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
-PROCESSED_XLSX = 'processed_games.xlsx'
+PROCESSED_DB = 'processed_games.db'
 PROGRESS_JSON = 'progress.json'
 UPLOAD_DIR = 'uploaded_sources'
 PROCESSED_DIR = 'processed_covers'
@@ -28,22 +28,27 @@ APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
-# Lock to avoid concurrent reads/writes to the processed Excel file
-xlsx_lock = Lock()
-
-
-def safe_write_excel(df: pd.DataFrame, path: str, **kwargs) -> None:
-    """Write DataFrame to Excel atomically to avoid corrupt files."""
-    dir_name = os.path.dirname(path) or '.'
-    tmp = NamedTemporaryFile(delete=False, suffix='.xlsx', dir=dir_name)
-    tmp_path = tmp.name
-    tmp.close()
-    try:
-        df.to_excel(tmp_path, **kwargs)
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+# SQLite setup for processed games
+db_lock = Lock()
+db = sqlite3.connect(PROCESSED_DB, check_same_thread=False)
+db.row_factory = sqlite3.Row
+with db:
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS processed_games (
+            "ID" TEXT PRIMARY KEY,
+            "Source Index" TEXT UNIQUE,
+            "Name" TEXT,
+            "Summary" TEXT,
+            "First Launch Date" TEXT,
+            "Developers" TEXT,
+            "Publishers" TEXT,
+            "Genres" TEXT,
+            "Game Modes" TEXT,
+            "Cover Path" TEXT,
+            "Width" INTEGER,
+            "Height" INTEGER
+        )'''
+    )
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -85,35 +90,17 @@ def load_progress(total_rows: int) -> dict:
         with open(PROGRESS_JSON, 'r') as f:
             return json.load(f)
     progress = {'current_index': 0, 'seq_index': 1, 'skip_queue': []}
-    if os.path.exists(PROCESSED_XLSX):
-        try:
-            with xlsx_lock:
-                processed = pd.read_excel(PROCESSED_XLSX)
-            progress['seq_index'] = len(processed) + 1
-            progress['current_index'] = len(processed)
-        except Exception:
-            pass
+    with db_lock:
+        cur = db.execute('SELECT COUNT(*) FROM processed_games')
+        count = cur.fetchone()[0]
+        progress['seq_index'] = count + 1
+        progress['current_index'] = count
     return progress
 
 
 def save_progress() -> None:
     with open(PROGRESS_JSON, 'w') as f:
         json.dump(progress, f)
-
-
-def next_game_index() -> int:
-    # decrement countdowns
-    for item in progress['skip_queue']:
-        item['countdown'] -= 1
-    # check for returned skipped items
-    for i, item in enumerate(progress['skip_queue']):
-        if item['countdown'] <= 0:
-            index = item['index']
-            del progress['skip_queue'][i]
-            progress['current_index'] = index
-            save_progress()
-            return index
-    return progress['current_index']
 
 
 def find_cover(row: pd.Series) -> str | None:
@@ -228,39 +215,32 @@ def index():
     return render_template('index.html', total=total_games)
 
 
-@app.route('/api/game')
-def api_game():
-    index = next_game_index()
-    if index >= total_games:
-        save_progress()
-        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+def process_skip_queue() -> None:
+    for item in progress['skip_queue']:
+        item['countdown'] -= 1
+    for i, item in enumerate(progress['skip_queue']):
+        if item['countdown'] <= 0:
+            progress['current_index'] = item['index']
+            del progress['skip_queue'][i]
+            break
+
+
+def build_game_payload(index: int) -> dict:
     row = games_df.iloc[index]
     processed_row = None
-    if os.path.exists(PROCESSED_XLSX):
-        try:
-            with xlsx_lock:
-                proc_df = pd.read_excel(PROCESSED_XLSX, dtype=str)
-            if 'Source Index' in proc_df.columns:
-                match = proc_df[proc_df['Source Index'] == str(index)]
-                if not match.empty:
-                    processed_row = match.iloc[0]
-            else:
-                seq_id = f"{progress['seq_index']:07d}"
-                match = proc_df[proc_df['ID'] == seq_id]
-                if not match.empty:
-                    processed_row = match.iloc[0]
-        except Exception:
-            processed_row = None
+    with db_lock:
+        cur = db.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
+        processed_row = cur.fetchone()
 
-    if processed_row is not None and processed_row.get('Cover Path'):
-        img = open_image_auto_rotate(processed_row.get('Cover Path'))
+    if processed_row is not None and processed_row['Cover Path']:
+        img = open_image_auto_rotate(processed_row['Cover Path'])
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
         cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
     else:
         cover_data = find_cover(row)
 
-    source_row = processed_row if processed_row is not None else row
+    source_row = pd.Series(dict(processed_row)) if processed_row is not None else row
     genres = extract_list(source_row, ['Genres', 'Genre'])
     modes = extract_list(source_row, ['Game Modes', 'Mode'])
     missing: list[str] = []
@@ -274,7 +254,7 @@ def api_game():
         'GameModes': modes,
     }
 
-    data = {
+    return {
         'index': int(index),
         'total': total_games,
         'game': game_fields,
@@ -282,6 +262,16 @@ def api_game():
         'seq': progress['seq_index'],
         'missing': missing,
     }
+
+
+@app.route('/api/game')
+def api_game():
+    process_skip_queue()
+    index = progress['current_index']
+    if index >= total_games:
+        save_progress()
+        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+    data = build_game_payload(index)
     save_progress()
     return jsonify(data)
 
@@ -347,23 +337,13 @@ def api_save():
     fields = data.get('fields', {})
     image_b64 = data.get('image')
     upload_name = data.get('upload_name')
-    seq_id = f"{progress['seq_index']:07d}"
-    df = pd.DataFrame()
-    with xlsx_lock:
-        if os.path.exists(PROCESSED_XLSX):
-            df = pd.read_excel(PROCESSED_XLSX, dtype=str)
-            if 'Source Index' in df.columns:
-                existing = df[df['Source Index'] == str(index)]
-                if not existing.empty:
-                    seq_id = existing.iloc[0]['ID']
-                    df = df[df['Source Index'] != str(index)]
-                else:
-                    df = df[df['ID'] != seq_id]
-                    progress['seq_index'] += 1
-            else:
-                df = df[df['ID'] != seq_id]
-                progress['seq_index'] += 1
+    with db_lock:
+        cur = db.execute('SELECT "ID" FROM processed_games WHERE "Source Index"=?', (str(index),))
+        existing = cur.fetchone()
+        if existing:
+            seq_id = existing['ID']
         else:
+            seq_id = f"{progress['seq_index']:07d}"
             progress['seq_index'] += 1
 
     cover_path = ''
@@ -381,23 +361,50 @@ def api_save():
         width, height = img.size
 
     row = {
-        'ID': seq_id,
-        'Source Index': str(index),
-        'Name': fields.get('Name', ''),
-        'Summary': fields.get('Summary', ''),
-        'First Launch Date': fields.get('FirstLaunchDate', ''),
-        'Developers': fields.get('Developers', ''),
-        'Publishers': fields.get('Publishers', ''),
-        'Genres': ', '.join(fields.get('Genres', [])),
-        'Game Modes': ', '.join(fields.get('GameModes', [])),
-        'Cover Path': cover_path,
-        'Width': width,
-        'Height': height,
+        "ID": seq_id,
+        "Source Index": str(index),
+        "Name": fields.get('Name', ''),
+        "Summary": fields.get('Summary', ''),
+        "First Launch Date": fields.get('FirstLaunchDate', ''),
+        "Developers": fields.get('Developers', ''),
+        "Publishers": fields.get('Publishers', ''),
+        "Genres": ', '.join(fields.get('Genres', [])),
+        "Game Modes": ', '.join(fields.get('GameModes', [])),
+        "Cover Path": cover_path,
+        "Width": width,
+        "Height": height,
     }
 
-    with xlsx_lock:
-        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-        safe_write_excel(df, PROCESSED_XLSX, index=False)
+    with db_lock:
+        if existing:
+            db.execute(
+                '''UPDATE processed_games SET
+                    "Name"=?, "Summary"=?, "First Launch Date"=?,
+                    "Developers"=?, "Publishers"=?, "Genres"=?,
+                    "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
+                   WHERE "ID"=?''',
+                (
+                    row['Name'], row['Summary'], row['First Launch Date'],
+                    row['Developers'], row['Publishers'], row['Genres'],
+                    row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
+                    seq_id,
+                ),
+            )
+        else:
+            db.execute(
+                '''INSERT INTO processed_games (
+                    "ID", "Source Index", "Name", "Summary",
+                    "First Launch Date", "Developers", "Publishers",
+                    "Genres", "Game Modes", "Cover Path", "Width", "Height"
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    row['ID'], row['Source Index'], row['Name'], row['Summary'],
+                    row['First Launch Date'], row['Developers'], row['Publishers'],
+                    row['Genres'], row['Game Modes'], row['Cover Path'],
+                    row['Width'], row['Height'],
+                ),
+            )
+        db.commit()
 
     if upload_name:
         up_path = os.path.join(UPLOAD_DIR, upload_name)
@@ -451,8 +458,14 @@ def api_next():
             os.remove(up_path)
     if progress['current_index'] < total_games:
         progress['current_index'] += 1
+    process_skip_queue()
+    index = progress['current_index']
+    if index >= total_games:
+        save_progress()
+        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+    data = build_game_payload(index)
     save_progress()
-    return jsonify({'status': 'ok'})
+    return jsonify(data)
 
 
 @app.route('/api/back', methods=['POST'])
@@ -465,8 +478,11 @@ def api_back():
             os.remove(up_path)
     if progress['current_index'] > 0:
         progress['current_index'] -= 1
+    process_skip_queue()
+    index = progress['current_index']
+    data = build_game_payload(index)
     save_progress()
-    return jsonify({'status': 'ok'})
+    return jsonify(data)
 
 
 if __name__ == '__main__':
