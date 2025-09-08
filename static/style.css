@@ -6,6 +6,8 @@
   --md-sys-color-secondary: #CFD11A;
   --md-sys-color-outline: #222222;
   --md-sys-color-primary-contrast: #D4D2D5;
+  --md-sys-color-info: #1E88E5;
+  --md-sys-color-success: #388E3C;
 }
 
 html, body {
@@ -149,6 +151,18 @@ button#previous {
   color: var(--md-sys-color-on-surface);
 }
 
+button#next {
+  background: var(--md-sys-color-info);
+}
+
+button#save {
+  background: var(--md-sys-color-success);
+}
+
+button#reset {
+  background: var(--md-sys-color-primary);
+}
+
 .top-row {
   display: flex;
   justify-content: space-between;
@@ -268,5 +282,27 @@ button#previous {
   background: var(--md-sys-color-primary);
   border: 1px solid var(--md-sys-color-primary);
   color: var(--md-sys-color-primary-contrast);
+}
+
+#alert-banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 24px;
+  border-radius: 4px;
+  display: none;
+  z-index: 1000;
+  font-weight: 500;
+}
+
+#alert-banner.success {
+  background: var(--md-sys-color-success);
+  color: #fff;
+}
+
+#alert-banner.warning {
+  background: var(--md-sys-color-secondary);
+  color: #000;
 }
 
