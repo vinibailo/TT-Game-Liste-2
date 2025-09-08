@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Box,
   Flex,
@@ -11,9 +11,11 @@ import {
   Textarea,
   Select,
   Button,
-  Image,
-  Stack
+  Stack,
+  SimpleGrid
 } from '@chakra-ui/react'
+import 'cropperjs/element'
+import 'cropperjs/dist/cropper.css'
 
 const genresList = [
   'Ação e Aventura',
@@ -61,6 +63,7 @@ export default function App() {
   const [uploadName, setUploadName] = useState(null)
   const [done, setDone] = useState(false)
   const [message, setMessage] = useState('')
+  const cropperRef = useRef(null)
 
   useEffect(() => {
     loadGame()
@@ -186,7 +189,14 @@ export default function App() {
   }
 
   function saveGame() {
-    const dataUrl = image
+    let dataUrl = image
+    const cropperEl = cropperRef.current
+    if (cropperEl && cropperEl.cropper) {
+      const canvas = cropperEl.cropper.getCroppedCanvas()
+      if (canvas) {
+        dataUrl = canvas.toDataURL()
+      }
+    }
     const payload = {
       index,
       fields,
@@ -315,42 +325,48 @@ export default function App() {
   }
 
   return (
-    <Flex direction="column" p={4} gap={4}>
+    <Flex direction="column" p={4} gap={4} height="100vh">
       <Box>
-        <Heading id="game-name">{fields.Name}</Heading>
+        <Heading id="game-name" color="game.500">{fields.Name}</Heading>
         <Text id="caption">Processados: {seq - 1} de {total}</Text>
-        <Progress value={total ? ((seq - 1) / total) * 100 : 0} />
+        <Progress value={total ? ((seq - 1) / total) * 100 : 0} colorScheme="brand" />
       </Box>
-      <Flex gap={4}>
-        <Box flex="1">
+      <Flex gap={4} flex="1" overflow="hidden">
+        <Box flex="1" display="flex" flexDirection="column" gap={3}>
+          <FormControl>
+            <Input type="file" onChange={handleUpload} accept="image/*" />
+          </FormControl>
+          {image && (
+            <cropper-cropper
+              ref={cropperRef}
+              src={image}
+              style={{ width: '100%', height: '100%' }}
+            ></cropper-cropper>
+          )}
+          <Stack direction="row" spacing={2} mt={3}>
+            <Button onClick={previousGame}>Previous</Button>
+            <Button onClick={nextGame}>Next</Button>
+            <Button onClick={saveGame} colorScheme="brand">Save</Button>
+            <Button onClick={skipGame} colorScheme="yellow">Skip</Button>
+            <Button onClick={resetFields}>Reset</Button>
+            <Button onClick={revertImage}>Revert Image</Button>
+          </Stack>
+        </Box>
+        <Box flex="1" overflowY="auto">
           <form id="game-form">
-            <Stack spacing={3}>
-              <FormControl>
-                <Input type="file" onChange={handleUpload} accept="image/*" />
-              </FormControl>
-              {image && (
-                <Image src={image} alt="preview" />
-              )}
-              <Stack direction="row" spacing={2}>
-                <Button onClick={previousGame}>Previous</Button>
-                <Button onClick={nextGame}>Next</Button>
-                <Button onClick={saveGame} colorScheme="green">Save</Button>
-                <Button onClick={skipGame} colorScheme="yellow">Skip</Button>
-                <Button onClick={resetFields}>Reset</Button>
-                <Button onClick={revertImage}>Revert Image</Button>
-              </Stack>
+            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
               <FormControl>
                 <FormLabel>Name</FormLabel>
                 <Input name="Name" value={fields.Name} onChange={handleChange} />
               </FormControl>
               <FormControl>
+                <FormLabel>First Launch Date</FormLabel>
+                <Input name="FirstLaunchDate" value={fields.FirstLaunchDate} onChange={handleChange} />
+              </FormControl>
+              <FormControl gridColumn="span 2">
                 <FormLabel>Summary</FormLabel>
                 <Textarea name="Summary" value={fields.Summary} onChange={handleChange} />
                 <Button id="generate-summary" mt={2} onClick={generateSummary}>Gerar Resumo</Button>
-              </FormControl>
-              <FormControl>
-                <FormLabel>First Launch Date</FormLabel>
-                <Input name="FirstLaunchDate" value={fields.FirstLaunchDate} onChange={handleChange} />
               </FormControl>
               <FormControl>
                 <FormLabel>Developers</FormLabel>
@@ -372,7 +388,7 @@ export default function App() {
                   {modesList.map(m => <option key={m} value={m}>{m}</option>)}
                 </Select>
               </FormControl>
-            </Stack>
+            </SimpleGrid>
           </form>
         </Box>
       </Flex>
