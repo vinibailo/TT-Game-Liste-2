@@ -146,8 +146,20 @@ def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
     """Return a list of comma-separated values from the first matching key."""
     for key in keys:
         if key in row.index:
-            return [g.strip() for g in str(row.get(key, '')).split(',') if g.strip()]
+            val = row.get(key, '')
+            if pd.isna(val):
+                return []
+            return [g.strip() for g in str(val).split(',') if g.strip()]
     return []
+
+
+def get_cell(row: pd.Series, key: str, missing: list[str]) -> str:
+    """Return the cell value or an empty string if missing, tracking missing fields."""
+    val = row.get(key, '')
+    if pd.isna(val) or val is None:
+        missing.append(key)
+        return ''
+    return val
 
 
 def generate_pt_summary(game_name: str) -> str:
@@ -224,30 +236,19 @@ def api_game():
     else:
         cover_data = find_cover(row)
 
-    if processed_row is not None:
-        genres = extract_list(processed_row, ['Genres', 'Genre'])
-        modes = extract_list(processed_row, ['Game Modes', 'Mode'])
-        game_fields = {
-            'Name': processed_row.get('Name', ''),
-            'Summary': processed_row.get('Summary', ''),
-            'FirstLaunchDate': processed_row.get('First Launch Date', ''),
-            'Developers': processed_row.get('Developers', ''),
-            'Publishers': processed_row.get('Publishers', ''),
-            'Genres': genres,
-            'GameModes': modes,
-        }
-    else:
-        genres = extract_list(row, ['Genres', 'Genre'])
-        modes = extract_list(row, ['Game Modes', 'Mode'])
-        game_fields = {
-            'Name': row.get('Name', ''),
-            'Summary': row.get('Summary', ''),
-            'FirstLaunchDate': row.get('First Launch Date', ''),
-            'Developers': row.get('Developers', ''),
-            'Publishers': row.get('Publishers', ''),
-            'Genres': genres,
-            'GameModes': modes,
-        }
+    source_row = processed_row if processed_row is not None else row
+    genres = extract_list(source_row, ['Genres', 'Genre'])
+    modes = extract_list(source_row, ['Game Modes', 'Mode'])
+    missing: list[str] = []
+    game_fields = {
+        'Name': get_cell(source_row, 'Name', missing),
+        'Summary': get_cell(source_row, 'Summary', missing),
+        'FirstLaunchDate': get_cell(source_row, 'First Launch Date', missing),
+        'Developers': get_cell(source_row, 'Developers', missing),
+        'Publishers': get_cell(source_row, 'Publishers', missing),
+        'Genres': genres,
+        'GameModes': modes,
+    }
 
     data = {
         'index': int(index),
@@ -255,6 +256,7 @@ def api_game():
         'game': game_fields,
         'cover': cover_data,
         'seq': progress['seq_index'],
+        'missing': missing,
     }
     save_progress()
     return jsonify(data)
@@ -268,12 +270,13 @@ def api_game_raw(index: int):
     cover_data = find_cover(row)
     genres = extract_list(row, ['Genres', 'Genre'])
     modes = extract_list(row, ['Game Modes', 'Mode'])
+    dummy: list[str] = []
     game_fields = {
-        'Name': row.get('Name', ''),
-        'Summary': row.get('Summary', ''),
-        'FirstLaunchDate': row.get('First Launch Date', ''),
-        'Developers': row.get('Developers', ''),
-        'Publishers': row.get('Publishers', ''),
+        'Name': get_cell(row, 'Name', dummy),
+        'Summary': get_cell(row, 'Summary', dummy),
+        'FirstLaunchDate': get_cell(row, 'First Launch Date', dummy),
+        'Developers': get_cell(row, 'Developers', dummy),
+        'Publishers': get_cell(row, 'Publishers', dummy),
         'Genres': genres,
         'GameModes': modes,
     }
