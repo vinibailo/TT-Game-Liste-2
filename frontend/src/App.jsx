@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Box,
   Flex,
@@ -14,6 +14,8 @@ import {
   Stack,
   SimpleGrid
 } from '@chakra-ui/react'
+import 'cropperjs/element'
+import 'cropperjs/dist/cropper.css'
 
 const genresList = [
   'Ação e Aventura',
@@ -61,6 +63,7 @@ export default function App() {
   const [uploadName, setUploadName] = useState(null)
   const [done, setDone] = useState(false)
   const [message, setMessage] = useState('')
+  const cropperRef = useRef(null)
 
   useEffect(() => {
     loadGame()
@@ -186,10 +189,18 @@ export default function App() {
   }
 
   function saveGame() {
+    let dataUrl = image
+    const cropperEl = cropperRef.current
+    if (cropperEl && cropperEl.cropper) {
+      const canvas = cropperEl.cropper.getCroppedCanvas()
+      if (canvas) {
+        dataUrl = canvas.toDataURL()
+      }
+    }
     const payload = {
       index,
       fields,
-      image,
+      image: dataUrl,
       upload_name: uploadName
     }
     fetch('/api/save', {
@@ -326,11 +337,11 @@ export default function App() {
             <Input type="file" onChange={handleUpload} accept="image/*" />
           </FormControl>
           {image && (
-            <Box
-              as="img"
+            <cropper-cropper
+              ref={cropperRef}
               src={image}
-              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            />
+              style={{ width: '100%', height: '100%' }}
+            ></cropper-cropper>
           )}
           <Stack direction="row" spacing={2} mt={3}>
             <Button onClick={previousGame}>Previous</Button>
