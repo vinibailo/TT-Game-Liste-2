@@ -84,6 +84,16 @@ function restoreSession() {
     currentUpload = data.upload_name;
 }
 
+function showAlert(message, type = 'success') {
+    const banner = document.getElementById('alert-banner');
+    banner.textContent = message;
+    banner.className = type;
+    banner.style.display = 'block';
+    setTimeout(() => {
+        banner.style.display = 'none';
+    }, 5000);
+}
+
 function generateSummary() {
     const name = document.getElementById('name').value;
     const btn = document.getElementById('generate-summary');
@@ -133,7 +143,7 @@ function setImage(dataUrl) {
             background: false
         });
         if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
-            alert('Imagem menor que 1080px será ampliada.');
+            showAlert('Imagem menor que 1080px será ampliada.', 'warning');
         }
         document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
         updatePreview();
@@ -183,12 +193,20 @@ function loadGame() {
 }
 
 function saveGame() {
-    if (!cropper) { alert('Selecione uma imagem'); return; }
+    if (!cropper) { showAlert('Selecione uma imagem', 'warning'); return; }
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
-    fetch('/api/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, fields: fields, image: dataUrl, upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); currentUpload = null; });
+    fetch('/api/save', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({index: currentIndex, fields: fields, image: dataUrl, upload_name: currentUpload})
+    })
+      .then(r=>r.json()).then(() => {
+          localStorage.removeItem('session');
+          currentUpload = null;
+          showAlert('The game was saved.', 'success');
+      });
 }
 
 function skipGame() {
