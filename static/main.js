@@ -189,6 +189,9 @@ function loadGame() {
         }
         currentUpload = null;
         restoreSession();
+    }).catch(err => {
+        console.error(err);
+        showAlert('Failed to load game: ' + err.message, 'warning');
     });
 }
 
@@ -206,22 +209,37 @@ function saveGame() {
           localStorage.removeItem('session');
           currentUpload = null;
           showAlert('The game was saved.', 'success');
+      }).catch(err => {
+          console.error(err);
+          showAlert('Failed to save game: ' + err.message, 'warning');
       });
 }
 
 function skipGame() {
     fetch('/api/skip', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({index: currentIndex, upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
+      .catch(err => {
+          console.error(err);
+          showAlert('Failed to skip game: ' + err.message, 'warning');
+      });
 }
 
 function nextGame() {
     fetch('/api/next', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
+      .catch(err => {
+          console.error(err);
+          showAlert('Failed to move to next game: ' + err.message, 'warning');
+      });
 }
 
 function previousGame() {
     fetch('/api/back', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({upload_name: currentUpload})})
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); });
+      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
+      .catch(err => {
+          console.error(err);
+          showAlert('Failed to move to previous game: ' + err.message, 'warning');
+      });
 }
 
 function resetFields() {
@@ -242,6 +260,9 @@ function resetFields() {
         }
         currentUpload = null;
         saveSession();
+    }).catch(err => {
+        console.error(err);
+        showAlert('Failed to reset fields: ' + err.message, 'warning');
     });
 }
 
@@ -252,7 +273,11 @@ imageUploadInput.addEventListener('change', function(){
     formData.append('file', file);
     fetch('/api/upload', {method:'POST', body: formData})
         .then(r=>r.json())
-        .then(res => { currentUpload = res.filename; setImage(res.data); });
+        .then(res => { currentUpload = res.filename; setImage(res.data); })
+        .catch(err => {
+            console.error(err);
+            showAlert('Failed to upload image: ' + err.message, 'warning');
+        });
 });
 
 const genBtn = document.createElement('button');
@@ -278,6 +303,9 @@ document.getElementById('revert-image').addEventListener('click', function(){
         }
         currentUpload = null;
         saveSession();
+    }).catch(err => {
+        console.error(err);
+        showAlert('Failed to revert image: ' + err.message, 'warning');
     });
 });
 
