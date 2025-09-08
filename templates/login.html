@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <form method="post">
+        {% if error %}<p>{{ error }}</p>{% endif %}
+        <label>Password
+            <input type="password" name="password" />
+        </label>
+        <button type="submit">Login</button>
+    </form>
+</body>
+</html>

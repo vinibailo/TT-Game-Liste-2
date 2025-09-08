@@ -7,7 +7,7 @@ from typing import Any
 from threading import Lock
 from tempfile import NamedTemporaryFile
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
@@ -22,6 +22,8 @@ PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
+APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
@@ -198,6 +200,27 @@ total_games = len(games_df)
 progress = load_progress(total_games)
 save_progress()
 
+@app.before_request
+def require_login():
+    if request.endpoint in ('login', 'static'):
+        return
+    if not session.get('authenticated'):
+        return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        if request.form.get('password') == APP_PASSWORD:
+            session['authenticated'] = True
+            return redirect(url_for('index'))
+        error = 'Invalid password'
+    return render_template('login.html', error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 @app.route('/')
 def index():
