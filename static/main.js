@@ -257,8 +257,8 @@ function nextGame() {
       .catch(err => {
           console.error(err);
           showAlert('Failed to move to next game: ' + err.message, 'warning');
-      })
-      .finally(() => setNavDisabled(false));
+          setNavDisabled(false);
+      });
 }
 
 function previousGame() {
@@ -270,8 +270,8 @@ function previousGame() {
       .catch(err => {
           console.error(err);
           showAlert('Failed to move to previous game: ' + err.message, 'warning');
-      })
-      .finally(() => setNavDisabled(false));
+          setNavDisabled(false);
+      });
 }
 
 function resetFields() {
