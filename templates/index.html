@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Game Editor</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+    <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
+</head>
+<body>
+    <div id="alert-banner"></div>
+    <header>
+        <h2 id="game-name"></h2>
+        <div id="caption"></div>
+        <div class="progress-bar"><div id="progress"></div></div>
+    </header>
+    <div class="container">
+        <div class="left">
+            <form id="game-form">
+                <div class="top-row">
+                    <div id="preview-container">
+                        <img id="preview" />
+                    </div>
+                    <div class="buttons">
+                        <button type="button" id="previous">Previous</button>
+                        <button type="button" id="next">Next</button>
+                        <button type="button" id="save">Save</button>
+                        <button type="button" id="skip">Skip</button>
+                        <button type="button" id="reset">Reset</button>
+                    </div>
+                </div>
+                <label>Name
+                    <input type="text" id="name" />
+                </label>
+                <label>Summary
+                    <textarea id="summary"></textarea>
+                </label>
+                <label>First Launch Date
+                    <input type="text" id="first-launch" />
+                </label>
+                <label>Developers
+                    <input type="text" id="developers" />
+                </label>
+                <label>Publishers
+                    <input type="text" id="publishers" />
+                </label>
+                <div class="select-row">
+                    <label>Genres
+                        <select id="genres" multiple></select>
+                    </label>
+                    <label>Game Modes
+                        <select id="modes" multiple></select>
+                    </label>
+                </div>
+            </form>
+        </div>
+        <div class="right">
+            <input type="file" id="imageUpload" accept="image/*" />
+            <button type="button" id="revert-image">Revert Image</button>
+            <div class="image-wrapper">
+                <img id="image" />
+                <div id="image-resolution" class="resolution-label"></div>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>
