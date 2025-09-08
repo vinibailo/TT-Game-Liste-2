@@ -202,6 +202,9 @@ function loadGame() {
             }
             currentUpload = null;
             restoreSession();
+            if (Array.isArray(data.missing) && data.missing.length) {
+                showAlert('Campos vazios: ' + data.missing.join(', '), 'warning');
+            }
         })
         .catch(err => {
             console.error(err.stack || err);
