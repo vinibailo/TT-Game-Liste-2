@@ -165,37 +165,48 @@ function clearImage() {
 }
 
 function loadGame() {
-    fetch('api/game').then(r=>r.json()).then(data => {
-        if (data.done) {
-            document.body.innerHTML = `<h2>${data.message}</h2>`;
-            return;
-        }
-        currentIndex = data.index;
-        document.getElementById('game-name').textContent = data.game.Name || '';
-        const processed = (data.seq || 1) - 1;
-        document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
-        document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
-        document.getElementById('name').value = data.game.Name || '';
-        document.getElementById('summary').value = data.game.Summary || '';
-        document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
-        document.getElementById('developers').value = data.game.Developers || '';
-        document.getElementById('publishers').value = data.game.Publishers || '';
-        setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
-        setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
-        if (data.cover) {
-            setImage(data.cover);
-            originalImage = data.cover;
-        } else {
-            clearImage();
-            document.getElementById('image').src = placeholderImage;
-            originalImage = null;
-        }
-        currentUpload = null;
-        restoreSession();
-    }).catch(err => {
-        console.error(err);
-        showAlert('Failed to load game: ' + err.message, 'warning');
-    });
+    fetch('api/game')
+        .then(async r => {
+            const txt = await r.text();
+            try { return JSON.parse(txt); }
+            catch (e) {
+                console.error('Response text:', txt);
+                console.error('Parse error:', e.stack || e);
+                throw e; // so outer catch still runs
+            }
+        })
+        .then(data => {
+            if (data.done) {
+                document.body.innerHTML = `<h2>${data.message}</h2>`;
+                return;
+            }
+            currentIndex = data.index;
+            document.getElementById('game-name').textContent = data.game.Name || '';
+            const processed = (data.seq || 1) - 1;
+            document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
+            document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
+            document.getElementById('name').value = data.game.Name || '';
+            document.getElementById('summary').value = data.game.Summary || '';
+            document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
+            document.getElementById('developers').value = data.game.Developers || '';
+            document.getElementById('publishers').value = data.game.Publishers || '';
+            setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
+            setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
+            if (data.cover) {
+                setImage(data.cover);
+                originalImage = data.cover;
+            } else {
+                clearImage();
+                document.getElementById('image').src = placeholderImage;
+                originalImage = null;
+            }
+            currentUpload = null;
+            restoreSession();
+        })
+        .catch(err => {
+            console.error(err.stack || err);
+            showAlert('Failed to load game: ' + err.message, 'warning');
+        });
 }
 
 function saveGame() {
