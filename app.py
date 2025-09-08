@@ -11,6 +11,8 @@ from flask import Flask, request, jsonify, render_template
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_XLSX = 'processed_games.xlsx'
@@ -113,11 +115,25 @@ def next_game_index() -> int:
 
 def find_cover(row: pd.Series) -> str | None:
     url = str(row.get('Large Cover Image (URL)', ''))
-    base = os.path.splitext(os.path.basename(url))[0]
+    if not url:
+        return None
+    parsed_path = urlparse(url).path
+    base = os.path.splitext(os.path.basename(parsed_path))[0]
     for ext in ('.jpg', '.jpeg', '.png'):
         path = os.path.join(COVERS_DIR, base + ext)
         if os.path.exists(path):
-            return path
+            img = open_image_auto_rotate(path)
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    try:
+        with urlopen(url) as resp:
+            img = open_image_auto_rotate(resp)
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG')
+            return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        app.logger.warning("No cover found for URL %s", url)
     return None
 
 
@@ -200,17 +216,13 @@ def api_game():
         except Exception:
             processed_row = None
 
-    if processed_row is not None:
-        cover_path = processed_row.get('Cover Path') or find_cover(row)
-    else:
-        cover_path = find_cover(row)
-
-    cover_data = None
-    if cover_path:
-        img = open_image_auto_rotate(cover_path)
+    if processed_row is not None and processed_row.get('Cover Path'):
+        img = open_image_auto_rotate(processed_row.get('Cover Path'))
         buf = io.BytesIO()
         img.save(buf, format='JPEG')
         cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    else:
+        cover_data = find_cover(row)
 
     if processed_row is not None:
         genres = extract_list(processed_row, ['Genres', 'Genre'])
@@ -253,13 +265,7 @@ def api_game_raw(index: int):
     if index < 0 or index >= total_games:
         return jsonify({'error': 'invalid index'}), 404
     row = games_df.iloc[index]
-    cover_path = find_cover(row)
-    cover_data = None
-    if cover_path:
-        img = open_image_auto_rotate(cover_path)
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG')
-        cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+    cover_data = find_cover(row)
     genres = extract_list(row, ['Genres', 'Genre'])
     modes = extract_list(row, ['Game Modes', 'Mode'])
     game_fields = {

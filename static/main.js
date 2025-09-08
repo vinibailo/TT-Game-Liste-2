@@ -4,6 +4,7 @@ let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices;
 const imageUploadInput = document.getElementById('imageUpload');
+const placeholderImage = 'https://i.imgur.com/XZvvGuQ.png';
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
@@ -59,10 +60,11 @@ function collectFields() {
 }
 
 function saveSession() {
+    const imgSrc = document.getElementById('image').src;
     const data = {
         index: currentIndex,
         fields: collectFields(),
-        image: document.getElementById('image').src,
+        image: imgSrc && imgSrc !== placeholderImage ? imgSrc : '',
         upload_name: currentUpload
     };
     localStorage.setItem('session', JSON.stringify(data));
@@ -185,6 +187,7 @@ function loadGame() {
             originalImage = data.cover;
         } else {
             clearImage();
+            document.getElementById('image').src = placeholderImage;
             originalImage = null;
         }
         currentUpload = null;
@@ -256,6 +259,7 @@ function resetFields() {
             originalImage = data.cover;
         } else {
             clearImage();
+            document.getElementById('image').src = placeholderImage;
             originalImage = null;
         }
         currentUpload = null;
@@ -299,6 +303,7 @@ document.getElementById('revert-image').addEventListener('click', function(){
             originalImage = data.cover;
         } else {
             clearImage();
+            document.getElementById('image').src = placeholderImage;
             originalImage = null;
         }
         currentUpload = null;
