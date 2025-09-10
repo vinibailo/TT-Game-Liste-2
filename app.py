@@ -6,6 +6,7 @@ import io
 import sqlite3
 from typing import Any
 from threading import Lock
+import logging
 
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for
 from PIL import Image, ExifTags
@@ -13,6 +14,8 @@ import pandas as pd
 from openai import OpenAI
 from urllib.parse import urlparse
 from urllib.request import urlopen
+
+logger = logging.getLogger(__name__)
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_DB = 'processed_games.db'
@@ -25,11 +28,28 @@ app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 
+
+def ensure_processed_db() -> None:
+    """Ensure processed games SQLite DB exists, migrating from Excel if needed."""
+    if os.path.exists(PROCESSED_DB):
+        return
+    if not os.path.exists('processed_games.xlsx'):
+        logger.info("%s not found, skipping migration", 'processed_games.xlsx')
+        return
+    try:
+        from migrate_to_db import migrate
+
+        migrate()
+    except Exception:
+        logger.exception("Failed to migrate processed games spreadsheet")
+
+
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 # SQLite setup for processed games
 db_lock = Lock()
+ensure_processed_db()
 db = sqlite3.connect(PROCESSED_DB, check_same_thread=False)
 db.row_factory = sqlite3.Row
 with db:
@@ -49,6 +69,14 @@ with db:
             "Height" INTEGER
         )'''
     )
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    app.logger.exception("Unhandled exception")
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'internal server error'}), 500
+    return "Internal Server Error", 500
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
@@ -74,8 +102,13 @@ def open_image_auto_rotate(source: Any) -> Image.Image:
 
 def load_games() -> pd.DataFrame:
     if not os.path.exists(INPUT_XLSX):
+        logger.warning("%s not found", INPUT_XLSX)
         return pd.DataFrame()
-    df = pd.read_excel(INPUT_XLSX)
+    try:
+        df = pd.read_excel(INPUT_XLSX)
+    except Exception as e:
+        logger.exception("Failed to read %s", INPUT_XLSX)
+        return pd.DataFrame()
     df = df.dropna(how='all')
     if 'Name' in df.columns:
         df = df[df['Name'].notna()]
@@ -85,22 +118,6 @@ def load_games() -> pd.DataFrame:
     return df
 
 
-def load_progress(total_rows: int) -> dict:
-    if os.path.exists(PROGRESS_JSON):
-        with open(PROGRESS_JSON, 'r') as f:
-            return json.load(f)
-    progress = {'current_index': 0, 'seq_index': 1, 'skip_queue': []}
-    with db_lock:
-        cur = db.execute('SELECT COUNT(*) FROM processed_games')
-        count = cur.fetchone()[0]
-        progress['seq_index'] = count + 1
-        progress['current_index'] = count
-    return progress
-
-
-def save_progress() -> None:
-    with open(PROGRESS_JSON, 'w') as f:
-        json.dump(progress, f)
 
 
 def find_cover(row: pd.Series) -> str | None:
@@ -130,6 +147,96 @@ def find_cover(row: pd.Series) -> str | None:
 def ensure_dirs() -> None:
     for d in (UPLOAD_DIR, PROCESSED_DIR, COVERS_DIR):
         os.makedirs(d, exist_ok=True)
+
+
+class GameNavigator:
+    """Thread-safe helper to navigate game list and track progress."""
+
+    def __init__(self, total_rows: int):
+        self.lock = Lock()
+        self.total = total_rows
+        self.current_index = 0
+        self.seq_index = 1
+        self.skip_queue: list[dict[str, int]] = []
+        self._load()
+
+    def _load(self) -> None:
+        if os.path.exists(PROGRESS_JSON):
+            try:
+                with open(PROGRESS_JSON, 'r') as f:
+                    data = json.load(f)
+                self.current_index = int(data.get('current_index', 0))
+                self.seq_index = int(data.get('seq_index', 1))
+                self.skip_queue = data.get('skip_queue', [])
+                return
+            except Exception as e:
+                logger.warning("Failed to load progress: %s", e)
+        with db_lock:
+            cur = db.execute('SELECT COUNT(*) FROM processed_games')
+            count = cur.fetchone()[0]
+        self.current_index = count
+        self.seq_index = count + 1
+        self.skip_queue = []
+        self._save()
+
+    def _save(self) -> None:
+        try:
+            with open(PROGRESS_JSON, 'w') as f:
+                json.dump(
+                    {
+                        'current_index': self.current_index,
+                        'seq_index': self.seq_index,
+                        'skip_queue': self.skip_queue,
+                    },
+                    f,
+                )
+        except Exception as e:
+            logger.warning("Failed to save progress: %s", e)
+
+    def _process_skip_queue(self) -> None:
+        for item in self.skip_queue:
+            item['countdown'] -= 1
+        for i, item in enumerate(self.skip_queue):
+            if item['countdown'] <= 0:
+                self.current_index = item['index']
+                del self.skip_queue[i]
+                break
+
+    def current(self) -> int:
+        with self.lock:
+            self._process_skip_queue()
+            self._save()
+            return self.current_index
+
+    def next(self) -> int:
+        with self.lock:
+            if self.current_index < self.total:
+                self.current_index += 1
+            self._process_skip_queue()
+            self._save()
+            return self.current_index
+
+    def back(self) -> int:
+        with self.lock:
+            if self.current_index > 0:
+                self.current_index -= 1
+            self._process_skip_queue()
+            self._save()
+            return self.current_index
+
+    def skip(self, index: int) -> None:
+        with self.lock:
+            self.skip_queue = [s for s in self.skip_queue if s['index'] != index]
+            self.skip_queue.append({'index': index, 'countdown': 30})
+            if index == self.current_index:
+                self.current_index += 1
+            self._save()
+
+    def set_index(self, index: int) -> None:
+        with self.lock:
+            if 0 <= index <= self.total:
+                self.current_index = index
+            self._save()
 
 
 def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
@@ -185,8 +292,7 @@ def generate_pt_summary(game_name: str) -> str:
 ensure_dirs()
 games_df = load_games()
 total_games = len(games_df)
-progress = load_progress(total_games)
-save_progress()
+navigator = GameNavigator(total_games)
 
 @app.before_request
 def require_login():
@@ -215,18 +321,11 @@ def index():
     return render_template('index.html', total=total_games)
 
 
-def process_skip_queue() -> None:
-    for item in progress['skip_queue']:
-        item['countdown'] -= 1
-    for i, item in enumerate(progress['skip_queue']):
-        if item['countdown'] <= 0:
-            progress['current_index'] = item['index']
-            del progress['skip_queue'][i]
-            break
-
-
-def build_game_payload(index: int) -> dict:
-    row = games_df.iloc[index]
+def build_game_payload(index: int, seq: int) -> dict:
+    try:
+        row = games_df.iloc[index]
+    except Exception:
+        raise IndexError('invalid index')
     processed_row = None
     with db_lock:
         cur = db.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
@@ -259,28 +358,33 @@ def build_game_payload(index: int) -> dict:
         'total': total_games,
         'game': game_fields,
         'cover': cover_data,
-        'seq': progress['seq_index'],
+        'seq': seq,
         'missing': missing,
     }
 
 
 @app.route('/api/game')
 def api_game():
-    process_skip_queue()
-    index = progress['current_index']
-    if index >= total_games:
-        save_progress()
-        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-    data = build_game_payload(index)
-    save_progress()
-    return jsonify(data)
+    try:
+        index = navigator.current()
+        if index >= total_games:
+            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+        data = build_game_payload(index, navigator.seq_index)
+        return jsonify(data)
+    except Exception as e:
+        app.logger.exception("api_game failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/game/<int:index>/raw')
 def api_game_raw(index: int):
     if index < 0 or index >= total_games:
         return jsonify({'error': 'invalid index'}), 404
-    row = games_df.iloc[index]
+    try:
+        row = games_df.iloc[index]
+    except Exception:
+        app.logger.exception("api_game_raw failed")
+        return jsonify({'error': 'invalid index'}), 404
     cover_data = find_cover(row)
     genres = extract_list(row, ['Genres', 'Genre'])
     modes = extract_list(row, ['Game Modes', 'Mode'])
@@ -299,7 +403,7 @@ def api_game_raw(index: int):
         'total': total_games,
         'game': game_fields,
         'cover': cover_data,
-        'seq': progress['seq_index'],
+        'seq': navigator.seq_index,
     })
 
 
@@ -337,82 +441,87 @@ def api_save():
     fields = data.get('fields', {})
     image_b64 = data.get('image')
     upload_name = data.get('upload_name')
-    with db_lock:
-        cur = db.execute('SELECT "ID" FROM processed_games WHERE "Source Index"=?', (str(index),))
-        existing = cur.fetchone()
-        if existing:
-            seq_id = existing['ID']
-        else:
-            seq_id = f"{progress['seq_index']:07d}"
-            progress['seq_index'] += 1
+    try:
+        with navigator.lock:
+            with db_lock:
+                cur = db.execute('SELECT "ID" FROM processed_games WHERE "Source Index"=?', (str(index),))
+                existing = cur.fetchone()
+                if existing:
+                    seq_id = existing['ID']
+                else:
+                    seq_id = f"{navigator.seq_index:07d}"
+                    navigator.seq_index += 1
 
-    cover_path = ''
-    width = height = 0
-    if image_b64:
-        header, b64data = image_b64.split(',', 1)
-        img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-        img = img.convert('RGB')
-        if min(img.size) < 1080:
-            img = img.resize((1080, 1080))
-        else:
-            img = img.resize((1080, 1080))
-        cover_path = os.path.join(PROCESSED_DIR, f"{seq_id}.jpg")
-        img.save(cover_path, format='JPEG', quality=90)
-        width, height = img.size
+            cover_path = ''
+            width = height = 0
+            if image_b64:
+                header, b64data = image_b64.split(',', 1)
+                img = Image.open(io.BytesIO(base64.b64decode(b64data)))
+                img = img.convert('RGB')
+                if min(img.size) < 1080:
+                    img = img.resize((1080, 1080))
+                else:
+                    img = img.resize((1080, 1080))
+                cover_path = os.path.join(PROCESSED_DIR, f"{seq_id}.jpg")
+                img.save(cover_path, format='JPEG', quality=90)
+                width, height = img.size
 
-    row = {
-        "ID": seq_id,
-        "Source Index": str(index),
-        "Name": fields.get('Name', ''),
-        "Summary": fields.get('Summary', ''),
-        "First Launch Date": fields.get('FirstLaunchDate', ''),
-        "Developers": fields.get('Developers', ''),
-        "Publishers": fields.get('Publishers', ''),
-        "Genres": ', '.join(fields.get('Genres', [])),
-        "Game Modes": ', '.join(fields.get('GameModes', [])),
-        "Cover Path": cover_path,
-        "Width": width,
-        "Height": height,
-    }
+            row = {
+                "ID": seq_id,
+                "Source Index": str(index),
+                "Name": fields.get('Name', ''),
+                "Summary": fields.get('Summary', ''),
+                "First Launch Date": fields.get('FirstLaunchDate', ''),
+                "Developers": fields.get('Developers', ''),
+                "Publishers": fields.get('Publishers', ''),
+                "Genres": ', '.join(fields.get('Genres', [])),
+                "Game Modes": ', '.join(fields.get('GameModes', [])),
+                "Cover Path": cover_path,
+                "Width": width,
+                "Height": height,
+            }
 
-    with db_lock:
-        if existing:
-            db.execute(
-                '''UPDATE processed_games SET
-                    "Name"=?, "Summary"=?, "First Launch Date"=?,
-                    "Developers"=?, "Publishers"=?, "Genres"=?,
-                    "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
-                   WHERE "ID"=?''',
-                (
-                    row['Name'], row['Summary'], row['First Launch Date'],
-                    row['Developers'], row['Publishers'], row['Genres'],
-                    row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
-                    seq_id,
-                ),
-            )
-        else:
-            db.execute(
-                '''INSERT INTO processed_games (
-                    "ID", "Source Index", "Name", "Summary",
-                    "First Launch Date", "Developers", "Publishers",
-                    "Genres", "Game Modes", "Cover Path", "Width", "Height"
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (
-                    row['ID'], row['Source Index'], row['Name'], row['Summary'],
-                    row['First Launch Date'], row['Developers'], row['Publishers'],
-                    row['Genres'], row['Game Modes'], row['Cover Path'],
-                    row['Width'], row['Height'],
-                ),
-            )
-        db.commit()
+            with db_lock:
+                if existing:
+                    db.execute(
+                        '''UPDATE processed_games SET
+                            "Name"=?, "Summary"=?, "First Launch Date"=?,
+                            "Developers"=?, "Publishers"=?, "Genres"=?,
+                            "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
+                           WHERE "ID"=?''',
+                        (
+                            row['Name'], row['Summary'], row['First Launch Date'],
+                            row['Developers'], row['Publishers'], row['Genres'],
+                            row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
+                            seq_id,
+                        ),
+                    )
+                else:
+                    db.execute(
+                        '''INSERT INTO processed_games (
+                            "ID", "Source Index", "Name", "Summary",
+                            "First Launch Date", "Developers", "Publishers",
+                            "Genres", "Game Modes", "Cover Path", "Width", "Height"
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (
+                            row['ID'], row['Source Index'], row['Name'], row['Summary'],
+                            row['First Launch Date'], row['Developers'], row['Publishers'],
+                            row['Genres'], row['Game Modes'], row['Cover Path'],
+                            row['Width'], row['Height'],
+                        ),
+                    )
+                db.commit()
 
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-    progress['skip_queue'] = [s for s in progress['skip_queue'] if s['index'] != index]
-    save_progress()
-    return jsonify({'status': 'ok'})
+            if upload_name:
+                up_path = os.path.join(UPLOAD_DIR, upload_name)
+                if os.path.exists(up_path):
+                    os.remove(up_path)
+            navigator.skip_queue = [s for s in navigator.skip_queue if s['index'] != index]
+            navigator._save()
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        app.logger.exception("api_save failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/skip', methods=['POST'])
@@ -421,16 +530,16 @@ def api_skip():
     index = int(data.get('index', 0))
     upload_name = data.get('upload_name')
 
-    progress['skip_queue'] = [s for s in progress['skip_queue'] if s['index'] != index]
-    progress['skip_queue'].append({'index': index, 'countdown': 30})
-    if index == progress['current_index']:
-        progress['current_index'] += 1
     if upload_name:
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
-    save_progress()
-    return jsonify({'status': 'ok'})
+    try:
+        navigator.skip(index)
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        app.logger.exception("api_skip failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/set_index', methods=['POST'])
@@ -442,10 +551,12 @@ def api_set_index():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
-    if 0 <= index <= total_games:
-        progress['current_index'] = index
-    save_progress()
-    return jsonify({'status': 'ok'})
+    try:
+        navigator.set_index(index)
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        app.logger.exception("api_set_index failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/next', methods=['POST'])
@@ -456,16 +567,15 @@ def api_next():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
-    if progress['current_index'] < total_games:
-        progress['current_index'] += 1
-    process_skip_queue()
-    index = progress['current_index']
-    if index >= total_games:
-        save_progress()
-        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-    data = build_game_payload(index)
-    save_progress()
-    return jsonify(data)
+    try:
+        index = navigator.next()
+        if index >= total_games:
+            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+        payload = build_game_payload(index, navigator.seq_index)
+        return jsonify(payload)
+    except Exception as e:
+        app.logger.exception("api_next failed")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/back', methods=['POST'])
@@ -476,13 +586,13 @@ def api_back():
         up_path = os.path.join(UPLOAD_DIR, upload_name)
         if os.path.exists(up_path):
             os.remove(up_path)
-    if progress['current_index'] > 0:
-        progress['current_index'] -= 1
-    process_skip_queue()
-    index = progress['current_index']
-    data = build_game_payload(index)
-    save_progress()
-    return jsonify(data)
+    try:
+        index = navigator.back()
+        payload = build_game_payload(index, navigator.seq_index)
+        return jsonify(payload)
+    except Exception as e:
+        app.logger.exception("api_back failed")
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
