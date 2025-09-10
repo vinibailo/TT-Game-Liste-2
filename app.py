@@ -106,14 +106,16 @@ def load_games() -> pd.DataFrame:
         return pd.DataFrame()
     try:
         df = pd.read_excel(INPUT_XLSX)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to read %s", INPUT_XLSX)
         return pd.DataFrame()
     df = df.dropna(how='all')
     if 'Name' in df.columns:
         df = df[df['Name'].notna()]
     if 'Rating Count' in df.columns:
-        df = df.sort_values(by='Rating Count', ascending=False)
+        df['Rating Count'] = pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
+        df = df.sort_values(by='Rating Count', ascending=False, kind='mergesort')
+    df = df.drop_duplicates(subset='Name', keep='first')
     df = df.reset_index(drop=True)
     return df
 
@@ -162,16 +164,20 @@ class GameNavigator:
 
     def _load(self) -> None:
         with db_lock:
-            cur = db.execute('SELECT COUNT(*) FROM processed_games')
-            count = cur.fetchone()[0]
+            cur = db.execute('SELECT "Source Index", "ID" FROM processed_games')
+            rows = cur.fetchall()
+        processed = {int(r['Source Index']) for r in rows if str(r['Source Index']).isdigit()}
+        max_seq = max((int(r['ID']) for r in rows if str(r['ID']).isdigit()), default=0)
+        next_index = next((i for i in range(self.total) if i not in processed), self.total)
+        expected_seq = max_seq + 1
         if os.path.exists(PROGRESS_JSON):
             try:
                 with open(PROGRESS_JSON, 'r') as f:
                     data = json.load(f)
-                file_current = int(data.get('current_index', 0))
-                file_seq = int(data.get('seq_index', 1))
+                file_current = int(data.get('current_index', next_index))
+                file_seq = int(data.get('seq_index', expected_seq))
                 file_skip = data.get('skip_queue', [])
-                if file_current == count and file_seq == count + 1:
+                if file_current == next_index and file_seq == expected_seq:
                     self.current_index = file_current
                     self.seq_index = file_seq
                     self.skip_queue = file_skip
@@ -179,8 +185,8 @@ class GameNavigator:
                 logger.warning("Progress file out of sync with database; rebuilding")
             except Exception as e:
                 logger.warning("Failed to load progress: %s", e)
-        self.current_index = count
-        self.seq_index = count + 1
+        self.current_index = next_index
+        self.seq_index = expected_seq
         self.skip_queue = []
         self._save()
 
