@@ -33,10 +33,10 @@ def test_load_ignores_stale_progress(tmp_path):
     progress_file.write_text(json.dumps({'current_index': 2, 'seq_index': 3, 'skip_queue': []}))
     nav = app.GameNavigator(10)
     assert nav.current_index == 5
-    assert nav.seq_index == 6
+    assert nav.seq_index == 5
     data = json.loads(progress_file.read_text())
     assert data['current_index'] == 5
-    assert data['seq_index'] == 6
+    assert data['seq_index'] == 5
 
 
 def test_load_ignores_corrupted_progress(tmp_path):
@@ -46,7 +46,18 @@ def test_load_ignores_corrupted_progress(tmp_path):
     progress_file.write_text(json.dumps({'current_index': 5, 'seq_index': 10, 'skip_queue': []}))
     nav = app.GameNavigator(10)
     assert nav.current_index == 5
-    assert nav.seq_index == 6
+    assert nav.seq_index == 5
     data = json.loads(progress_file.read_text())
     assert data['current_index'] == 5
-    assert data['seq_index'] == 6
+    assert data['seq_index'] == 5
+
+
+def test_load_resumes_from_first_unprocessed_index(tmp_path):
+    app = load_app(tmp_path)
+    populate_db(app, 3)
+    with app.db_lock:
+        with app.db:
+            app.db.execute('DELETE FROM processed_games WHERE "Source Index"=?', ('1',))
+    nav = app.GameNavigator(5)
+    assert nav.current_index == 1
+    assert nav.seq_index == 3
