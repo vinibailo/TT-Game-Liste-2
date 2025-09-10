@@ -161,19 +161,24 @@ class GameNavigator:
         self._load()
 
     def _load(self) -> None:
+        with db_lock:
+            cur = db.execute('SELECT COUNT(*) FROM processed_games')
+            count = cur.fetchone()[0]
         if os.path.exists(PROGRESS_JSON):
             try:
                 with open(PROGRESS_JSON, 'r') as f:
                     data = json.load(f)
-                self.current_index = int(data.get('current_index', 0))
-                self.seq_index = int(data.get('seq_index', 1))
-                self.skip_queue = data.get('skip_queue', [])
-                return
+                file_current = int(data.get('current_index', 0))
+                file_seq = int(data.get('seq_index', 1))
+                file_skip = data.get('skip_queue', [])
+                if file_current == count and file_seq == count + 1:
+                    self.current_index = file_current
+                    self.seq_index = file_seq
+                    self.skip_queue = file_skip
+                    return
+                logger.warning("Progress file out of sync with database; rebuilding")
             except Exception as e:
                 logger.warning("Failed to load progress: %s", e)
-        with db_lock:
-            cur = db.execute('SELECT COUNT(*) FROM processed_games')
-            count = cur.fetchone()[0]
         self.current_index = count
         self.seq_index = count + 1
         self.skip_queue = []
