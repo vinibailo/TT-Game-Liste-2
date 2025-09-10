@@ -27,6 +27,9 @@ COVERS_DIR = 'covers_out'
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
+logging.basicConfig(level=logging.DEBUG)
+app.logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG)
 
 
 def ensure_processed_db() -> None:
@@ -181,6 +184,12 @@ class GameNavigator:
                     self.current_index = file_current
                     self.seq_index = file_seq
                     self.skip_queue = file_skip
+                    logger.debug(
+                        "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
+                        self.current_index,
+                        self.seq_index,
+                        self.skip_queue,
+                    )
                     return
                 logger.warning("Progress file out of sync with database; rebuilding")
             except Exception as e:
@@ -188,6 +197,12 @@ class GameNavigator:
         self.current_index = next_index
         self.seq_index = expected_seq
         self.skip_queue = []
+        logger.debug(
+            "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
+            self.current_index,
+            self.seq_index,
+            self.skip_queue,
+        )
         self._save()
 
     def _save(self) -> None:
@@ -205,13 +220,29 @@ class GameNavigator:
             logger.warning("Failed to save progress: %s", e)
 
     def _process_skip_queue(self) -> None:
+        logger.debug(
+            "Processing skip queue: index=%s queue=%s",
+            self.current_index,
+            self.skip_queue,
+        )
         for item in self.skip_queue:
             item['countdown'] -= 1
         for i, item in enumerate(self.skip_queue):
             if item['countdown'] <= 0:
+                old_index = self.current_index
                 self.current_index = item['index']
                 del self.skip_queue[i]
+                logger.debug(
+                    "Skip queue hit: index from %s to %s",
+                    old_index,
+                    self.current_index,
+                )
                 break
+        logger.debug(
+            "After processing skip queue: index=%s queue=%s",
+            self.current_index,
+            self.skip_queue,
+        )
 
     def current(self) -> int:
         with self.lock:
@@ -221,17 +252,25 @@ class GameNavigator:
 
     def next(self) -> int:
         with self.lock:
+            before = self.current_index
+            logger.debug("next() before: index=%s", before)
             if self.current_index < self.total:
                 self.current_index += 1
+            logger.debug("next() after increment: index=%s", self.current_index)
             self._process_skip_queue()
+            logger.debug("next() after processing skip queue: index=%s", self.current_index)
             self._save()
             return self.current_index
 
     def back(self) -> int:
         with self.lock:
+            before = self.current_index
+            logger.debug("back() before: index=%s", before)
             if self.current_index > 0:
                 self.current_index -= 1
+            logger.debug("back() after decrement: index=%s", self.current_index)
             self._process_skip_queue()
+            logger.debug("back() after processing skip queue: index=%s", self.current_index)
             self._save()
             return self.current_index
 
