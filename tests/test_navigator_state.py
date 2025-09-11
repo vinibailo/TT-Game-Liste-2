@@ -150,3 +150,26 @@ def test_sequential_navigation_moves_multiple_steps(tmp_path):
     assert nav.next() == 7
     assert nav.back() == 6
     assert nav.back() == 5
+
+
+def test_next_after_save_advances_once(tmp_path):
+    app = load_app(tmp_path)
+    populate_db(app, 5)  # processed indices 0-4
+    with app.db_lock:
+        with app.db:
+            app.db.execute('DELETE FROM navigator_state')
+    nav = app.GameNavigator(10)
+    assert nav.current_index == 5
+    seq_id = f"{nav.seq_index:07d}"
+    with app.db_lock:
+        with app.db:
+            app.db.execute(
+                'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
+                (seq_id, str(nav.current_index)),
+            )
+    nav.seq_index += 1
+    nav._save()
+    assert nav.next() == 6
+    assert nav.current_index == 6
+    assert nav.skip_queue == []
+
