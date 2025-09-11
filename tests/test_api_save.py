@@ -1,0 +1,46 @@
+import os
+import uuid
+import importlib.util
+from pathlib import Path
+
+APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
+
+
+def load_app(tmp_path):
+    os.chdir(tmp_path)
+    module_name = f"app_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_api_save_index_conflict(tmp_path):
+    app = load_app(tmp_path)
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    app.navigator.current_index = 0
+    resp = client.post('/api/save', json={'index': 1, 'id': '0000001', 'fields': {}})
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data['error'] == 'index mismatch'
+
+
+def test_api_save_id_conflict(tmp_path):
+    app = load_app(tmp_path)
+    with app.db_lock:
+        with app.db:
+            app.db.execute(
+                'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
+                ('0000001', '0'),
+            )
+    app.navigator.current_index = 0
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    resp = client.post('/api/save', json={'index': 0, 'id': '0000002', 'fields': {}})
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data['error'] == 'id mismatch'
+

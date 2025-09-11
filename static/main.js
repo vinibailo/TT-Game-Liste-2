@@ -1,5 +1,6 @@
 let cropper = null;
 let currentIndex = 0;
+let currentId = null;
 let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices;
@@ -69,6 +70,7 @@ function saveSession() {
     const imgSrc = document.getElementById('image').src;
     const data = {
         index: currentIndex,
+        id: currentId,
         fields: collectFields(),
         image: imgSrc && imgSrc !== placeholderImage ? imgSrc : '',
         upload_name: currentUpload
@@ -81,6 +83,7 @@ function restoreSession() {
     if (!s) return;
     const data = JSON.parse(s);
     if (data.index !== currentIndex) return;
+    currentId = data.id;
     document.getElementById('name').value = data.fields.Name;
     document.getElementById('summary').value = data.fields.Summary;
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
@@ -176,6 +179,7 @@ function applyGameData(data) {
         return;
     }
     currentIndex = data.index;
+    currentId = data.id;
     document.getElementById('game-name').textContent = data.game.Name || '';
     const processed = (data.seq || 1) - 1;
     document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
@@ -226,7 +230,7 @@ function saveGame() {
     fetch('api/save', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({index: currentIndex, fields: fields, image: dataUrl, upload_name: currentUpload})
+        body:JSON.stringify({index: currentIndex, id: currentId, fields: fields, image: dataUrl, upload_name: currentUpload})
     })
       .then(r=>r.json()).then(() => {
           localStorage.removeItem('session');
