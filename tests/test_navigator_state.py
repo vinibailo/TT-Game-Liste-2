@@ -173,3 +173,34 @@ def test_next_after_save_advances_once(tmp_path):
     assert nav.current_index == 6
     assert nav.skip_queue == []
 
+
+def test_save_with_outdated_index_keeps_next_row_intact(tmp_path):
+    app = load_app(tmp_path)
+    # Prepopulate database with a row for index 1 so we can verify it stays untouched
+    populate_db(app, 2)
+    with app.db_lock:
+        with app.db:
+            app.db.execute('DELETE FROM processed_games WHERE "Source Index"=?', ('0',))
+            app.db.execute(
+                'UPDATE processed_games SET "Name"=? WHERE "Source Index"=?',
+                ('original', '1'),
+            )
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    # Simulate navigator moving to the next index while still editing index 0
+    app.navigator.current_index += 1  # now at 1
+    resp = client.post(
+        '/api/save',
+        json={'index': 0, 'id': '0000001', 'fields': {'Name': 'changed'}},
+    )
+    assert resp.status_code == 409
+    # Ensure the row for index 1 was not modified
+    with app.db_lock:
+        cur = app.db.execute(
+            'SELECT "Name" FROM processed_games WHERE "Source Index"=?',
+            ('1',),
+        )
+        row = cur.fetchone()
+    assert row['Name'] == 'original'
+
