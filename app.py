@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 INPUT_XLSX = 'igdb_all_games.xlsx'
 PROCESSED_DB = 'processed_games.db'
-PROGRESS_JSON = 'progress.json'
 UPLOAD_DIR = 'uploaded_sources'
 PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
@@ -70,6 +69,14 @@ with db:
             "Cover Path" TEXT,
             "Width" INTEGER,
             "Height" INTEGER
+        )'''
+    )
+    db.execute(
+        '''CREATE TABLE IF NOT EXISTS navigator_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            current_index INTEGER,
+            seq_index INTEGER,
+            skip_queue TEXT
         )'''
     )
 
@@ -163,23 +170,23 @@ class GameNavigator:
         self.current_index = 0
         self.seq_index = 1
         self.skip_queue: list[dict[str, int]] = []
-        self._load()
+        self._load_initial()
 
-    def _load(self) -> None:
+    def _load_initial(self) -> None:
         with db_lock:
+            cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
+            state_row = cur.fetchone()
             cur = db.execute('SELECT "Source Index", "ID" FROM processed_games')
             rows = cur.fetchall()
         processed = {int(r['Source Index']) for r in rows if str(r['Source Index']).isdigit()}
         max_seq = max((int(r['ID']) for r in rows if str(r['ID']).isdigit()), default=0)
         next_index = next((i for i in range(self.total) if i not in processed), self.total)
         expected_seq = max_seq + 1
-        if os.path.exists(PROGRESS_JSON):
+        if state_row is not None:
             try:
-                with open(PROGRESS_JSON, 'r') as f:
-                    data = json.load(f)
-                file_current = int(data.get('current_index', next_index))
-                file_seq = int(data.get('seq_index', expected_seq))
-                file_skip = data.get('skip_queue', [])
+                file_current = int(state_row['current_index'])
+                file_seq = int(state_row['seq_index'])
+                file_skip = json.loads(state_row['skip_queue'] or '[]')
                 if file_current == next_index and file_seq == expected_seq:
                     self.current_index = file_current
                     self.seq_index = file_seq
@@ -191,9 +198,9 @@ class GameNavigator:
                         self.skip_queue,
                     )
                     return
-                logger.warning("Progress file out of sync with database; rebuilding")
+                logger.warning("Navigator state out of sync with database; rebuilding")
             except Exception as e:
-                logger.warning("Failed to load progress: %s", e)
+                logger.warning("Failed to load navigator state: %s", e)
         self.current_index = next_index
         self.seq_index = expected_seq
         self.skip_queue = []
@@ -205,19 +212,41 @@ class GameNavigator:
         )
         self._save()
 
+    def _load(self) -> None:
+        with db_lock:
+            cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
+            state_row = cur.fetchone()
+        if state_row is not None:
+            try:
+                self.current_index = int(state_row['current_index'])
+                self.seq_index = int(state_row['seq_index'])
+                self.skip_queue = json.loads(state_row['skip_queue'] or '[]')
+                logger.debug(
+                    "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
+                    self.current_index,
+                    self.seq_index,
+                    self.skip_queue,
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to load navigator state: %s", e)
+        # fallback: rebuild from processed_games
+        self._load_initial()
+
     def _save(self) -> None:
         try:
-            with open(PROGRESS_JSON, 'w') as f:
-                json.dump(
-                    {
-                        'current_index': self.current_index,
-                        'seq_index': self.seq_index,
-                        'skip_queue': self.skip_queue,
-                    },
-                    f,
+            with db_lock:
+                db.execute(
+                    'REPLACE INTO navigator_state (id, current_index, seq_index, skip_queue) VALUES (1, ?, ?, ?)',
+                    (
+                        self.current_index,
+                        self.seq_index,
+                        json.dumps(self.skip_queue),
+                    ),
                 )
+                db.commit()
         except Exception as e:
-            logger.warning("Failed to save progress: %s", e)
+            logger.warning("Failed to save navigator state: %s", e)
 
     def _process_skip_queue(self) -> None:
         logger.debug(
@@ -246,12 +275,14 @@ class GameNavigator:
 
     def current(self) -> int:
         with self.lock:
+            self._load()
             self._process_skip_queue()
             self._save()
             return self.current_index
 
     def next(self) -> int:
         with self.lock:
+            self._load()
             before = self.current_index
             logger.debug("next() before: index=%s", before)
             if self.current_index < self.total:
@@ -264,6 +295,7 @@ class GameNavigator:
 
     def back(self) -> int:
         with self.lock:
+            self._load()
             before = self.current_index
             logger.debug("back() before: index=%s", before)
             if self.current_index > 0:
@@ -276,6 +308,7 @@ class GameNavigator:
 
     def skip(self, index: int) -> None:
         with self.lock:
+            self._load()
             self.skip_queue = [s for s in self.skip_queue if s['index'] != index]
             self.skip_queue.append({'index': index, 'countdown': 30})
             if index == self.current_index:
@@ -284,6 +317,7 @@ class GameNavigator:
 
     def set_index(self, index: int) -> None:
         with self.lock:
+            self._load()
             if 0 <= index <= self.total:
                 self.current_index = index
             self._save()
