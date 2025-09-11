@@ -84,6 +84,7 @@ function restoreSession() {
     const data = JSON.parse(s);
     if (data.index !== currentIndex) return;
     currentId = data.id;
+    document.getElementById('game-id').textContent = `ID: ${currentId || ''}`;
     document.getElementById('name').value = data.fields.Name;
     document.getElementById('summary').value = data.fields.Summary;
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
@@ -181,6 +182,7 @@ function applyGameData(data) {
     currentIndex = data.index;
     currentId = data.id;
     document.getElementById('game-name').textContent = data.game.Name || '';
+    document.getElementById('game-id').textContent = `ID: ${currentId || ''}`;
     const processed = (data.seq || 1) - 1;
     document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
     document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
