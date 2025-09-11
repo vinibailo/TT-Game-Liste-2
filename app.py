@@ -170,9 +170,9 @@ class GameNavigator:
         self.current_index = 0
         self.seq_index = 1
         self.skip_queue: list[dict[str, int]] = []
-        self._load()
+        self._load_initial()
 
-    def _load(self) -> None:
+    def _load_initial(self) -> None:
         with db_lock:
             cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
@@ -211,6 +211,27 @@ class GameNavigator:
             self.skip_queue,
         )
         self._save()
+
+    def _load(self) -> None:
+        with db_lock:
+            cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
+            state_row = cur.fetchone()
+        if state_row is not None:
+            try:
+                self.current_index = int(state_row['current_index'])
+                self.seq_index = int(state_row['seq_index'])
+                self.skip_queue = json.loads(state_row['skip_queue'] or '[]')
+                logger.debug(
+                    "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
+                    self.current_index,
+                    self.seq_index,
+                    self.skip_queue,
+                )
+                return
+            except Exception as e:
+                logger.warning("Failed to load navigator state: %s", e)
+        # fallback: rebuild from processed_games
+        self._load_initial()
 
     def _save(self) -> None:
         try:

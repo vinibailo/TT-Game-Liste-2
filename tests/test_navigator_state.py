@@ -136,3 +136,17 @@ def test_navigation_reloads_state_from_db(tmp_path):
     state = read_state(app)
     assert state['current_index'] == 3
     assert json.loads(state['skip_queue']) == [{'index': 8, 'countdown': 30}]
+
+
+def test_sequential_navigation_moves_multiple_steps(tmp_path):
+    app = load_app(tmp_path)
+    populate_db(app, 5)  # processed indices 0-4
+    with app.db_lock:
+        with app.db:
+            app.db.execute('DELETE FROM navigator_state')
+    nav = app.GameNavigator(10)
+    assert nav.current_index == 5
+    assert nav.next() == 6
+    assert nav.next() == 7
+    assert nav.back() == 6
+    assert nav.back() == 5
