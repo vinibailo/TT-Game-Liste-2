@@ -437,12 +437,15 @@ def build_game_payload(index: int, seq: int) -> dict:
         'GameModes': modes,
     }
 
+    game_id = processed_row['ID'] if processed_row is not None else f"{seq:07d}"
+
     return {
         'index': int(index),
         'total': total_games,
         'game': game_fields,
         'cover': cover_data,
         'seq': seq,
+        'id': game_id,
         'missing': missing,
     }
 
@@ -522,18 +525,48 @@ def api_upload():
 def api_save():
     data = request.get_json(force=True)
     index = int(data.get('index', 0))
+    expected_id = data.get('id')
     fields = data.get('fields', {})
     image_b64 = data.get('image')
     upload_name = data.get('upload_name')
+    if expected_id is None:
+        return jsonify({'error': 'missing id'}), 400
+    expected_id = str(expected_id)
     try:
         with navigator.lock:
+            if index != navigator.current_index:
+                return (
+                    jsonify(
+                        {
+                            'error': 'index mismatch',
+                            'expected': navigator.current_index,
+                            'actual': index,
+                        }
+                    ),
+                    409,
+                )
             with db_lock:
-                cur = db.execute('SELECT "ID" FROM processed_games WHERE "Source Index"=?', (str(index),))
+                cur = db.execute(
+                    'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                    (str(index),),
+                )
                 existing = cur.fetchone()
                 if existing:
-                    seq_id = existing['ID']
+                    existing_id = str(existing['ID'])
+                    if existing_id != expected_id:
+                        return (
+                            jsonify(
+                                {
+                                    'error': 'id mismatch',
+                                    'expected': existing_id,
+                                    'actual': expected_id,
+                                }
+                            ),
+                            409,
+                        )
+                    seq_id = existing_id
                 else:
-                    seq_id = f"{navigator.seq_index:07d}"
+                    seq_id = expected_id
                     navigator.seq_index += 1
 
             cover_path = ''
