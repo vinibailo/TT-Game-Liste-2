@@ -284,12 +284,12 @@ class GameNavigator:
         with self.lock:
             self._load()
             before = self.current_index
-            logger.debug("next() before: index=%s", before)
+            logger.debug("next() before skip queue: index=%s", before)
+            self._process_skip_queue()
+            logger.debug("next() after skip queue: index=%s", self.current_index)
             if self.current_index < self.total:
                 self.current_index += 1
             logger.debug("next() after increment: index=%s", self.current_index)
-            self._process_skip_queue()
-            logger.debug("next() after processing skip queue: index=%s", self.current_index)
             self._save()
             return self.current_index
 
@@ -297,12 +297,12 @@ class GameNavigator:
         with self.lock:
             self._load()
             before = self.current_index
-            logger.debug("back() before: index=%s", before)
+            logger.debug("back() before skip queue: index=%s", before)
+            self._process_skip_queue()
+            logger.debug("back() after skip queue: index=%s", self.current_index)
             if self.current_index > 0:
                 self.current_index -= 1
             logger.debug("back() after decrement: index=%s", self.current_index)
-            self._process_skip_queue()
-            logger.debug("back() after processing skip queue: index=%s", self.current_index)
             self._save()
             return self.current_index
 
