@@ -3,6 +3,7 @@ let currentIndex = 0;
 let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices;
+let navigating = false;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = 'https://i.imgur.com/XZvvGuQ.png';
 const genresList = [
@@ -247,6 +248,8 @@ function skipGame() {
 }
 
 function nextGame() {
+    if (navigating) return;
+    navigating = true;
     setNavDisabled(true);
     fetch('api/next', {
         method:'POST',
@@ -258,10 +261,15 @@ function nextGame() {
           console.error(err);
           showAlert('Failed to move to next game: ' + err.message, 'warning');
       })
-      .finally(() => setNavDisabled(false));
+      .finally(() => {
+          navigating = false;
+          setNavDisabled(false);
+      });
 }
 
 function previousGame() {
+    if (navigating) return;
+    navigating = true;
     setNavDisabled(true);
     fetch('api/back', {
         method:'POST',
@@ -273,7 +281,10 @@ function previousGame() {
           console.error(err);
           showAlert('Failed to move to previous game: ' + err.message, 'warning');
       })
-      .finally(() => setNavDisabled(false));
+      .finally(() => {
+          navigating = false;
+          setNavDisabled(false);
+      });
 }
 
 function resetFields() {
