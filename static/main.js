@@ -219,6 +219,10 @@ function saveGame() {
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
+    setNavDisabled(true);
+    const saveBtn = document.getElementById('save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
     fetch('api/save', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -231,6 +235,10 @@ function saveGame() {
       }).catch(err => {
           console.error(err);
           showAlert('Failed to save game: ' + err.message, 'warning');
+      }).finally(() => {
+          setNavDisabled(false);
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Save';
       });
 }
 
