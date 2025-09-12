@@ -8,7 +8,7 @@ from typing import Any
 from threading import Lock
 import logging
 
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for, g
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
@@ -34,33 +34,56 @@ client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 # SQLite setup for processed games
 db_lock = Lock()
-db = sqlite3.connect(PROCESSED_DB, check_same_thread=False)
-db.row_factory = sqlite3.Row
-with db:
-    db.execute(
-        '''CREATE TABLE IF NOT EXISTS processed_games (
-            "ID" TEXT PRIMARY KEY,
-            "Source Index" TEXT UNIQUE,
-            "Name" TEXT,
-            "Summary" TEXT,
-            "First Launch Date" TEXT,
-            "Developers" TEXT,
-            "Publishers" TEXT,
-            "Genres" TEXT,
-            "Game Modes" TEXT,
-            "Cover Path" TEXT,
-            "Width" INTEGER,
-            "Height" INTEGER
-        )'''
-    )
-    db.execute(
-        '''CREATE TABLE IF NOT EXISTS navigator_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            current_index INTEGER,
-            seq_index INTEGER,
-            skip_queue TEXT
-        )'''
-    )
+
+
+def get_db():
+    if 'db' not in g:
+        g.db = sqlite3.connect(PROCESSED_DB)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+
+def _init_db() -> None:
+    conn = sqlite3.connect(PROCESSED_DB)
+    try:
+        with conn:
+            conn.execute(
+                '''CREATE TABLE IF NOT EXISTS processed_games (
+                    "ID" TEXT PRIMARY KEY,
+                    "Source Index" TEXT UNIQUE,
+                    "Name" TEXT,
+                    "Summary" TEXT,
+                    "First Launch Date" TEXT,
+                    "Developers" TEXT,
+                    "Publishers" TEXT,
+                    "Genres" TEXT,
+                    "Game Modes" TEXT,
+                    "Cover Path" TEXT,
+                    "Width" INTEGER,
+                    "Height" INTEGER
+                )'''
+            )
+            conn.execute(
+                '''CREATE TABLE IF NOT EXISTS navigator_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    current_index INTEGER,
+                    seq_index INTEGER,
+                    skip_queue TEXT
+                )'''
+            )
+    finally:
+        conn.close()
+
+
+_init_db()
+
+
+@app.teardown_appcontext
+def close_db(exc):
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
 
 
 @app.errorhandler(Exception)
@@ -146,14 +169,15 @@ def ensure_dirs() -> None:
 def normalize_processed_games() -> None:
     """Ensure IDs in processed_games are sequential starting at 1."""
     with db_lock:
-        with db:
-            cur = db.execute(
+        conn = get_db()
+        with conn:
+            cur = conn.execute(
                 'SELECT "ID", "Source Index" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
             )
             rows = cur.fetchall()
             for new_id, row in enumerate(rows, start=1):
                 if str(row['ID']) != str(new_id):
-                    db.execute(
+                    conn.execute(
                         'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
                         (str(new_id), row['Source Index']),
                     )
@@ -172,9 +196,10 @@ class GameNavigator:
 
     def _load_initial(self) -> None:
         with db_lock:
-            cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
+            conn = get_db()
+            cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
-            cur = db.execute('SELECT "Source Index", "ID" FROM processed_games')
+            cur = conn.execute('SELECT "Source Index", "ID" FROM processed_games')
             rows = cur.fetchall()
         processed = {int(r['Source Index']) for r in rows if str(r['Source Index']).isdigit()}
         max_seq = max((int(r['ID']) for r in rows if str(r['ID']).isdigit()), default=0)
@@ -212,7 +237,8 @@ class GameNavigator:
 
     def _load(self) -> None:
         with db_lock:
-            cur = db.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
+            conn = get_db()
+            cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
         if state_row is not None:
             try:
@@ -234,7 +260,8 @@ class GameNavigator:
     def _save(self) -> None:
         try:
             with db_lock:
-                db.execute(
+                conn = get_db()
+                conn.execute(
                     'REPLACE INTO navigator_state (id, current_index, seq_index, skip_queue) VALUES (1, ?, ?, ?)',
                     (
                         self.current_index,
@@ -242,7 +269,7 @@ class GameNavigator:
                         json.dumps(self.skip_queue),
                     ),
                 )
-                db.commit()
+                conn.commit()
         except Exception as e:
             logger.warning("Failed to save navigator state: %s", e)
 
@@ -374,8 +401,9 @@ def generate_pt_summary(game_name: str) -> str:
 ensure_dirs()
 games_df = load_games()
 total_games = len(games_df)
-normalize_processed_games()
-navigator = GameNavigator(total_games)
+with app.app_context():
+    normalize_processed_games()
+    navigator = GameNavigator(total_games)
 
 @app.before_request
 def require_login():
@@ -411,7 +439,8 @@ def build_game_payload(index: int, seq: int) -> dict:
         raise IndexError('invalid index')
     processed_row = None
     with db_lock:
-        cur = db.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
+        conn = get_db()
+        cur = conn.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
         processed_row = cur.fetchone()
 
     if processed_row is not None and processed_row['Cover Path']:
@@ -554,7 +583,8 @@ def api_save():
                     409,
                 )
             with db_lock:
-                cur = db.execute(
+                conn = get_db()
+                cur = conn.execute(
                     'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
                     (str(index),),
                 )
@@ -619,9 +649,10 @@ def api_save():
             }
 
             with db_lock:
+                conn = get_db()
                 try:
                     if existing:
-                        db.execute(
+                        conn.execute(
                             '''UPDATE processed_games SET
                                 "Name"=?, "Summary"=?, "First Launch Date"=?,
                                 "Developers"=?, "Publishers"=?, "Genres"=?,
@@ -635,7 +666,7 @@ def api_save():
                             ),
                         )
                     else:
-                        db.execute(
+                        conn.execute(
                             '''INSERT INTO processed_games (
                                 "ID", "Source Index", "Name", "Summary",
                                 "First Launch Date", "Developers", "Publishers",
@@ -649,11 +680,11 @@ def api_save():
                                 row['Width'], row['Height'],
                             ),
                         )
-                    db.commit()
+                    conn.commit()
                     if new_record:
                         navigator.seq_index += 1
                 except sqlite3.IntegrityError:
-                    db.rollback()
+                    conn.rollback()
                     return jsonify({'error': 'conflict'}), 409
 
             if upload_name:
