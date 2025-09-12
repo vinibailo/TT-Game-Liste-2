@@ -7,6 +7,7 @@ let genresChoices, modesChoices;
 let navigating = false;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
+const saveBtnDefault = document.getElementById('save').textContent;
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
@@ -147,7 +148,6 @@ function setImage(dataUrl) {
     const saveBtn = document.getElementById('save');
     // Disable saving while the image is being prepared
     saveBtn.disabled = true;
-    const originalSaveText = saveBtn.textContent;
     saveBtn.textContent = 'Loading...';
 
     img.onload = function(){
@@ -168,7 +168,11 @@ function setImage(dataUrl) {
 
         // Re-enable the save button after cropper is ready
         saveBtn.disabled = false;
-        saveBtn.textContent = originalSaveText;
+        saveBtn.textContent = saveBtnDefault;
+    };
+    img.onerror = function(){
+        saveBtn.disabled = false;
+        saveBtn.textContent = saveBtnDefault;
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
