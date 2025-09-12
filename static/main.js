@@ -139,6 +139,10 @@ function generateSummary() {
 function updatePreview() {
     if (!cropper) return;
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
+    if (!canvas) {
+        alert('Não foi possível gerar a pré-visualização da imagem.');
+        return;
+    }
     document.getElementById('preview').src = canvas.toDataURL('image/jpeg', 0.9);
     saveSession();
 }
@@ -159,13 +163,13 @@ function setImage(dataUrl) {
                 autoCropArea: 1,
                 modal: false,
                 crop: updatePreview,
+                ready: updatePreview,
                 background: false
             });
             if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
                 showAlert('Imagem menor que 1080px será ampliada.', 'warning');
             }
             document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
-            updatePreview();
         } catch (err) {
             console.error(err);
             alert('Failed to initialize image: ' + (err.message || err));
