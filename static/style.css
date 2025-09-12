@@ -24,36 +24,42 @@ body {
   overflow: hidden;
 }
 
-header {
-  padding: 16px;
+.top-bar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
   background: var(--md-sys-color-surface);
+  padding: 16px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+  z-index: 1;
 }
 
-header h2 {
+#cover-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  margin-right: 16px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.title-block {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.title-block h2 {
   margin: 0;
   font-weight: 500;
 }
 
-#caption {
+#progress-text {
   margin-top: 4px;
   font-size: 0.9rem;
   color: #aaa;
-}
-
-.progress-bar {
-  width: 100%;
-  background: #333;
-  height: 4px;
-  margin-top: 8px;
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.progress-bar #progress {
-  height: 100%;
-  width: 0%;
-  background: var(--md-sys-color-primary);
 }
 
 .container {
