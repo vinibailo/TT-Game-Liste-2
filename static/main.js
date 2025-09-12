@@ -176,6 +176,9 @@ function setImage(dataUrl) {
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
+    if (img.complete) {
+        img.naturalWidth ? img.onload() : img.onerror();
+    }
 }
 
 function clearImage() {
