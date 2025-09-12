@@ -143,6 +143,22 @@ def ensure_dirs() -> None:
         os.makedirs(d, exist_ok=True)
 
 
+def normalize_processed_games() -> None:
+    """Ensure IDs in processed_games are sequential starting at 1."""
+    with db_lock:
+        with db:
+            cur = db.execute(
+                'SELECT "ID", "Source Index" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+            )
+            rows = cur.fetchall()
+            for new_id, row in enumerate(rows, start=1):
+                if str(row['ID']) != str(new_id):
+                    db.execute(
+                        'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
+                        (str(new_id), row['Source Index']),
+                    )
+
+
 class GameNavigator:
     """Thread-safe helper to navigate game list and track progress."""
 
@@ -358,6 +374,7 @@ def generate_pt_summary(game_name: str) -> str:
 ensure_dirs()
 games_df = load_games()
 total_games = len(games_df)
+normalize_processed_games()
 navigator = GameNavigator(total_games)
 
 @app.before_request

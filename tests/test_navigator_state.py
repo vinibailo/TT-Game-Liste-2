@@ -3,6 +3,7 @@ import json
 import uuid
 import importlib.util
 from pathlib import Path
+import sqlite3
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -203,4 +204,23 @@ def test_save_with_outdated_index_keeps_next_row_intact(tmp_path):
         )
         row = cur.fetchone()
     assert row['Name'] == 'original'
+
+
+def test_out_of_order_ids_are_normalized(tmp_path):
+    db_path = tmp_path / 'processed_games.db'
+    conn = sqlite3.connect(db_path)
+    with conn:
+        conn.execute('CREATE TABLE processed_games ("ID" TEXT PRIMARY KEY, "Source Index" TEXT UNIQUE)')
+        conn.executemany(
+            'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
+            [('5', '0'), ('1', '1'), ('3', '2')],
+        )
+    app = load_app(tmp_path)
+    with app.db_lock:
+        cur = app.db.execute(
+            'SELECT "ID", "Source Index" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+        )
+        rows = cur.fetchall()
+    assert [row['ID'] for row in rows] == ['1', '2', '3']
+    assert [row['Source Index'] for row in rows] == ['1', '2', '0']
 
