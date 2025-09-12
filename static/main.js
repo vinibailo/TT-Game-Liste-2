@@ -144,6 +144,12 @@ function updatePreview() {
 
 function setImage(dataUrl) {
     const img = document.getElementById('image');
+    const saveBtn = document.getElementById('save');
+    // Disable saving while the image is being prepared
+    saveBtn.disabled = true;
+    const originalSaveText = saveBtn.textContent;
+    saveBtn.textContent = 'Loading...';
+
     img.onload = function(){
         if (cropper) cropper.destroy();
         cropper = new Cropper(img, {
@@ -159,6 +165,10 @@ function setImage(dataUrl) {
         }
         document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
         updatePreview();
+
+        // Re-enable the save button after cropper is ready
+        saveBtn.disabled = false;
+        saveBtn.textContent = originalSaveText;
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
