@@ -33,7 +33,7 @@ def test_api_save_id_conflict(tmp_path):
         with app.db:
             app.db.execute(
                 'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                ('1', '0'),
+                (1, '0'),
             )
     app.navigator.current_index = 0
     client = app.app.test_client()
@@ -74,7 +74,7 @@ def test_api_save_success_increments_seq(tmp_path):
             ('0',),
         )
         row = cur.fetchone()
-    assert row['ID'] == '1'
+    assert row['ID'] == 1
 
 
 def test_api_save_conflict_does_not_increment_seq(tmp_path):
@@ -83,7 +83,7 @@ def test_api_save_conflict_does_not_increment_seq(tmp_path):
         with app.db:
             app.db.execute(
                 'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                ('2', '5'),
+                (2, '5'),
             )
     client = app.app.test_client()
     with client.session_transaction() as sess:
@@ -103,7 +103,7 @@ def test_api_save_existing_id_new_index_preserves_record(tmp_path):
         with app.db:
             app.db.execute(
                 'INSERT INTO processed_games ("ID", "Source Index", "Name") VALUES (?, ?, ?)',
-                ('1', '0', 'Original'),
+                (1, '0', 'Original'),
             )
     client = app.app.test_client()
     with client.session_transaction() as sess:
@@ -121,7 +121,7 @@ def test_api_save_existing_id_new_index_preserves_record(tmp_path):
     with app.db_lock:
         cur = app.db.execute(
             'SELECT "Source Index", "Name" FROM processed_games WHERE "ID"=?',
-            ('1',),
+            (1,),
         )
         row = cur.fetchone()
     assert row['Source Index'] == '0'

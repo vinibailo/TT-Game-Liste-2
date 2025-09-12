@@ -56,13 +56,49 @@ def get_db():
 
 
 
+def _migrate_id_column(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("PRAGMA table_info(processed_games)")
+    cols = cur.fetchall()
+    id_col = next((c for c in cols if c[1] == "ID"), None)
+    if id_col and id_col[2].upper() != "INTEGER":
+        conn.executescript(
+            '''
+            ALTER TABLE processed_games RENAME TO processed_games_old;
+            CREATE TABLE processed_games (
+                "ID" INTEGER PRIMARY KEY,
+                "Source Index" TEXT UNIQUE,
+                "Name" TEXT,
+                "Summary" TEXT,
+                "First Launch Date" TEXT,
+                "Developers" TEXT,
+                "Publishers" TEXT,
+                "Genres" TEXT,
+                "Game Modes" TEXT,
+                "Cover Path" TEXT,
+                "Width" INTEGER,
+                "Height" INTEGER
+            );
+            INSERT INTO processed_games (
+                "ID", "Source Index", "Name", "Summary", "First Launch Date",
+                "Developers", "Publishers", "Genres", "Game Modes", "Cover Path",
+                "Width", "Height"
+            )
+            SELECT CAST("ID" AS INTEGER), "Source Index", "Name", "Summary",
+                   "First Launch Date", "Developers", "Publishers", "Genres",
+                   "Game Modes", "Cover Path", "Width", "Height"
+            FROM processed_games_old;
+            DROP TABLE processed_games_old;
+            '''
+        )
+
+
 def _init_db() -> None:
     conn = sqlite3.connect(PROCESSED_DB)
     try:
         with conn:
             conn.execute(
                 '''CREATE TABLE IF NOT EXISTS processed_games (
-                    "ID" TEXT PRIMARY KEY,
+                    "ID" INTEGER PRIMARY KEY,
                     "Source Index" TEXT UNIQUE,
                     "Name" TEXT,
                     "Summary" TEXT,
@@ -84,6 +120,7 @@ def _init_db() -> None:
                     skip_queue TEXT
                 )'''
             )
+            _migrate_id_column(conn)
     finally:
         conn.close()
 
@@ -187,14 +224,14 @@ def normalize_processed_games() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "ID", "Source Index" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+                'SELECT "ID", "Source Index" FROM processed_games ORDER BY "ID"'
             )
             rows = cur.fetchall()
             for new_id, row in enumerate(rows, start=1):
-                if str(row['ID']) != str(new_id):
+                if row['ID'] != new_id:
                     conn.execute(
                         'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
-                        (str(new_id), row['Source Index']),
+                        (new_id, row['Source Index']),
                     )
 
 
@@ -217,7 +254,7 @@ class GameNavigator:
             cur = conn.execute('SELECT "Source Index", "ID" FROM processed_games')
             rows = cur.fetchall()
         processed = {int(r['Source Index']) for r in rows if str(r['Source Index']).isdigit()}
-        max_seq = max((int(r['ID']) for r in rows if str(r['ID']).isdigit()), default=0)
+        max_seq = max((r['ID'] for r in rows), default=0)
         next_index = next((i for i in range(self.total) if i not in processed), self.total)
         expected_seq = max_seq + 1
         if state_row is not None:
@@ -583,7 +620,7 @@ def api_save():
     upload_name = data.get('upload_name')
     if expected_id is None:
         return jsonify({'error': 'missing id'}), 400
-    expected_id = str(expected_id)
+    expected_id = int(expected_id)
     try:
         with navigator.lock:
             if index != navigator.current_index:
@@ -605,7 +642,7 @@ def api_save():
                 )
                 existing = cur.fetchone()
                 if existing:
-                    existing_id = str(existing['ID'])
+                    existing_id = existing['ID']
                     if existing_id != expected_id:
                         return (
                             jsonify(
@@ -620,7 +657,7 @@ def api_save():
                     seq_id = existing_id
                     new_record = False
                 else:
-                    seq_id = str(navigator.seq_index)
+                    seq_id = navigator.seq_index
                     if expected_id != seq_id:
                         return (
                             jsonify(

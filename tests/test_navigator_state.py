@@ -23,7 +23,7 @@ def populate_db(app_module, count):
             for i in range(count):
                 app_module.db.execute(
                     'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                    (str(i), str(i)),
+                    (i, str(i)),
                 )
 
 
@@ -94,7 +94,7 @@ def test_navigation_reloads_state_from_db(tmp_path):
         with app.db:
             app.db.execute(
                 'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                ('5', '5'),
+                (5, '5'),
             )
             app.db.execute(
                 'UPDATE navigator_state SET current_index=?, seq_index=?', (6, 6)
@@ -118,7 +118,7 @@ def test_navigation_reloads_state_from_db(tmp_path):
             for i in range(4):
                 app.db.execute(
                     'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                    (str(i), str(i)),
+                    (i, str(i)),
                 )
             app.db.execute(
                 'UPDATE navigator_state SET current_index=?, seq_index=?, skip_queue=?',
@@ -161,7 +161,7 @@ def test_next_after_save_advances_once(tmp_path):
             app.db.execute('DELETE FROM navigator_state')
     nav = app.GameNavigator(10)
     assert nav.current_index == 5
-    seq_id = str(nav.seq_index)
+    seq_id = nav.seq_index
     with app.db_lock:
         with app.db:
             app.db.execute(
@@ -218,9 +218,9 @@ def test_out_of_order_ids_are_normalized(tmp_path):
     app = load_app(tmp_path)
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID", "Source Index" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+            'SELECT "ID", "Source Index" FROM processed_games ORDER BY "ID"'
         )
         rows = cur.fetchall()
-    assert [row['ID'] for row in rows] == ['1', '2', '3']
+    assert [row['ID'] for row in rows] == [1, 2, 3]
     assert [row['Source Index'] for row in rows] == ['1', '2', '0']
 
