@@ -44,3 +44,35 @@ def test_api_save_id_conflict(tmp_path):
     data = resp.get_json()
     assert data['error'] == 'id mismatch'
 
+
+def test_api_save_seq_mismatch(tmp_path):
+    app = load_app(tmp_path)
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    app.navigator.current_index = 0
+    app.navigator.seq_index = 1
+    resp = client.post('/api/save', json={'index': 0, 'id': '0000002', 'fields': {}})
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data['error'] == 'id mismatch'
+
+
+def test_api_save_success_increments_seq(tmp_path):
+    app = load_app(tmp_path)
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    app.navigator.current_index = 0
+    app.navigator.seq_index = 1
+    resp = client.post('/api/save', json={'index': 0, 'id': '0000001', 'fields': {}})
+    assert resp.status_code == 200
+    assert app.navigator.seq_index == 2
+    with app.db_lock:
+        cur = app.db.execute(
+            'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+            ('0',),
+        )
+        row = cur.fetchone()
+    assert row['ID'] == '0000001'
+
