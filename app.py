@@ -565,9 +565,21 @@ def api_save():
                             409,
                         )
                     seq_id = existing_id
+                    new_record = False
                 else:
-                    seq_id = expected_id
-                    navigator.seq_index += 1
+                    seq_id = f"{navigator.seq_index:07d}"
+                    if expected_id != seq_id:
+                        return (
+                            jsonify(
+                                {
+                                    'error': 'id mismatch',
+                                    'expected': seq_id,
+                                    'actual': expected_id,
+                                }
+                            ),
+                            409,
+                        )
+                    new_record = True
 
             cover_path = ''
             width = height = 0
@@ -621,13 +633,17 @@ def api_save():
                             "Genres", "Game Modes", "Cover Path", "Width", "Height"
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                         (
-                            row['ID'], row['Source Index'], row['Name'], row['Summary'],
+                            seq_id,
+                            row['Source Index'], row['Name'], row['Summary'],
                             row['First Launch Date'], row['Developers'], row['Publishers'],
                             row['Genres'], row['Game Modes'], row['Cover Path'],
                             row['Width'], row['Height'],
                         ),
                     )
                 db.commit()
+
+            if new_record:
+                navigator.seq_index += 1
 
             if upload_name:
                 up_path = os.path.join(UPLOAD_DIR, upload_name)
