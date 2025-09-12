@@ -161,7 +161,7 @@ def test_next_after_save_advances_once(tmp_path):
             app.db.execute('DELETE FROM navigator_state')
     nav = app.GameNavigator(10)
     assert nav.current_index == 5
-    seq_id = f"{nav.seq_index:07d}"
+    seq_id = str(nav.seq_index)
     with app.db_lock:
         with app.db:
             app.db.execute(
@@ -193,7 +193,7 @@ def test_save_with_outdated_index_keeps_next_row_intact(tmp_path):
     app.navigator.current_index += 1  # now at 1
     resp = client.post(
         '/api/save',
-        json={'index': 0, 'id': '0000001', 'fields': {'Name': 'changed'}},
+        json={'index': 0, 'id': '1', 'fields': {'Name': 'changed'}},
     )
     assert resp.status_code == 409
     # Ensure the row for index 1 was not modified
