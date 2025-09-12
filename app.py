@@ -611,39 +611,42 @@ def api_save():
             }
 
             with db_lock:
-                if existing:
-                    db.execute(
-                        '''UPDATE processed_games SET
-                            "Name"=?, "Summary"=?, "First Launch Date"=?,
-                            "Developers"=?, "Publishers"=?, "Genres"=?,
-                            "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
-                           WHERE "ID"=?''',
-                        (
-                            row['Name'], row['Summary'], row['First Launch Date'],
-                            row['Developers'], row['Publishers'], row['Genres'],
-                            row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
-                            seq_id,
-                        ),
-                    )
-                else:
-                    db.execute(
-                        '''INSERT INTO processed_games (
-                            "ID", "Source Index", "Name", "Summary",
-                            "First Launch Date", "Developers", "Publishers",
-                            "Genres", "Game Modes", "Cover Path", "Width", "Height"
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (
-                            seq_id,
-                            row['Source Index'], row['Name'], row['Summary'],
-                            row['First Launch Date'], row['Developers'], row['Publishers'],
-                            row['Genres'], row['Game Modes'], row['Cover Path'],
-                            row['Width'], row['Height'],
-                        ),
-                    )
-                db.commit()
-
-            if new_record:
-                navigator.seq_index += 1
+                try:
+                    if existing:
+                        db.execute(
+                            '''UPDATE processed_games SET
+                                "Name"=?, "Summary"=?, "First Launch Date"=?,
+                                "Developers"=?, "Publishers"=?, "Genres"=?,
+                                "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
+                               WHERE "ID"=?''',
+                            (
+                                row['Name'], row['Summary'], row['First Launch Date'],
+                                row['Developers'], row['Publishers'], row['Genres'],
+                                row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
+                                seq_id,
+                            ),
+                        )
+                    else:
+                        db.execute(
+                            '''INSERT INTO processed_games (
+                                "ID", "Source Index", "Name", "Summary",
+                                "First Launch Date", "Developers", "Publishers",
+                                "Genres", "Game Modes", "Cover Path", "Width", "Height"
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                            (
+                                seq_id,
+                                row['Source Index'], row['Name'], row['Summary'],
+                                row['First Launch Date'], row['Developers'], row['Publishers'],
+                                row['Genres'], row['Game Modes'], row['Cover Path'],
+                                row['Width'], row['Height'],
+                            ),
+                        )
+                    db.commit()
+                    if new_record:
+                        navigator.seq_index += 1
+                except sqlite3.IntegrityError:
+                    db.rollback()
+                    return jsonify({'error': 'conflict'}), 409
 
             if upload_name:
                 up_path = os.path.join(UPLOAD_DIR, upload_name)
