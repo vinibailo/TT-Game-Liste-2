@@ -96,3 +96,34 @@ def test_api_save_conflict_does_not_increment_seq(tmp_path):
     assert data['error'] == 'conflict'
     assert app.navigator.seq_index == 2
 
+
+def test_api_save_existing_id_new_index_preserves_record(tmp_path):
+    app = load_app(tmp_path)
+    with app.db_lock:
+        with app.db:
+            app.db.execute(
+                'INSERT INTO processed_games ("ID", "Source Index", "Name") VALUES (?, ?, ?)',
+                ('0000001', '0', 'Original'),
+            )
+    client = app.app.test_client()
+    with client.session_transaction() as sess:
+        sess['authenticated'] = True
+    app.navigator.current_index = 1
+    app.navigator.seq_index = 1
+    resp = client.post(
+        '/api/save',
+        json={'index': 1, 'id': '0000001', 'fields': {'Name': 'Updated'}},
+    )
+    assert resp.status_code == 409
+    data = resp.get_json()
+    assert data['error'] == 'conflict'
+    assert app.navigator.seq_index == 1
+    with app.db_lock:
+        cur = app.db.execute(
+            'SELECT "Source Index", "Name" FROM processed_games WHERE "ID"=?',
+            ('0000001',),
+        )
+        row = cur.fetchone()
+    assert row['Source Index'] == '0'
+    assert row['Name'] == 'Original'
+
