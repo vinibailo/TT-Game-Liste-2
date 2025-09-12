@@ -151,24 +151,29 @@ function setImage(dataUrl) {
     saveBtn.textContent = 'Loading...';
 
     img.onload = function(){
-        if (cropper) cropper.destroy();
-        cropper = new Cropper(img, {
-            aspectRatio: 1,
-            viewMode: 2,
-            autoCropArea: 1,
-            modal: false,
-            crop: updatePreview,
-            background: false
-        });
-        if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
-            showAlert('Imagem menor que 1080px será ampliada.', 'warning');
+        try {
+            if (cropper) cropper.destroy();
+            cropper = new Cropper(img, {
+                aspectRatio: 1,
+                viewMode: 2,
+                autoCropArea: 1,
+                modal: false,
+                crop: updatePreview,
+                background: false
+            });
+            if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
+                showAlert('Imagem menor que 1080px será ampliada.', 'warning');
+            }
+            document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+            updatePreview();
+        } catch (err) {
+            console.error(err);
+            alert('Failed to initialize image: ' + (err.message || err));
+        } finally {
+            // Re-enable the save button after cropper is ready or on error
+            saveBtn.disabled = false;
+            saveBtn.textContent = saveBtnDefault;
         }
-        document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
-        updatePreview();
-
-        // Re-enable the save button after cropper is ready
-        saveBtn.disabled = false;
-        saveBtn.textContent = saveBtnDefault;
     };
     img.onerror = function(){
         saveBtn.disabled = false;
