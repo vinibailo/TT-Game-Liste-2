@@ -8,7 +8,17 @@ from typing import Any
 from threading import Lock
 import logging
 
-from flask import Flask, request, jsonify, render_template, session, redirect, url_for, g
+from flask import (
+    Flask,
+    request,
+    jsonify,
+    render_template,
+    session,
+    redirect,
+    url_for,
+    g,
+    has_app_context,
+)
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
@@ -37,6 +47,8 @@ db_lock = Lock()
 
 
 def get_db():
+    if not has_app_context():
+        return db
     if 'db' not in g:
         g.db = sqlite3.connect(PROCESSED_DB)
         g.db.row_factory = sqlite3.Row
@@ -78,6 +90,9 @@ def _init_db() -> None:
 
 _init_db()
 
+# Expose a module-level connection for tests and utilities
+db = sqlite3.connect(PROCESSED_DB)
+db.row_factory = sqlite3.Row
 
 @app.teardown_appcontext
 def close_db(exc):
@@ -474,7 +489,7 @@ def build_game_payload(index: int, seq: int) -> dict:
         'GameModes': modes,
     }
 
-    game_id = processed_row['ID'] if processed_row is not None else f"{seq:07d}"
+    game_id = processed_row['ID'] if processed_row is not None else str(seq)
 
     return {
         'index': int(index),
@@ -605,7 +620,7 @@ def api_save():
                     seq_id = existing_id
                     new_record = False
                 else:
-                    seq_id = f"{navigator.seq_index:07d}"
+                    seq_id = str(navigator.seq_index)
                     if expected_id != seq_id:
                         return (
                             jsonify(
