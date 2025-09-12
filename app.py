@@ -416,10 +416,19 @@ def build_game_payload(index: int, seq: int) -> dict:
         processed_row = cur.fetchone()
 
     if processed_row is not None and processed_row['Cover Path']:
-        img = open_image_auto_rotate(processed_row['Cover Path'])
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG')
-        cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+        cover_path = processed_row['Cover Path']
+        if os.path.exists(cover_path):
+            try:
+                img = open_image_auto_rotate(cover_path)
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG')
+                cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                app.logger.warning("Failed to open cover path %s", cover_path)
+                cover_data = find_cover(row)
+        else:
+            app.logger.warning("Cover path %s missing", cover_path)
+            cover_data = find_cover(row)
     else:
         cover_data = find_cover(row)
 
