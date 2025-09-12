@@ -56,7 +56,7 @@ body {
   font-weight: 500;
 }
 
-#progress-text {
+#progress-text, #game-id {
   margin-top: 4px;
   font-size: 0.9rem;
   color: #aaa;

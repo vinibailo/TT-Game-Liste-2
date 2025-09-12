@@ -84,6 +84,7 @@ function restoreSession() {
     const data = JSON.parse(s);
     if (data.index !== currentIndex) return;
     currentId = data.id;
+    document.getElementById('game-id').textContent = `ID: ${currentId || ''}`;
     document.getElementById('name').value = data.fields.Name;
     document.getElementById('summary').value = data.fields.Summary;
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
@@ -194,6 +195,7 @@ function applyGameData(data) {
     const seq = data.seq || 0;
     const total = data.total || 1;
     document.getElementById('progress-text').textContent = `${seq} / ${total} | ${(seq/total*100).toFixed(2)}%`;
+    document.getElementById('game-id').textContent = `ID: ${currentId || ''}`;
     document.getElementById('cover-thumb').src = data.cover || placeholderImage;
     document.getElementById('name').value = data.game.Name || '';
     document.getElementById('summary').value = data.game.Summary || '';
