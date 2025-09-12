@@ -29,29 +29,11 @@ APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
-
-
-def ensure_processed_db() -> None:
-    """Ensure processed games SQLite DB exists, migrating from Excel if needed."""
-    if os.path.exists(PROCESSED_DB):
-        return
-    if not os.path.exists('processed_games.xlsx'):
-        logger.info("%s not found, skipping migration", 'processed_games.xlsx')
-        return
-    try:
-        from migrate_to_db import migrate
-
-        migrate()
-    except Exception:
-        logger.exception("Failed to migrate processed games spreadsheet")
-
-
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 # SQLite setup for processed games
 db_lock = Lock()
-ensure_processed_db()
 db = sqlite3.connect(PROCESSED_DB, check_same_thread=False)
 db.row_factory = sqlite3.Row
 with db:
