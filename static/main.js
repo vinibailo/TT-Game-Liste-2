@@ -244,14 +244,21 @@ function saveGame() {
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({index: currentIndex, id: currentId, fields: fields, image: dataUrl, upload_name: currentUpload})
     })
-      .then(r=>r.json()).then(() => {
+      .then(async r => {
+          const res = await r.json();
+          if (!r.ok || res.error) throw new Error(res.error || 'save failed');
+          return res;
+      })
+      .then(() => {
           localStorage.removeItem('session');
           currentUpload = null;
           showAlert('The game was saved.', 'success');
-      }).catch(err => {
+      })
+      .catch(err => {
           console.error(err);
           showAlert('Failed to save game: ' + err.message, 'warning');
-      }).finally(() => {
+      })
+      .finally(() => {
           setNavDisabled(false);
           saveBtn.disabled = false;
           saveBtn.textContent = 'Save';
