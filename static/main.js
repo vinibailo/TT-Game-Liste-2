@@ -6,7 +6,7 @@ let originalImage = null;
 let genresChoices, modesChoices;
 let navigating = false;
 const imageUploadInput = document.getElementById('imageUpload');
-const placeholderImage = 'https://i.imgur.com/XZvvGuQ.png';
+const placeholderImage = '/no-image.jpg';
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
