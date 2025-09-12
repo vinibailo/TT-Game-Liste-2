@@ -199,10 +199,11 @@ function applyGameData(data) {
     currentIndex = data.index;
     currentId = data.id;
     document.getElementById('game-name').textContent = data.game.Name || '';
+    const seq = data.seq || 0;
+    const total = data.total || 1;
+    document.getElementById('progress-text').textContent = `${seq} / ${total} | ${(seq/total*100).toFixed(2)}%`;
     document.getElementById('game-id').textContent = `ID: ${currentId || ''}`;
-    const processed = (data.seq || 1) - 1;
-    document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
-    document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
+    document.getElementById('cover-thumb').src = data.cover || placeholderImage;
     document.getElementById('name').value = data.game.Name || '';
     document.getElementById('summary').value = data.game.Summary || '';
     document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
