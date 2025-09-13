@@ -219,20 +219,21 @@ def ensure_dirs() -> None:
 
 
 def normalize_processed_games() -> None:
-    """Ensure IDs in processed_games are sequential starting at 1."""
+    """Resequence IDs based on the order of ``Source Index``."""
     with db_lock:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "ID", "Source Index" FROM processed_games ORDER BY "ID"'
+                'SELECT "Source Index" FROM processed_games '
+                'ORDER BY CAST("Source Index" AS INTEGER)'
             )
-            rows = cur.fetchall()
-            for new_id, row in enumerate(rows, start=1):
-                if row['ID'] != new_id:
-                    conn.execute(
-                        'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
-                        (new_id, row['Source Index']),
-                    )
+            rows = [r["Source Index"] for r in cur.fetchall()]
+            for new_id, src_index in enumerate(rows, start=1):
+                conn.execute(
+                    'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
+                    (-new_id, src_index),
+                )
+            conn.execute('UPDATE processed_games SET "ID" = -"ID"')
 
 
 class GameNavigator:

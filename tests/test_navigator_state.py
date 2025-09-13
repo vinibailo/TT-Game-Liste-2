@@ -222,5 +222,5 @@ def test_out_of_order_ids_are_normalized(tmp_path):
         )
         rows = cur.fetchall()
     assert [row['ID'] for row in rows] == [1, 2, 3]
-    assert [row['Source Index'] for row in rows] == ['1', '2', '0']
+    assert [row['Source Index'] for row in rows] == ['0', '1', '2']
 
