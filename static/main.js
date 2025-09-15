@@ -6,9 +6,10 @@ let originalImage = null;
 let genresChoices, modesChoices, platformsChoices;
 let navigating = false;
 let totalGames = 0;
+let toastTimeout = null;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
-const saveBtnDefault = document.getElementById('save').textContent;
+const saveBtnDefault = document.getElementById('save').textContent.trim();
 const categoriesList = window.categoriesList || [];
 const platformsList = window.platformsList || [];
 const genresList = [
@@ -53,6 +54,15 @@ function setChoices(instance, values) {
     instance.setValue(values || []);
 }
 
+function updateGameIdDisplay(idValue) {
+    const idText = idValue ? String(idValue) : '—';
+    document.getElementById('game-id').textContent = idText;
+    const metaDisplay = document.getElementById('game-id-display');
+    if (metaDisplay) {
+        metaDisplay.textContent = idText;
+    }
+}
+
 function collectFields() {
     return {
         Name: document.getElementById('name').value,
@@ -68,8 +78,19 @@ function collectFields() {
 }
 
 function setNavDisabled(state) {
-    document.getElementById('next').disabled = state;
-    document.getElementById('previous').disabled = state;
+    ['next', 'previous', 'skip', 'reset'].forEach(id => {
+        const button = document.getElementById(id);
+        if (button) {
+            button.disabled = state;
+        }
+    });
+}
+
+function isTypingElement(element) {
+    if (!element) return false;
+    if (element.isContentEditable) return true;
+    const tag = element.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
 }
 
 function saveSession() {
@@ -90,8 +111,9 @@ function restoreSession() {
     const data = JSON.parse(s);
     if (data.index !== currentIndex) return;
     currentId = data.id != null ? String(data.id) : null;
-    document.getElementById('game-id').textContent = `ID: ${currentId ?? ''}`;
+    updateGameIdDisplay(currentId);
     document.getElementById('name').value = data.fields.Name;
+    document.getElementById('game-name').textContent = data.fields.Name || 'Untitled Game';
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.fields.Summary;
     summaryEl.classList.remove('expanded');
@@ -107,14 +129,18 @@ function restoreSession() {
     currentUpload = data.upload_name;
 }
 
-function showAlert(message, type = 'success') {
-    const banner = document.getElementById('alert-banner');
-    banner.textContent = message;
-    banner.className = type;
-    banner.style.display = 'block';
-    setTimeout(() => {
-        banner.style.display = 'none';
-    }, 5000);
+function showToast(message, type = 'success') {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    const normalizedType = type === 'error' ? 'warning' : type;
+    toast.textContent = message;
+    toast.className = '';
+    void toast.offsetWidth;
+    toast.classList.add(normalizedType, 'show');
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => {
+        toast.classList.remove('show');
+    }, 3200);
 }
 
 function generateSummary() {
@@ -134,12 +160,12 @@ function generateSummary() {
             saveSession();
         } else if (res.error) {
             console.error(res.error);
-            alert(res.error);
+            showToast(res.error, 'warning');
         } else {
-            alert('Não foi possível gerar o resumo.');
+            showToast('Não foi possível gerar o resumo.', 'warning');
         }
     })
-    .catch(err => { console.error(err); alert('Erro ao gerar resumo.'); })
+    .catch(err => { console.error(err); showToast('Erro ao gerar resumo.', 'warning'); })
     .finally(() => {
         btn.disabled = false;
         btn.textContent = 'Gerar Resumo';
@@ -150,7 +176,7 @@ function updatePreview() {
     if (!cropper) return;
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
     if (!canvas) {
-        alert('Não foi possível gerar a pré-visualização da imagem.');
+        showToast('Não foi possível gerar a pré-visualização da imagem.', 'warning');
         return;
     }
     document.getElementById('preview').src = canvas.toDataURL('image/jpeg', 0.9);
@@ -177,12 +203,12 @@ function setImage(dataUrl) {
                 background: false
             });
             if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
-                showAlert('Imagem menor que 1080px será ampliada.', 'warning');
+                showToast('Imagem menor que 1080px será ampliada.', 'warning');
             }
             document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
         } catch (err) {
             console.error(err);
-            alert('Failed to initialize image: ' + (err.message || err));
+            showToast('Failed to initialize image: ' + (err.message || err), 'warning');
         } finally {
             // Re-enable the save button after cropper is ready or on error
             saveBtn.disabled = false;
@@ -190,6 +216,7 @@ function setImage(dataUrl) {
         }
     };
     img.onerror = function(){
+        showToast('Não foi possível carregar a imagem enviada.', 'warning');
         saveBtn.disabled = false;
         saveBtn.textContent = saveBtnDefault;
     };
@@ -217,13 +244,19 @@ function applyGameData(data) {
     }
     currentIndex = data.index;
     currentId = data.id != null ? String(data.id) : null;
-    document.getElementById('game-name').textContent = data.game.Name || '';
-    document.getElementById('game-id').textContent = `ID: ${currentId ?? ''}`;
-    const processed = (data.seq || 1) - 1;
-    totalGames = data.total;
-    const percent = (processed / data.total * 100).toFixed(2);
-    document.getElementById('caption').textContent = `Progress: ${percent}% (${processed}/${data.total})`;
-    document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
+    document.getElementById('game-name').textContent = data.game.Name || 'Untitled Game';
+    updateGameIdDisplay(currentId);
+    const processed = Math.max(0, (data.seq || 1) - 1);
+    const total = data.total || 0;
+    totalGames = total;
+    const safeProcessed = total ? Math.min(processed, total) : processed;
+    const ratio = total ? safeProcessed / total : 0;
+    const progressPercent = Math.min(100, Math.max(0, ratio * 100));
+    document.getElementById('progress').style.width = `${progressPercent}%`;
+    const countLabel = `${safeProcessed}/${total || 0}`;
+    const percentLabel = `${progressPercent.toFixed(2)}%`;
+    document.getElementById('progress-count').textContent = countLabel;
+    document.getElementById('progress-percent').textContent = percentLabel;
     document.getElementById('name').value = data.game.Name || '';
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.game.Summary || '';
@@ -242,12 +275,13 @@ function applyGameData(data) {
     } else {
         clearImage();
         document.getElementById('image').src = placeholderImage;
+        document.getElementById('preview').src = placeholderImage;
         originalImage = null;
     }
     currentUpload = null;
     restoreSession();
     if (Array.isArray(data.missing) && data.missing.length) {
-        showAlert('Campos vazios: ' + data.missing.join(', '), 'warning');
+        showToast('Campos vazios: ' + data.missing.join(', '), 'warning');
     }
     saveSession();
 }
@@ -259,79 +293,99 @@ function loadGame() {
         .then(applyGameData)
         .catch(err => {
             console.error(err.stack || err);
-            showAlert('Failed to load game: ' + err.message, 'warning');
+            showToast('Failed to load game: ' + err.message, 'warning');
         })
         .finally(() => setNavDisabled(false));
 }
 
-function saveGame() {
-    if (!cropper) { showAlert('Selecione uma imagem', 'warning'); return; }
+async function saveGame() {
+    if (!cropper) {
+        showToast('Selecione uma imagem', 'warning');
+        return;
+    }
     const canvas = cropper.getCroppedCanvas({width:1080, height:1080});
+    if (!canvas) {
+        showToast('Não foi possível preparar a imagem.', 'warning');
+        return;
+    }
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
     setNavDisabled(true);
     const saveBtn = document.getElementById('save');
     saveBtn.disabled = true;
     saveBtn.textContent = 'Saving...';
-    fetch('api/save', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({index: currentIndex, id: currentId, fields: fields, image: dataUrl, upload_name: currentUpload})
-    })
-      .then(async r => {
-          const res = await r.json();
-          if (!r.ok || res.error) throw new Error(res.error || 'save failed');
-          return res;
-      })
-      .then(() => {
-          localStorage.removeItem('session');
-          currentUpload = null;
-          showAlert(`Saved ✔ Game ${currentIndex + 1}/${totalGames}`, 'success');
-          if (document.getElementById('auto-advance').checked) {
-              nextGame();
-          }
-      })
-      .catch(err => {
-          console.error(err);
-          showAlert('Failed to save game: ' + err.message, 'warning');
-      })
-      .finally(() => {
-          setNavDisabled(false);
-          saveBtn.disabled = false;
-          saveBtn.textContent = 'Save';
-      });
+    try {
+        const response = await fetch('api/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({index: currentIndex, id: currentId, fields, image: dataUrl, upload_name: currentUpload})
+        });
+        const result = await response.json();
+        if (!response.ok || result.error) {
+            throw new Error(result.error || 'save failed');
+        }
+        localStorage.removeItem('session');
+        currentUpload = null;
+        showToast(`Saved ✔ Game ${currentIndex + 1} of ${totalGames}`, 'success');
+        await nextGame(true);
+    } catch (err) {
+        console.error(err);
+        showToast('Failed to save game: ' + err.message, 'warning');
+    } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = saveBtnDefault;
+        setNavDisabled(false);
+    }
 }
 
-function skipGame() {
-    fetch('api/skip', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({index: currentIndex, upload_name: currentUpload})
-    })
-      .then(r=>r.json()).then(() => { localStorage.removeItem('session'); loadGame(); })
-      .catch(err => {
-          console.error(err);
-          showAlert('Failed to skip game: ' + err.message, 'warning');
-      });
-}
-
-function nextGame() {
-    if (navigating) return;
-    navigating = true;
+async function skipGame() {
     setNavDisabled(true);
-    fetch('api/next', {
+    try {
+        const response = await fetch('api/skip', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({index: currentIndex, upload_name: currentUpload})
+        });
+        const result = await response.json();
+        if (!response.ok || result.error) {
+            throw new Error(result.error || 'skip failed');
+        }
+        localStorage.removeItem('session');
+        currentUpload = null;
+        await loadGame();
+    } catch (err) {
+        console.error(err);
+        showToast('Failed to skip game: ' + err.message, 'warning');
+    } finally {
+        setNavDisabled(false);
+    }
+}
+
+function nextGame(autoAdvance = false) {
+    if (navigating) return Promise.resolve();
+    navigating = true;
+    if (!autoAdvance) {
+        setNavDisabled(true);
+    }
+    return fetch('api/next', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify({upload_name: currentUpload})
     })
-      .then(r=>r.json()).then(data => { localStorage.removeItem('session'); applyGameData(data); })
+      .then(r=>r.json())
+      .then(data => {
+          localStorage.removeItem('session');
+          applyGameData(data);
+      })
       .catch(err => {
           console.error(err);
-          showAlert('Failed to move to next game: ' + err.message, 'warning');
+          showToast('Failed to move to next game: ' + err.message, 'warning');
       })
       .finally(() => {
           navigating = false;
-          setNavDisabled(false);
+          if (!autoAdvance) {
+              setNavDisabled(false);
+          }
       });
 }
 
@@ -347,7 +401,7 @@ function previousGame() {
       .then(r=>r.json()).then(data => { localStorage.removeItem('session'); applyGameData(data); })
       .catch(err => {
           console.error(err);
-          showAlert('Failed to move to previous game: ' + err.message, 'warning');
+          showToast('Failed to move to previous game: ' + err.message, 'warning');
       })
       .finally(() => {
           navigating = false;
@@ -358,6 +412,7 @@ function previousGame() {
 function resetFields() {
     fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         document.getElementById('name').value = data.game.Name || '';
+        document.getElementById('game-name').textContent = data.game.Name || 'Untitled Game';
         const summaryEl = document.getElementById('summary');
         summaryEl.value = data.game.Summary || '';
         summaryEl.classList.remove('expanded');
@@ -375,13 +430,14 @@ function resetFields() {
         } else {
             clearImage();
             document.getElementById('image').src = placeholderImage;
+            document.getElementById('preview').src = placeholderImage;
             originalImage = null;
         }
         currentUpload = null;
         saveSession();
     }).catch(err => {
         console.error(err);
-        showAlert('Failed to reset fields: ' + err.message, 'warning');
+        showToast('Failed to reset fields: ' + err.message, 'warning');
     });
 }
 
@@ -395,20 +451,14 @@ imageUploadInput.addEventListener('change', function(){
         .then(res => { currentUpload = res.filename; setImage(res.data); })
         .catch(err => {
             console.error(err);
-            showAlert('Failed to upload image: ' + err.message, 'warning');
+            showToast('Failed to upload image: ' + err.message, 'warning');
         });
 });
 
-const genBtn = document.createElement('button');
-genBtn.type = 'button';
-genBtn.id = 'generate-summary';
-genBtn.textContent = 'Gerar Resumo';
-document.getElementById('summary').parentNode.appendChild(genBtn);
-genBtn.addEventListener('click', generateSummary);
-
+document.getElementById('generate-summary').addEventListener('click', generateSummary);
 document.getElementById('save').addEventListener('click', saveGame);
 document.getElementById('skip').addEventListener('click', skipGame);
-document.getElementById('next').addEventListener('click', nextGame);
+document.getElementById('next').addEventListener('click', () => nextGame());
 document.getElementById('previous').addEventListener('click', previousGame);
 document.getElementById('reset').addEventListener('click', resetFields);
 function revertImage() {
@@ -419,25 +469,26 @@ function revertImage() {
         } else {
             clearImage();
             document.getElementById('image').src = placeholderImage;
+            document.getElementById('preview').src = placeholderImage;
             originalImage = null;
         }
         currentUpload = null;
         saveSession();
     }).catch(err => {
         console.error(err);
-        showAlert('Failed to revert image: ' + err.message, 'warning');
+        showToast('Failed to revert image: ' + err.message, 'warning');
     });
 }
 
 document.getElementById('revert-image').addEventListener('click', revertImage);
-const mobileRevertBtn = document.getElementById('mobile-revert-image');
-if (mobileRevertBtn) {
-    mobileRevertBtn.addEventListener('click', revertImage);
-}
-
 ['name','summary','first-launch','developers','publishers','category'].forEach(id => {
     const el = document.getElementById(id);
     ['change','input'].forEach(ev => el.addEventListener(ev, saveSession));
+});
+
+document.getElementById('name').addEventListener('input', (event) => {
+    const value = event.target.value;
+    document.getElementById('game-name').textContent = value || 'Untitled Game';
 });
 
 document.getElementById('expand-summary').addEventListener('click', () => {
@@ -451,13 +502,40 @@ document.getElementById('expand-summary').addEventListener('click', () => {
     }
 });
 
-document.querySelectorAll('.chip-add').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const target = btn.dataset.target;
-        const inst = target === 'genres' ? genresChoices : modesChoices;
-        inst.showDropdown();
-        inst.input.focus();
-    });
+document.addEventListener('keydown', (event) => {
+    const activeElement = document.activeElement;
+    const typing = isTypingElement(activeElement);
+    const key = event.key;
+    const lower = key.toLowerCase();
+
+    if (key === 'Escape') {
+        event.preventDefault();
+        resetFields();
+        return;
+    }
+
+    if (lower === 's') {
+        if (event.ctrlKey || event.metaKey) {
+            event.preventDefault();
+            saveGame();
+            return;
+        }
+        if (!event.altKey && !event.metaKey && !event.ctrlKey && !typing) {
+            event.preventDefault();
+            saveGame();
+            return;
+        }
+    }
+
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && !typing) {
+        if (key === 'ArrowRight') {
+            event.preventDefault();
+            nextGame();
+        } else if (key === 'ArrowLeft') {
+            event.preventDefault();
+            previousGame();
+        }
+    }
 });
 
 populateSelect('category', categoriesList);
