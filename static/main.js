@@ -9,11 +9,7 @@ let totalGames = 0;
 let toastTimeout = null;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
-const saveBtn = document.getElementById('save');
-const saveBtnLabel = saveBtn ? saveBtn.querySelector('.btn-label') : null;
-const saveBtnDefault = saveBtn
-    ? (saveBtn.dataset.defaultLabel || (saveBtnLabel ? saveBtnLabel.textContent.trim() : saveBtn.textContent.trim()))
-    : '';
+const saveBtnDefault = document.getElementById('save').textContent.trim();
 const categoriesList = window.categoriesList || [];
 const platformsList = window.platformsList || [];
 const genresList = [
@@ -60,9 +56,10 @@ function setChoices(instance, values) {
 
 function updateGameIdDisplay(idValue) {
     const idText = idValue ? String(idValue) : '—';
-    const headerId = document.getElementById('game-id');
-    if (headerId) {
-        headerId.textContent = idText;
+    document.getElementById('game-id').textContent = idText;
+    const metaDisplay = document.getElementById('game-id-display');
+    if (metaDisplay) {
+        metaDisplay.textContent = idText;
     }
 }
 
@@ -87,17 +84,6 @@ function setNavDisabled(state) {
             button.disabled = state;
         }
     });
-}
-
-function setSaveButtonText(text) {
-    if (!saveBtn) {
-        return;
-    }
-    if (saveBtnLabel) {
-        saveBtnLabel.textContent = text;
-    } else {
-        saveBtn.textContent = text;
-    }
 }
 
 function isTypingElement(element) {
@@ -199,11 +185,10 @@ function updatePreview() {
 
 function setImage(dataUrl) {
     const img = document.getElementById('image');
-    if (saveBtn) {
-        // Disable saving while the image is being prepared
-        saveBtn.disabled = true;
-        setSaveButtonText('Loading...');
-    }
+    const saveBtn = document.getElementById('save');
+    // Disable saving while the image is being prepared
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Loading...';
 
     img.onload = function(){
         try {
@@ -226,18 +211,14 @@ function setImage(dataUrl) {
             showToast('Failed to initialize image: ' + (err.message || err), 'warning');
         } finally {
             // Re-enable the save button after cropper is ready or on error
-            if (saveBtn) {
-                saveBtn.disabled = false;
-                setSaveButtonText(saveBtnDefault);
-            }
+            saveBtn.disabled = false;
+            saveBtn.textContent = saveBtnDefault;
         }
     };
     img.onerror = function(){
         showToast('Não foi possível carregar a imagem enviada.', 'warning');
-        if (saveBtn) {
-            saveBtn.disabled = false;
-            setSaveButtonText(saveBtnDefault);
-        }
+        saveBtn.disabled = false;
+        saveBtn.textContent = saveBtnDefault;
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
@@ -330,10 +311,9 @@ async function saveGame() {
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
     setNavDisabled(true);
-    if (saveBtn) {
-        saveBtn.disabled = true;
-        setSaveButtonText('Saving...');
-    }
+    const saveBtn = document.getElementById('save');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving...';
     try {
         const response = await fetch('api/save', {
             method: 'POST',
@@ -352,10 +332,8 @@ async function saveGame() {
         console.error(err);
         showToast('Failed to save game: ' + err.message, 'warning');
     } finally {
-        if (saveBtn) {
-            saveBtn.disabled = false;
-            setSaveButtonText(saveBtnDefault);
-        }
+        saveBtn.disabled = false;
+        saveBtn.textContent = saveBtnDefault;
         setNavDisabled(false);
     }
 }
