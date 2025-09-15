@@ -74,18 +74,20 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                 "Publishers" TEXT,
                 "Genres" TEXT,
                 "Game Modes" TEXT,
+                "Category" TEXT,
+                "Platforms" TEXT,
                 "Cover Path" TEXT,
                 "Width" INTEGER,
                 "Height" INTEGER
             );
             INSERT INTO processed_games (
                 "ID", "Source Index", "Name", "Summary", "First Launch Date",
-                "Developers", "Publishers", "Genres", "Game Modes", "Cover Path",
-                "Width", "Height"
+                "Developers", "Publishers", "Genres", "Game Modes", "Category",
+                "Platforms", "Cover Path", "Width", "Height"
             )
             SELECT CAST("ID" AS INTEGER), "Source Index", "Name", "Summary",
                    "First Launch Date", "Developers", "Publishers", "Genres",
-                   "Game Modes", "Cover Path", "Width", "Height"
+                   "Game Modes", '', '', "Cover Path", "Width", "Height"
             FROM processed_games_old;
             DROP TABLE processed_games_old;
             '''
@@ -107,6 +109,8 @@ def _init_db() -> None:
                     "Publishers" TEXT,
                     "Genres" TEXT,
                     "Game Modes" TEXT,
+                    "Category" TEXT,
+                    "Platforms" TEXT,
                     "Cover Path" TEXT,
                     "Width" INTEGER,
                     "Height" INTEGER
@@ -121,6 +125,14 @@ def _init_db() -> None:
                 )'''
             )
             _migrate_id_column(conn)
+            try:
+                conn.execute('ALTER TABLE processed_games ADD COLUMN "Category" TEXT')
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
+            except sqlite3.OperationalError:
+                pass
     finally:
         conn.close()
 
@@ -182,7 +194,10 @@ def load_games() -> pd.DataFrame:
     if 'Rating Count' in df.columns:
         df['Rating Count'] = pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
         df = df.sort_values(by='Rating Count', ascending=False, kind='mergesort')
-    df = df.drop_duplicates(subset='Name', keep='first')
+    subset_cols = ['Name']
+    if 'Year' in df.columns:
+        subset_cols.append('Year')
+    df = df.drop_duplicates(subset=subset_cols, keep='first')
     df = df.reset_index(drop=True)
     return df
 
@@ -453,6 +468,17 @@ def generate_pt_summary(game_name: str) -> str:
 # initial load
 ensure_dirs()
 games_df = load_games()
+categories_list = sorted({
+    str(c).strip()
+    for c in games_df.get('Category', pd.Series(dtype=str)).dropna()
+    if str(c).strip()
+})
+platforms_list = sorted({
+    p.strip()
+    for ps in games_df.get('Platforms', pd.Series(dtype=str)).dropna()
+    for p in str(ps).split(',')
+    if p.strip()
+})
 total_games = len(games_df)
 with app.app_context():
     normalize_processed_games()
@@ -482,7 +508,12 @@ def logout():
 
 @app.route('/')
 def index():
-    return render_template('index.html', total=total_games)
+    return render_template(
+        'index.html',
+        total=total_games,
+        categories=categories_list,
+        platforms=platforms_list,
+    )
 
 
 def build_game_payload(index: int, seq: int) -> dict:
@@ -516,6 +547,7 @@ def build_game_payload(index: int, seq: int) -> dict:
     source_row = pd.Series(dict(processed_row)) if processed_row is not None else row
     genres = extract_list(source_row, ['Genres', 'Genre'])
     modes = extract_list(source_row, ['Game Modes', 'Mode'])
+    platforms = extract_list(source_row, ['Platforms', 'Platform'])
     missing: list[str] = []
     game_fields = {
         'Name': get_cell(source_row, 'Name', missing),
@@ -525,6 +557,8 @@ def build_game_payload(index: int, seq: int) -> dict:
         'Publishers': get_cell(source_row, 'Publishers', missing),
         'Genres': genres,
         'GameModes': modes,
+        'Category': get_cell(source_row, 'Category', missing),
+        'Platforms': platforms,
     }
 
     game_id = processed_row['ID'] if processed_row is not None else str(seq)
@@ -565,6 +599,7 @@ def api_game_raw(index: int):
     cover_data = find_cover(row)
     genres = extract_list(row, ['Genres', 'Genre'])
     modes = extract_list(row, ['Game Modes', 'Mode'])
+    platforms = extract_list(row, ['Platforms', 'Platform'])
     dummy: list[str] = []
     game_fields = {
         'Name': get_cell(row, 'Name', dummy),
@@ -574,6 +609,8 @@ def api_game_raw(index: int):
         'Publishers': get_cell(row, 'Publishers', dummy),
         'Genres': genres,
         'GameModes': modes,
+        'Category': get_cell(row, 'Category', dummy),
+        'Platforms': platforms,
     }
     return jsonify({
         'index': int(index),
@@ -696,6 +733,8 @@ def api_save():
                 "Publishers": fields.get('Publishers', ''),
                 "Genres": ', '.join(fields.get('Genres', [])),
                 "Game Modes": ', '.join(fields.get('GameModes', [])),
+                "Category": fields.get('Category', ''),
+                "Platforms": ', '.join(fields.get('Platforms', [])),
                 "Cover Path": cover_path,
                 "Width": width,
                 "Height": height,
@@ -709,12 +748,14 @@ def api_save():
                             '''UPDATE processed_games SET
                                 "Name"=?, "Summary"=?, "First Launch Date"=?,
                                 "Developers"=?, "Publishers"=?, "Genres"=?,
-                                "Game Modes"=?, "Cover Path"=?, "Width"=?, "Height"=?
+                                "Game Modes"=?, "Category"=?, "Platforms"=?,
+                                "Cover Path"=?, "Width"=?, "Height"=?
                                WHERE "ID"=?''',
                             (
                                 row['Name'], row['Summary'], row['First Launch Date'],
                                 row['Developers'], row['Publishers'], row['Genres'],
-                                row['Game Modes'], row['Cover Path'], row['Width'], row['Height'],
+                                row['Game Modes'], row['Category'], row['Platforms'],
+                                row['Cover Path'], row['Width'], row['Height'],
                                 seq_id,
                             ),
                         )
@@ -723,13 +764,15 @@ def api_save():
                             '''INSERT INTO processed_games (
                                 "ID", "Source Index", "Name", "Summary",
                                 "First Launch Date", "Developers", "Publishers",
-                                "Genres", "Game Modes", "Cover Path", "Width", "Height"
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                "Genres", "Game Modes", "Category", "Platforms",
+                                "Cover Path", "Width", "Height"
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                             (
                                 seq_id,
                                 row['Source Index'], row['Name'], row['Summary'],
                                 row['First Launch Date'], row['Developers'], row['Publishers'],
-                                row['Genres'], row['Game Modes'], row['Cover Path'],
+                                row['Genres'], row['Game Modes'], row['Category'],
+                                row['Platforms'], row['Cover Path'],
                                 row['Width'], row['Height'],
                             ),
                         )
