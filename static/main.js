@@ -3,11 +3,13 @@ let currentIndex = 0;
 let currentId = null;
 let currentUpload = null;
 let originalImage = null;
-let genresChoices, modesChoices;
+let genresChoices, modesChoices, platformsChoices;
 let navigating = false;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
 const saveBtnDefault = document.getElementById('save').textContent;
+const categoriesList = window.categoriesList || [];
+const platformsList = window.platformsList || [];
 const genresList = [
     'Ação e Aventura',
     'Cartas e Tabuleiro',
@@ -57,8 +59,10 @@ function collectFields() {
         FirstLaunchDate: document.getElementById('first-launch').value,
         Developers: document.getElementById('developers').value,
         Publishers: document.getElementById('publishers').value,
+        Category: document.getElementById('category').value,
         Genres: genresChoices.getValue(true),
-        GameModes: modesChoices.getValue(true)
+        GameModes: modesChoices.getValue(true),
+        Platforms: platformsChoices.getValue(true)
     };
 }
 
@@ -91,8 +95,10 @@ function restoreSession() {
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
     document.getElementById('developers').value = data.fields.Developers;
     document.getElementById('publishers').value = data.fields.Publishers;
+    document.getElementById('category').value = data.fields.Category;
     setChoices(genresChoices, data.fields.Genres);
     setChoices(modesChoices, data.fields.GameModes);
+    setChoices(platformsChoices, data.fields.Platforms);
     if (data.image) setImage(data.image);
     currentUpload = data.upload_name;
 }
@@ -217,8 +223,10 @@ function applyGameData(data) {
     document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
     document.getElementById('developers').value = data.game.Developers || '';
     document.getElementById('publishers').value = data.game.Publishers || '';
+    document.getElementById('category').value = data.game.Category || '';
     setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
     setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
+    setChoices(platformsChoices, Array.isArray(data.game.Platforms)?data.game.Platforms:[]);
     if (data.cover) {
         setImage(data.cover);
         originalImage = data.cover;
@@ -341,8 +349,10 @@ function resetFields() {
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
         document.getElementById('developers').value = data.game.Developers || '';
         document.getElementById('publishers').value = data.game.Publishers || '';
+        document.getElementById('category').value = data.game.Category || '';
         setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
         setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
+        setChoices(platformsChoices, Array.isArray(data.game.Platforms)?data.game.Platforms:[]);
         if (data.cover) {
             setImage(data.cover);
             originalImage = data.cover;
@@ -403,14 +413,18 @@ document.getElementById('revert-image').addEventListener('click', function(){
     });
 });
 
-['name','summary','first-launch','developers','publishers'].forEach(id => {
+['name','summary','first-launch','developers','publishers','category'].forEach(id => {
     document.getElementById(id).addEventListener('change', saveSession);
 });
 
+populateSelect('category', categoriesList);
+populateSelect('platforms', platformsList);
 populateSelect('genres', genresList);
 populateSelect('modes', modesList);
 genresChoices = new Choices('#genres', { removeItemButton: true });
 modesChoices = new Choices('#modes', { removeItemButton: true });
+platformsChoices = new Choices('#platforms', { removeItemButton: true });
 genresChoices.passedElement.element.addEventListener('change', saveSession);
 modesChoices.passedElement.element.addEventListener('change', saveSession);
+platformsChoices.passedElement.element.addEventListener('change', saveSession);
 loadGame();

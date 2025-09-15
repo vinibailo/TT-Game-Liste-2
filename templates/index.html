@@ -50,6 +50,14 @@
                     <input type="text" id="publishers" />
                 </label>
                 <div class="select-row">
+                    <label>Category
+                        <select id="category"></select>
+                    </label>
+                    <label>Platforms
+                        <select id="platforms" multiple></select>
+                    </label>
+                </div>
+                <div class="select-row">
                     <label>Genres
                         <select id="genres" multiple></select>
                     </label>
@@ -68,6 +76,10 @@
             </div>
         </div>
     </div>
+    <script>
+        window.categoriesList = {{ categories|tojson }};
+        window.platformsList = {{ platforms|tojson }};
+    </script>
     <script src="{{ url_for('static', filename='main.js') }}"></script>
 </body>
 </html>
