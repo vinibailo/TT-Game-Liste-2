@@ -12,97 +12,105 @@
     <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
 </head>
 <body>
-    <div id="alert-banner"></div>
-    <header>
-        <div class="header-row">
+    <div id="toast" role="status" aria-live="polite"></div>
+    <header class="editor-header">
+        <div class="header-main">
             <div class="header-info">
-                <h2 id="game-name"></h2>
-                <div id="game-id"></div>
-                <div id="caption"></div>
+                <h1 id="game-name"></h1>
+                <div class="header-meta">
+                    <span class="meta-label">Game ID</span>
+                    <span id="game-id" class="meta-value">—</span>
+                </div>
             </div>
-            <div class="buttons" id="action-bar">
-                <label class="auto-advance"><input type="checkbox" id="auto-advance"> Auto Next</label>
-                <button type="button" id="previous">Previous</button>
-                <button type="button" id="next">Next</button>
-                <button type="button" id="save" class="save-btn">Save</button>
-                <button type="button" id="skip">Skip</button>
-                <button type="button" id="reset">Reset</button>
+            <div class="progress-indicator">
+                <div class="progress-metrics">
+                    <span id="progress-count" class="progress-count">0/0</span>
+                    <span id="progress-percent" class="progress-percent">0.00%</span>
+                </div>
+                <div class="progress-bar"><div id="progress"></div></div>
             </div>
         </div>
-        <div class="progress-bar"><div id="progress"></div></div>
+        <nav class="action-row" id="action-bar" aria-label="Game actions">
+            <button type="button" id="previous" class="btn btn-blue">Previous</button>
+            <button type="button" id="next" class="btn btn-blue">Next</button>
+            <button type="button" id="save" class="btn btn-green">Save</button>
+            <button type="button" id="skip" class="btn btn-yellow">Skip</button>
+            <button type="button" id="reset" class="btn btn-red">Reset</button>
+        </nav>
     </header>
-    <div class="container">
-        <div class="left">
+    <main class="editor-body">
+        <section class="details-column">
             <form id="game-form">
-                <div class="top-row">
-                    <div id="preview-container">
-                        <img id="preview" />
-                        <div class="image-controls image-controls-mobile">
-                            <label for="imageUpload" class="file-trigger">Choose File</label>
-                            <button type="button" id="mobile-revert-image">Revert</button>
+                <div class="field-grid">
+                    <label>Title
+                        <input type="text" id="name" autocomplete="off" />
+                    </label>
+                    <div class="static-field">
+                        <span class="static-label">Game ID</span>
+                        <span id="game-id-display" class="static-value">—</span>
+                    </div>
+                    <label>First Launch Date
+                        <input type="text" id="first-launch" autocomplete="off" />
+                    </label>
+                </div>
+                <div class="summary-section">
+                    <div class="summary-header">
+                        <label for="summary">Summary</label>
+                        <div class="summary-actions">
+                            <button type="button" id="expand-summary" class="btn btn-outline">Expand</button>
+                            <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
                         </div>
                     </div>
-                    <div class="primary-fields">
-                        <label>Name
-                            <input type="text" id="name" />
-                        </label>
-                        <label>First Launch Date
-                            <input type="text" id="first-launch" />
-                        </label>
+                    <textarea id="summary"></textarea>
+                </div>
+                <div class="chip-field">
+                    <label for="platforms">Platforms</label>
+                    <select id="platforms" multiple></select>
+                </div>
+                <div class="chip-grid">
+                    <div class="chip-field">
+                        <label for="genres">Genres</label>
+                        <select id="genres" multiple aria-label="Genres"></select>
+                    </div>
+                    <div class="chip-field">
+                        <label for="modes">Game Modes</label>
+                        <select id="modes" multiple aria-label="Game modes"></select>
+                    </div>
+                </div>
+                <details class="field-accordion" id="meta-accordion">
+                    <summary>Additional metadata</summary>
+                    <div class="field-accordion-content">
                         <label>Category
                             <select id="category"></select>
                         </label>
+                        <label>Developers
+                            <input type="text" id="developers" autocomplete="off" />
+                        </label>
+                        <label>Publishers
+                            <input type="text" id="publishers" autocomplete="off" />
+                        </label>
                     </div>
-                    <details id="extra-fields" open>
-                        <summary>More Fields</summary>
-                        <div class="extra-content">
-                            <label>Developers
-                                <input type="text" id="developers" />
-                            </label>
-                            <label>Publishers
-                                <input type="text" id="publishers" />
-                            </label>
-                        </div>
-                    </details>
-                </div>
-                <div class="summary-field">
-                    <label>Summary
-                        <textarea id="summary"></textarea>
-                    </label>
-                    <button type="button" id="expand-summary">Expand</button>
-                </div>
-                <div class="select-row">
-                    <label>Platforms
-                        <select id="platforms" multiple></select>
-                    </label>
-                </div>
-                <div class="select-row chip-row">
-                    <div class="chip-group">
-                        <span class="chip-label" id="genres-label">Genres</span>
-                        <div class="chip-scroll">
-                            <select id="genres" multiple aria-labelledby="genres-label"></select>
-                        </div>
-                        <button type="button" class="chip-add" data-target="genres">+ Add</button>
-                    </div>
-                    <div class="chip-group">
-                        <span class="chip-label" id="modes-label">Game Modes</span>
-                        <div class="chip-scroll">
-                            <select id="modes" multiple aria-labelledby="modes-label"></select>
-                        </div>
-                        <button type="button" class="chip-add" data-target="modes">+ Add</button>
-                    </div>
-                </div>
+                </details>
             </form>
-        </div>
-        <div class="right">
+        </section>
+        <aside class="image-column">
             <input type="file" id="imageUpload" accept="image/*" />
-            <button type="button" id="revert-image">Revert Image</button>
-            <div class="image-wrapper">
-                <img id="image" />
-                <div id="image-resolution" class="resolution-label"></div>
+            <div class="image-toolbar">
+                <label for="imageUpload" class="btn btn-outline">Choose File</label>
+                <button type="button" id="revert-image" class="btn btn-outline">Revert Image</button>
             </div>
-        </div>
-    </div>
+            <div class="image-panel">
+                <div class="image-wrapper">
+                    <img id="image" alt="Cover image workspace" />
+                    <div id="image-resolution" class="resolution-label"></div>
+                </div>
+                <div class="preview-panel">
+                    <h3>Preview</h3>
+                    <img id="preview" alt="Cropped preview" />
+                </div>
+            </div>
+        </aside>
+    </main>
     <script>
         window.categoriesList = {{ categories|tojson }};
         window.platformsList = {{ platforms|tojson }};
