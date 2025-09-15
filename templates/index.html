@@ -14,9 +14,20 @@
 <body>
     <div id="alert-banner"></div>
     <header>
-        <h2 id="game-name"></h2>
-        <div id="game-id"></div>
-        <div id="caption"></div>
+        <div class="header-row">
+            <div class="header-info">
+                <h2 id="game-name"></h2>
+                <div id="game-id"></div>
+                <div id="caption"></div>
+            </div>
+            <div class="buttons">
+                <button type="button" id="previous">Previous</button>
+                <button type="button" id="next">Next</button>
+                <button type="button" id="save">Save</button>
+                <button type="button" id="skip">Skip</button>
+                <button type="button" id="reset">Reset</button>
+            </div>
+        </div>
         <div class="progress-bar"><div id="progress"></div></div>
     </header>
     <div class="container">
@@ -26,22 +37,20 @@
                     <div id="preview-container">
                         <img id="preview" />
                     </div>
-                    <div class="buttons">
-                        <button type="button" id="previous">Previous</button>
-                        <button type="button" id="next">Next</button>
-                        <button type="button" id="save">Save</button>
-                        <button type="button" id="skip">Skip</button>
-                        <button type="button" id="reset">Reset</button>
+                    <div class="primary-fields">
+                        <label>Name
+                            <input type="text" id="name" />
+                        </label>
+                        <label>First Launch Date
+                            <input type="text" id="first-launch" />
+                        </label>
+                        <label>Category
+                            <select id="category"></select>
+                        </label>
                     </div>
                 </div>
-                <label>Name
-                    <input type="text" id="name" />
-                </label>
                 <label>Summary
                     <textarea id="summary"></textarea>
-                </label>
-                <label>First Launch Date
-                    <input type="text" id="first-launch" />
                 </label>
                 <label>Developers
                     <input type="text" id="developers" />
@@ -50,9 +59,6 @@
                     <input type="text" id="publishers" />
                 </label>
                 <div class="select-row">
-                    <label>Category
-                        <select id="category"></select>
-                    </label>
                     <label>Platforms
                         <select id="platforms" multiple></select>
                     </label>

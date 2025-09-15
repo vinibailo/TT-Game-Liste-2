@@ -30,6 +30,23 @@ header {
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.header-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.primary-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 header h2 {
   margin: 0;
   font-weight: 500;
@@ -165,9 +182,8 @@ button#reset {
 
 .top-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 16px;
 }
 
 
