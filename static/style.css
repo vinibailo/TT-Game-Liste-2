@@ -22,7 +22,6 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-bottom: 72px;
 }
 
 header {
@@ -150,6 +149,13 @@ input:focus, textarea:focus, select:focus {
   background: var(--md-sys-color-surface);
 }
 
+.buttons {
+  margin-top: 0;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 button {
   border: none;
   border-radius: 24px;
@@ -174,10 +180,8 @@ button#next {
   background: var(--md-sys-color-info);
 }
 
-button#save,
-#action-bar .save-btn {
+button#save {
   background: var(--md-sys-color-success);
-  color: #fff;
 }
 
 button#reset {
@@ -194,101 +198,6 @@ button#reset {
 
 #revert-image {
   margin-bottom: 8px;
-}
-
-.image-controls {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin: 8px 0;
-}
-
-.image-controls input[type="file"] {
-  flex: 1;
-}
-
-#extra-fields {
-  margin-top: 8px;
-}
-
-#extra-fields .extra-content {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 8px;
-}
-
-.summary-field {
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-#summary {
-  max-height: 4.5em;
-  overflow: hidden;
-}
-
-#summary.expanded {
-  max-height: none;
-}
-
-#expand-summary {
-  align-self: flex-end;
-  margin-top: 4px;
-}
-
-.chip-group {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-}
-
-.chip-scroll {
-  overflow-x: auto;
-}
-
-.chip-scroll .choices__list--multiple {
-  display: flex;
-  flex-wrap: nowrap;
-}
-
-.chip-scroll .choices__list--multiple .choices__item {
-  flex: 0 0 auto;
-}
-
-.chip-group .chip-add {
-  margin-top: 4px;
-  align-self: flex-start;
-}
-
-#action-bar {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: var(--md-sys-color-surface);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  box-shadow: 0 -2px 4px rgba(0,0,0,0.4);
-}
-
-#action-bar button {
-  flex: 1;
-}
-
-#action-bar .save-btn {
-  flex: 1.5;
-}
-
-#action-bar .auto-advance {
-  flex: 0 0 auto;
-  font-size: 0.8rem;
-  display: flex;
-  align-items: center;
-  gap: 4px;
 }
 
 .cropper-bg {
