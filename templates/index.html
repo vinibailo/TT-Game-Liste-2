@@ -20,35 +20,33 @@
                 <div id="game-id"></div>
                 <div id="caption"></div>
             </div>
-            <div class="buttons">
-                <button type="button" id="previous">Previous</button>
-                <button type="button" id="next">Next</button>
-                <button type="button" id="save">Save</button>
-                <button type="button" id="skip">Skip</button>
-                <button type="button" id="reset">Reset</button>
-            </div>
         </div>
         <div class="progress-bar"><div id="progress"></div></div>
     </header>
     <div class="container">
         <div class="left">
+            <div id="preview-container">
+                <img id="preview" />
+            </div>
+            <div class="image-controls">
+                <input type="file" id="imageUpload" accept="image/*" />
+                <button type="button" id="revert-image">Revert</button>
+            </div>
             <form id="game-form">
-                <div class="top-row">
-                    <div id="preview-container">
-                        <img id="preview" />
-                    </div>
-                    <div class="primary-fields">
-                        <label>Name
-                            <input type="text" id="name" />
-                        </label>
-                        <label>First Launch Date
-                            <input type="text" id="first-launch" />
-                        </label>
-                        <label>Category
-                            <select id="category"></select>
-                        </label>
-                    </div>
-                    <div class="secondary-fields">
+                <div class="primary-fields">
+                    <label>Name
+                        <input type="text" id="name" />
+                    </label>
+                    <label>First Launch Date
+                        <input type="text" id="first-launch" />
+                    </label>
+                    <label>Category
+                        <select id="category"></select>
+                    </label>
+                </div>
+                <details id="extra-fields">
+                    <summary>More Fields</summary>
+                    <div class="extra-content">
                         <label>Developers
                             <input type="text" id="developers" />
                         </label>
@@ -56,34 +54,49 @@
                             <input type="text" id="publishers" />
                         </label>
                     </div>
+                </details>
+                <div class="summary-field">
+                    <label>Summary
+                        <textarea id="summary" rows="3"></textarea>
+                    </label>
+                    <button type="button" id="expand-summary">Expand</button>
                 </div>
-                <label>Summary
-                    <textarea id="summary"></textarea>
-                </label>
                 <div class="select-row">
                     <label>Platforms
                         <select id="platforms" multiple></select>
                     </label>
                 </div>
                 <div class="select-row">
-                    <label>Genres
-                        <select id="genres" multiple></select>
-                    </label>
-                    <label>Game Modes
-                        <select id="modes" multiple></select>
-                    </label>
+                    <div class="chip-group">
+                        <div class="chip-scroll">
+                            <select id="genres" multiple></select>
+                        </div>
+                        <button type="button" class="chip-add" data-target="genres">+ Add</button>
+                    </div>
+                    <div class="chip-group">
+                        <div class="chip-scroll">
+                            <select id="modes" multiple></select>
+                        </div>
+                        <button type="button" class="chip-add" data-target="modes">+ Add</button>
+                    </div>
                 </div>
             </form>
         </div>
         <div class="right">
-            <input type="file" id="imageUpload" accept="image/*" />
-            <button type="button" id="revert-image">Revert Image</button>
             <div class="image-wrapper">
                 <img id="image" />
                 <div id="image-resolution" class="resolution-label"></div>
             </div>
         </div>
     </div>
+    <footer id="action-bar">
+        <label class="auto-advance"><input type="checkbox" id="auto-advance"> Auto Next</label>
+        <button type="button" id="previous">Previous</button>
+        <button type="button" id="next">Next</button>
+        <button type="button" id="skip">Skip</button>
+        <button type="button" id="reset">Reset</button>
+        <button type="button" id="save" class="save-btn">Save</button>
+    </footer>
     <script>
         window.categoriesList = {{ categories|tojson }};
         window.platformsList = {{ platforms|tojson }};
