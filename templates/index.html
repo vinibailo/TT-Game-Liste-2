@@ -15,28 +15,75 @@
     <div id="toast" role="status" aria-live="polite"></div>
     <header class="editor-header">
         <div class="header-main">
-            <div class="header-info">
-                <h1 id="game-name"></h1>
-                <div class="header-meta">
-                    <span class="meta-label">Game ID</span>
-                    <span id="game-id" class="meta-value">—</span>
+            <div class="header-left">
+                <div class="header-info">
+                    <h1 id="game-name"></h1>
+                    <div class="header-meta">
+                        <span class="meta-label">Game ID</span>
+                        <span id="game-id" class="meta-value">—</span>
+                    </div>
                 </div>
+                <nav class="action-row" id="action-bar" aria-label="Game actions">
+                    <button type="button" id="previous" class="btn btn-blue" aria-label="Previous">
+                        <span class="btn-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M15.75 19.5 8.25 12l7.5-7.5" />
+                            </svg>
+                        </span>
+                        <span class="btn-label">Previous</span>
+                    </button>
+                    <button type="button" id="next" class="btn btn-blue" aria-label="Next">
+                        <span class="btn-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                            </svg>
+                        </span>
+                        <span class="btn-label">Next</span>
+                    </button>
+                    <button type="button" id="save" class="btn btn-green" aria-label="Save">
+                        <span class="btn-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M5 3h10.5l3.5 3.5V21H5z" />
+                                <path d="M9 3v6h6V3" />
+                                <path d="M9 13h6v8H9z" />
+                            </svg>
+                        </span>
+                        <span class="btn-label">Save</span>
+                    </button>
+                    <button type="button" id="skip" class="btn btn-yellow" aria-label="Skip">
+                        <span class="btn-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="m7 5 7 7-7 7" />
+                                <path d="M17 5v14" />
+                            </svg>
+                        </span>
+                        <span class="btn-label">Skip</span>
+                    </button>
+                    <button type="button" id="reset" class="btn btn-red" aria-label="Reset">
+                        <span class="btn-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20 6a8 8 0 1 0 2.344 5.657" />
+                                <path d="M20 6h-5" />
+                                <path d="M20 6v5" />
+                            </svg>
+                        </span>
+                        <span class="btn-label">Reset</span>
+                    </button>
+                </nav>
             </div>
-            <div class="progress-indicator">
-                <div class="progress-metrics">
-                    <span id="progress-count" class="progress-count">0/0</span>
-                    <span id="progress-percent" class="progress-percent">0.00%</span>
+            <div class="header-right">
+                <div class="header-preview">
+                    <img id="preview" alt="Cropped preview" />
                 </div>
-                <div class="progress-bar"><div id="progress"></div></div>
+                <div class="progress-indicator">
+                    <div class="progress-metrics">
+                        <span id="progress-count" class="progress-count">0/0</span>
+                        <span id="progress-percent" class="progress-percent">0.00%</span>
+                    </div>
+                    <div class="progress-bar"><div id="progress"></div></div>
+                </div>
             </div>
         </div>
-        <nav class="action-row" id="action-bar" aria-label="Game actions">
-            <button type="button" id="previous" class="btn btn-blue">Previous</button>
-            <button type="button" id="next" class="btn btn-blue">Next</button>
-            <button type="button" id="save" class="btn btn-green">Save</button>
-            <button type="button" id="skip" class="btn btn-yellow">Skip</button>
-            <button type="button" id="reset" class="btn btn-red">Reset</button>
-        </nav>
     </header>
     <main class="editor-body">
         <section class="details-column">
@@ -45,10 +92,6 @@
                     <label>Title
                         <input type="text" id="name" autocomplete="off" />
                     </label>
-                    <div class="static-field">
-                        <span class="static-label">Game ID</span>
-                        <span id="game-id-display" class="static-value">—</span>
-                    </div>
                     <label>First Launch Date
                         <input type="text" id="first-launch" autocomplete="off" />
                     </label>
@@ -56,10 +99,7 @@
                 <div class="summary-section">
                     <div class="summary-header">
                         <label for="summary">Summary</label>
-                        <div class="summary-actions">
-                            <button type="button" id="expand-summary" class="btn btn-outline">Expand</button>
-                            <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
-                        </div>
+                        <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
                     </div>
                     <textarea id="summary"></textarea>
                 </div>
@@ -103,10 +143,6 @@
                 <div class="image-wrapper">
                     <img id="image" alt="Cover image workspace" />
                     <div id="image-resolution" class="resolution-label"></div>
-                </div>
-                <div class="preview-panel">
-                    <h3>Preview</h3>
-                    <img id="preview" alt="Cropped preview" />
                 </div>
             </div>
         </aside>

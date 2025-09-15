@@ -57,10 +57,6 @@ function setChoices(instance, values) {
 function updateGameIdDisplay(idValue) {
     const idText = idValue ? String(idValue) : '—';
     document.getElementById('game-id').textContent = idText;
-    const metaDisplay = document.getElementById('game-id-display');
-    if (metaDisplay) {
-        metaDisplay.textContent = idText;
-    }
 }
 
 function collectFields() {
@@ -116,8 +112,6 @@ function restoreSession() {
     document.getElementById('game-name').textContent = data.fields.Name || 'Untitled Game';
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.fields.Summary;
-    summaryEl.classList.remove('expanded');
-    document.getElementById('expand-summary').textContent = 'Expand';
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
     document.getElementById('developers').value = data.fields.Developers;
     document.getElementById('publishers').value = data.fields.Publishers;
@@ -260,8 +254,6 @@ function applyGameData(data) {
     document.getElementById('name').value = data.game.Name || '';
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.game.Summary || '';
-    summaryEl.classList.remove('expanded');
-    document.getElementById('expand-summary').textContent = 'Expand';
     document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
     document.getElementById('developers').value = data.game.Developers || '';
     document.getElementById('publishers').value = data.game.Publishers || '';
@@ -415,8 +407,6 @@ function resetFields() {
         document.getElementById('game-name').textContent = data.game.Name || 'Untitled Game';
         const summaryEl = document.getElementById('summary');
         summaryEl.value = data.game.Summary || '';
-        summaryEl.classList.remove('expanded');
-        document.getElementById('expand-summary').textContent = 'Expand';
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
         document.getElementById('developers').value = data.game.Developers || '';
         document.getElementById('publishers').value = data.game.Publishers || '';
@@ -489,17 +479,6 @@ document.getElementById('revert-image').addEventListener('click', revertImage);
 document.getElementById('name').addEventListener('input', (event) => {
     const value = event.target.value;
     document.getElementById('game-name').textContent = value || 'Untitled Game';
-});
-
-document.getElementById('expand-summary').addEventListener('click', () => {
-    const summary = document.getElementById('summary');
-    if (summary.classList.contains('expanded')) {
-        summary.classList.remove('expanded');
-        document.getElementById('expand-summary').textContent = 'Expand';
-    } else {
-        summary.classList.add('expanded');
-        document.getElementById('expand-summary').textContent = 'Collapse';
-    }
 });
 
 document.addEventListener('keydown', (event) => {
