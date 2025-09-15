@@ -142,20 +142,6 @@ body {
   color: #0f172a;
 }
 
-.material-symbols-rounded {
-  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-}
-
-.btn-icon {
-  font-size: 1.35rem;
-  line-height: 1;
-}
-
-.btn-label {
-  display: inline-flex;
-  align-items: center;
-}
-
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -219,13 +205,6 @@ body {
 .details-column {
   overflow-y: auto;
   padding-right: 8px;
-}
-
-.details-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
-  gap: 24px;
-  align-items: start;
 }
 
 #game-form {
@@ -302,6 +281,31 @@ textarea {
   gap: 12px;
 }
 
+.static-field {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-height: 68px;
+}
+
+.static-label {
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
+.static-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
 .chip-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -314,30 +318,45 @@ textarea {
   gap: 8px;
 }
 
-.field-card {
+.field-accordion {
   border-radius: 12px;
   border: 1px solid var(--color-border);
   background: var(--color-surface);
+  overflow: hidden;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
 }
 
-.field-card-title {
-  margin: 0;
+.field-accordion summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 18px;
   font-weight: 600;
   color: var(--color-text);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.field-accordion summary::-webkit-details-marker {
+  display: none;
+}
+
+.field-accordion summary::after {
+  content: '⌄';
+  transform: rotate(-90deg);
+  transition: transform 160ms ease;
   font-size: 0.9rem;
+  color: var(--color-muted);
+}
+
+.field-accordion[open] summary::after {
+  transform: rotate(0deg);
 }
 
 .field-accordion-content {
   display: grid;
   gap: 18px 24px;
-  padding: 0;
+  padding: 0 18px 18px;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
@@ -406,8 +425,8 @@ textarea {
 }
 
 .image-panel {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(380px, 1fr) auto;
   gap: 20px;
 }
 
@@ -450,7 +469,6 @@ textarea {
   gap: 14px;
   align-items: center;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
-  width: 100%;
 }
 
 .preview-panel h3 {
@@ -463,9 +481,8 @@ textarea {
 }
 
 #preview {
-  width: 100%;
-  max-width: 280px;
-  aspect-ratio: 1 / 1;
+  width: 200px;
+  height: 200px;
   object-fit: cover;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -541,15 +558,6 @@ textarea {
   .image-column {
     padding-left: 0;
   }
-
-  .details-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .preview-panel {
-    max-width: 360px;
-    margin: 0 auto;
-  }
 }
 
 @media (max-width: 720px) {
@@ -567,16 +575,7 @@ textarea {
   }
 
   .action-row {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-  }
-
-  .action-row .btn {
-    gap: 0;
-    padding: 10px;
-  }
-
-  .action-row .btn .btn-label {
-    display: none;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   }
 
   .editor-body {
