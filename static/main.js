@@ -5,6 +5,7 @@ let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices, platformsChoices;
 let navigating = false;
+let totalGames = 0;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
 const saveBtnDefault = document.getElementById('save').textContent;
@@ -91,7 +92,10 @@ function restoreSession() {
     currentId = data.id != null ? String(data.id) : null;
     document.getElementById('game-id').textContent = `ID: ${currentId ?? ''}`;
     document.getElementById('name').value = data.fields.Name;
-    document.getElementById('summary').value = data.fields.Summary;
+    const summaryEl = document.getElementById('summary');
+    summaryEl.value = data.fields.Summary;
+    summaryEl.classList.remove('expanded');
+    document.getElementById('expand-summary').textContent = 'Expand';
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
     document.getElementById('developers').value = data.fields.Developers;
     document.getElementById('publishers').value = data.fields.Publishers;
@@ -216,10 +220,15 @@ function applyGameData(data) {
     document.getElementById('game-name').textContent = data.game.Name || '';
     document.getElementById('game-id').textContent = `ID: ${currentId ?? ''}`;
     const processed = (data.seq || 1) - 1;
-    document.getElementById('caption').textContent = `Processados: ${processed} de ${data.total}`;
+    totalGames = data.total;
+    const percent = (processed / data.total * 100).toFixed(2);
+    document.getElementById('caption').textContent = `Progress: ${percent}% (${processed}/${data.total})`;
     document.getElementById('progress').style.width = `${processed / data.total * 100}%`;
     document.getElementById('name').value = data.game.Name || '';
-    document.getElementById('summary').value = data.game.Summary || '';
+    const summaryEl = document.getElementById('summary');
+    summaryEl.value = data.game.Summary || '';
+    summaryEl.classList.remove('expanded');
+    document.getElementById('expand-summary').textContent = 'Expand';
     document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
     document.getElementById('developers').value = data.game.Developers || '';
     document.getElementById('publishers').value = data.game.Publishers || '';
@@ -240,6 +249,7 @@ function applyGameData(data) {
     if (Array.isArray(data.missing) && data.missing.length) {
         showAlert('Campos vazios: ' + data.missing.join(', '), 'warning');
     }
+    saveSession();
 }
 
 function loadGame() {
@@ -276,7 +286,10 @@ function saveGame() {
       .then(() => {
           localStorage.removeItem('session');
           currentUpload = null;
-          showAlert('The game was saved.', 'success');
+          showAlert(`Saved ✔ Game ${currentIndex + 1}/${totalGames}`, 'success');
+          if (document.getElementById('auto-advance').checked) {
+              nextGame();
+          }
       })
       .catch(err => {
           console.error(err);
@@ -345,7 +358,10 @@ function previousGame() {
 function resetFields() {
     fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         document.getElementById('name').value = data.game.Name || '';
-        document.getElementById('summary').value = data.game.Summary || '';
+        const summaryEl = document.getElementById('summary');
+        summaryEl.value = data.game.Summary || '';
+        summaryEl.classList.remove('expanded');
+        document.getElementById('expand-summary').textContent = 'Expand';
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
         document.getElementById('developers').value = data.game.Developers || '';
         document.getElementById('publishers').value = data.game.Publishers || '';
@@ -395,7 +411,7 @@ document.getElementById('skip').addEventListener('click', skipGame);
 document.getElementById('next').addEventListener('click', nextGame);
 document.getElementById('previous').addEventListener('click', previousGame);
 document.getElementById('reset').addEventListener('click', resetFields);
-document.getElementById('revert-image').addEventListener('click', function(){
+function revertImage() {
     fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         if (data.cover) {
             setImage(data.cover);
@@ -411,10 +427,37 @@ document.getElementById('revert-image').addEventListener('click', function(){
         console.error(err);
         showAlert('Failed to revert image: ' + err.message, 'warning');
     });
-});
+}
+
+document.getElementById('revert-image').addEventListener('click', revertImage);
+const mobileRevertBtn = document.getElementById('mobile-revert-image');
+if (mobileRevertBtn) {
+    mobileRevertBtn.addEventListener('click', revertImage);
+}
 
 ['name','summary','first-launch','developers','publishers','category'].forEach(id => {
-    document.getElementById(id).addEventListener('change', saveSession);
+    const el = document.getElementById(id);
+    ['change','input'].forEach(ev => el.addEventListener(ev, saveSession));
+});
+
+document.getElementById('expand-summary').addEventListener('click', () => {
+    const summary = document.getElementById('summary');
+    if (summary.classList.contains('expanded')) {
+        summary.classList.remove('expanded');
+        document.getElementById('expand-summary').textContent = 'Expand';
+    } else {
+        summary.classList.add('expanded');
+        document.getElementById('expand-summary').textContent = 'Collapse';
+    }
+});
+
+document.querySelectorAll('.chip-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const target = btn.dataset.target;
+        const inst = target === 'genres' ? genresChoices : modesChoices;
+        inst.showDropdown();
+        inst.input.focus();
+    });
 });
 
 populateSelect('category', categoriesList);
