@@ -6,6 +6,7 @@
     <title>Game Editor</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.css" />
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
     <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.js"></script>
@@ -31,67 +32,84 @@
             </div>
         </div>
         <nav class="action-row" id="action-bar" aria-label="Game actions">
-            <button type="button" id="previous" class="btn btn-blue">Previous</button>
-            <button type="button" id="next" class="btn btn-blue">Next</button>
-            <button type="button" id="save" class="btn btn-green">Save</button>
-            <button type="button" id="skip" class="btn btn-yellow">Skip</button>
-            <button type="button" id="reset" class="btn btn-red">Reset</button>
+            <button type="button" id="previous" class="btn btn-blue" aria-label="Previous">
+                <span class="material-symbols-rounded btn-icon" aria-hidden="true">chevron_left</span>
+                <span class="btn-label">Previous</span>
+            </button>
+            <button type="button" id="next" class="btn btn-blue" aria-label="Next">
+                <span class="material-symbols-rounded btn-icon" aria-hidden="true">chevron_right</span>
+                <span class="btn-label">Next</span>
+            </button>
+            <button type="button" id="save" class="btn btn-green" aria-label="Save" data-default-label="Save">
+                <span class="material-symbols-rounded btn-icon" aria-hidden="true">save</span>
+                <span class="btn-label">Save</span>
+            </button>
+            <button type="button" id="skip" class="btn btn-yellow" aria-label="Skip">
+                <span class="material-symbols-rounded btn-icon" aria-hidden="true">skip_next</span>
+                <span class="btn-label">Skip</span>
+            </button>
+            <button type="button" id="reset" class="btn btn-red" aria-label="Reset">
+                <span class="material-symbols-rounded btn-icon" aria-hidden="true">refresh</span>
+                <span class="btn-label">Reset</span>
+            </button>
         </nav>
     </header>
     <main class="editor-body">
         <section class="details-column">
-            <form id="game-form">
-                <div class="field-grid">
-                    <label>Title
-                        <input type="text" id="name" autocomplete="off" />
-                    </label>
-                    <div class="static-field">
-                        <span class="static-label">Game ID</span>
-                        <span id="game-id-display" class="static-value">—</span>
+            <div class="details-layout">
+                <form id="game-form">
+                    <div class="field-grid">
+                        <label>Title
+                            <input type="text" id="name" autocomplete="off" />
+                        </label>
+                        <label>First Launch Date
+                            <input type="text" id="first-launch" autocomplete="off" />
+                        </label>
                     </div>
-                    <label>First Launch Date
-                        <input type="text" id="first-launch" autocomplete="off" />
-                    </label>
-                </div>
-                <div class="summary-section">
-                    <div class="summary-header">
-                        <label for="summary">Summary</label>
-                        <div class="summary-actions">
-                            <button type="button" id="expand-summary" class="btn btn-outline">Expand</button>
-                            <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
+                    <div class="summary-section">
+                        <div class="summary-header">
+                            <label for="summary">Summary</label>
+                            <div class="summary-actions">
+                                <button type="button" id="expand-summary" class="btn btn-outline">Expand</button>
+                                <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
+                            </div>
+                        </div>
+                        <textarea id="summary"></textarea>
+                    </div>
+                    <div class="chip-field">
+                        <label for="platforms">Platforms</label>
+                        <select id="platforms" multiple></select>
+                    </div>
+                    <div class="chip-grid">
+                        <div class="chip-field">
+                            <label for="genres">Genres</label>
+                            <select id="genres" multiple aria-label="Genres"></select>
+                        </div>
+                        <div class="chip-field">
+                            <label for="modes">Game Modes</label>
+                            <select id="modes" multiple aria-label="Game modes"></select>
                         </div>
                     </div>
-                    <textarea id="summary"></textarea>
-                </div>
-                <div class="chip-field">
-                    <label for="platforms">Platforms</label>
-                    <select id="platforms" multiple></select>
-                </div>
-                <div class="chip-grid">
-                    <div class="chip-field">
-                        <label for="genres">Genres</label>
-                        <select id="genres" multiple aria-label="Genres"></select>
-                    </div>
-                    <div class="chip-field">
-                        <label for="modes">Game Modes</label>
-                        <select id="modes" multiple aria-label="Game modes"></select>
-                    </div>
-                </div>
-                <details class="field-accordion" id="meta-accordion">
-                    <summary>Additional metadata</summary>
-                    <div class="field-accordion-content">
-                        <label>Category
-                            <select id="category"></select>
-                        </label>
-                        <label>Developers
-                            <input type="text" id="developers" autocomplete="off" />
-                        </label>
-                        <label>Publishers
-                            <input type="text" id="publishers" autocomplete="off" />
-                        </label>
-                    </div>
-                </details>
-            </form>
+                    <section class="field-card" id="meta-panel">
+                        <h2 class="field-card-title">Additional metadata</h2>
+                        <div class="field-accordion-content">
+                            <label>Category
+                                <select id="category"></select>
+                            </label>
+                            <label>Developers
+                                <input type="text" id="developers" autocomplete="off" />
+                            </label>
+                            <label>Publishers
+                                <input type="text" id="publishers" autocomplete="off" />
+                            </label>
+                        </div>
+                    </section>
+                </form>
+                <aside class="preview-panel" aria-label="Cropped preview">
+                    <h3>Preview</h3>
+                    <img id="preview" alt="Cropped preview" />
+                </aside>
+            </div>
         </section>
         <aside class="image-column">
             <input type="file" id="imageUpload" accept="image/*" />
@@ -103,10 +121,6 @@
                 <div class="image-wrapper">
                     <img id="image" alt="Cover image workspace" />
                     <div id="image-resolution" class="resolution-label"></div>
-                </div>
-                <div class="preview-panel">
-                    <h3>Preview</h3>
-                    <img id="preview" alt="Cropped preview" />
                 </div>
             </div>
         </aside>
