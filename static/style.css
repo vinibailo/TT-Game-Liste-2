@@ -51,11 +51,23 @@ body {
 }
 
 .header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 24px;
+  row-gap: 20px;
+  align-items: start;
   min-width: 0;
   flex: 1;
+}
+
+.header-left .header-info {
+  grid-column: 2;
+  min-width: 0;
+}
+
+.header-left .action-row {
+  grid-column: 2;
+  align-self: start;
 }
 
 .header-right {
@@ -476,6 +488,9 @@ textarea {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  grid-row: 1 / span 2;
+  align-self: start;
+  justify-self: start;
 }
 
 .header-preview img {
@@ -567,6 +582,12 @@ textarea {
     gap: 20px;
   }
 
+  .header-left {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
   .header-preview {
     width: 104px;
     height: 104px;
@@ -586,6 +607,10 @@ textarea {
     flex-wrap: nowrap;
     justify-content: space-between;
     gap: 12px;
+  }
+
+  .header-left .action-row {
+    width: 100%;
   }
 
   .btn {
