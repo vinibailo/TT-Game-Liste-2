@@ -9,7 +9,20 @@ let totalGames = 0;
 let toastTimeout = null;
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
-const saveBtnDefault = document.getElementById('save').textContent.trim();
+const saveButton = document.getElementById('save');
+const saveButtonLabel = saveButton ? saveButton.querySelector('.btn-label') : null;
+const saveButtonDefaultLabel = saveButtonLabel
+    ? saveButtonLabel.textContent.trim()
+    : (saveButton ? saveButton.textContent.trim() : '');
+
+function setSaveButtonLabel(text) {
+    if (!saveButton) return;
+    if (saveButtonLabel) {
+        saveButtonLabel.textContent = text;
+    } else {
+        saveButton.textContent = text;
+    }
+}
 const categoriesList = window.categoriesList || [];
 const platformsList = window.platformsList || [];
 const genresList = [
@@ -179,10 +192,12 @@ function updatePreview() {
 
 function setImage(dataUrl) {
     const img = document.getElementById('image');
-    const saveBtn = document.getElementById('save');
+    const saveBtn = saveButton;
     // Disable saving while the image is being prepared
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Loading...';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+    }
+    setSaveButtonLabel('Loading...');
 
     img.onload = function(){
         try {
@@ -205,14 +220,18 @@ function setImage(dataUrl) {
             showToast('Failed to initialize image: ' + (err.message || err), 'warning');
         } finally {
             // Re-enable the save button after cropper is ready or on error
-            saveBtn.disabled = false;
-            saveBtn.textContent = saveBtnDefault;
+            if (saveBtn) {
+                saveBtn.disabled = false;
+            }
+            setSaveButtonLabel(saveButtonDefaultLabel);
         }
     };
     img.onerror = function(){
         showToast('Não foi possível carregar a imagem enviada.', 'warning');
-        saveBtn.disabled = false;
-        saveBtn.textContent = saveBtnDefault;
+        if (saveBtn) {
+            saveBtn.disabled = false;
+        }
+        setSaveButtonLabel(saveButtonDefaultLabel);
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
@@ -303,9 +322,11 @@ async function saveGame() {
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     const fields = collectFields();
     setNavDisabled(true);
-    const saveBtn = document.getElementById('save');
-    saveBtn.disabled = true;
-    saveBtn.textContent = 'Saving...';
+    const saveBtn = saveButton;
+    if (saveBtn) {
+        saveBtn.disabled = true;
+    }
+    setSaveButtonLabel('Saving...');
     try {
         const response = await fetch('api/save', {
             method: 'POST',
@@ -324,8 +345,10 @@ async function saveGame() {
         console.error(err);
         showToast('Failed to save game: ' + err.message, 'warning');
     } finally {
-        saveBtn.disabled = false;
-        saveBtn.textContent = saveBtnDefault;
+        if (saveBtn) {
+            saveBtn.disabled = false;
+        }
+        setSaveButtonLabel(saveButtonDefaultLabel);
         setNavDisabled(false);
     }
 }
