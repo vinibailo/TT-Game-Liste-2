@@ -1,17 +1,47 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Login</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='login.css') }}" />
 </head>
 <body>
-    <form method="post">
-        {% if error %}<p>{{ error }}</p>{% endif %}
-        <label>Password
-            <input type="password" name="password" />
-        </label>
-        <button type="submit">Login</button>
-    </form>
+    <main>
+        <section class="login-card" role="region" aria-labelledby="login-title">
+            <header>
+                <h1 id="login-title">Login</h1>
+            </header>
+            <form method="post">
+                {% if error %}
+                <p class="form-error" id="form-error" role="alert">{{ error }}</p>
+                {% endif %}
+                <div class="field-group">
+                    <label for="password">Password</label>
+                    <div class="input-wrapper">
+                        <span class="field-icon" aria-hidden="true">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75M6.75 10.5h10.5A2.25 2.25 0 0119.5 12.75v6a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 18.75v-6A2.25 2.25 0 016.75 10.5z" />
+                            </svg>
+                        </span>
+                        <input
+                            type="password"
+                            id="password"
+                            name="password"
+                            autocomplete="current-password"
+                            required
+                            placeholder="Enter your password"
+                            {% if error %}aria-invalid="true" aria-describedby="form-error"{% endif %}
+                        />
+                        <button type="button" class="toggle-password" data-toggle-password aria-label="Show password" aria-pressed="false">
+                            <span class="toggle-text">Show</span>
+                        </button>
+                    </div>
+                </div>
+                <button type="submit" data-login-submit disabled>Login</button>
+            </form>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='login.js') }}" defer></script>
 </body>
 </html>
