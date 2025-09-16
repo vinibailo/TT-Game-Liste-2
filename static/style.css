@@ -571,6 +571,17 @@ textarea {
   }
 }
 
+@media (max-width: 900px) {
+  .action-row .btn {
+    padding: 10px;
+    min-width: 0;
+  }
+
+  .action-row .btn-label {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .editor-header {
     padding: 16px 20px 20px;
@@ -615,6 +626,11 @@ textarea {
     width: 100%;
   }
 
+  .btn {
+    padding: 10px;
+    min-width: 0;
+  }
+
   .progress-metrics {
     grid-area: metrics;
     display: flex;
@@ -631,26 +647,9 @@ textarea {
     margin-top: 4px;
   }
 
-  .btn {
-    padding: 10px;
-    min-width: 0;
-  }
-
   .btn-icon {
     width: 24px;
     height: 24px;
-  }
-
-  .btn-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
   }
 
   .editor-body {
