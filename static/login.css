@@ -28,7 +28,6 @@ body {
   justify-content: center;
   font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
   color: var(--color-text);
-  background-image: url('/static/home.jpg');
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
