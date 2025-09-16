@@ -577,40 +577,58 @@ textarea {
   }
 
   .header-main {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 20px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "preview info"
+      "metrics actions"
+      "progress progress";
+    column-gap: 16px;
+    row-gap: 12px;
+    align-items: start;
   }
 
   .header-left {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
+    display: contents;
+  }
+
+  .header-right,
+  .progress-indicator {
+    display: contents;
   }
 
   .header-preview {
+    grid-area: preview;
     width: 104px;
     height: 104px;
   }
 
-  .progress-indicator {
-    min-width: unset;
-    align-items: flex-start;
-  }
-
-  .header-right {
-    align-items: flex-start;
-    margin-left: 0;
+  .header-info {
+    grid-area: info;
   }
 
   .action-row {
-    flex-wrap: nowrap;
-    justify-content: space-between;
+    grid-area: actions;
+    flex-wrap: wrap;
+    justify-content: flex-start;
     gap: 12px;
+    width: 100%;
   }
 
-  .header-left .action-row {
+  .progress-metrics {
+    grid-area: metrics;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-start;
+    margin-top: 6px;
+    flex-wrap: wrap;
+  }
+
+  .progress-bar {
+    grid-area: progress;
     width: 100%;
+    margin-top: 4px;
   }
 
   .btn {
