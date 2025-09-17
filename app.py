@@ -658,12 +658,24 @@ def api_save():
     try:
         with navigator.lock:
             if index != navigator.current_index:
+                expected_index = navigator.current_index
+                expected_seq_id = navigator.seq_index
+                with db_lock:
+                    conn = get_db()
+                    cur = conn.execute(
+                        'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                        (str(expected_index),),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        expected_seq_id = row['ID']
                 return (
                     jsonify(
                         {
                             'error': 'index mismatch',
-                            'expected': navigator.current_index,
+                            'expected': expected_index,
                             'actual': index,
+                            'expected_id': expected_seq_id,
                         }
                     ),
                     409,
