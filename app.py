@@ -194,10 +194,6 @@ def load_games() -> pd.DataFrame:
     if 'Rating Count' in df.columns:
         df['Rating Count'] = pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
         df = df.sort_values(by='Rating Count', ascending=False, kind='mergesort')
-    subset_cols = ['Name']
-    if 'Year' in df.columns:
-        subset_cols.append('Year')
-    df = df.drop_duplicates(subset=subset_cols, keep='first')
     df = df.reset_index(drop=True)
     return df
 

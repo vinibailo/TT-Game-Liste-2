@@ -4,7 +4,7 @@ TT-Game-Liste-2 is a password-protected web application for curating game metada
 
 ## Feature overview
 
-- **Spreadsheet ingestion:** Loads `igdb_all_games.xlsx` into memory, sorts it by rating count, and removes duplicate rows so editors can process the most relevant titles first.【F:app.py†L30-L103】
+- **Spreadsheet ingestion:** Loads `igdb_all_games.xlsx` into memory, sorts it by rating count, and keeps every row so editors can process the source data exactly as supplied.【F:app.py†L30-L103】
 - **Sequential navigation with progress tracking:** Presents one game at a time and tracks the working index, processed sequence, and skipped items. Editors can move forward, go back to the previous entry, or temporarily skip a game while keeping progress metrics accurate.【F:app.py†L150-L357】【F:static/main.js†L94-L212】【F:static/main.js†L245-L353】
 - **Metadata editing workspace:** Provides inputs for title, launch date, summary, category, developers, publishers, platforms, genres, and game modes. Chip selectors (Choices.js) make it easy to reuse controlled vocabularies, while an expandable section keeps rarely used metadata out of the way.【F:templates/index.html†L37-L108】【F:static/main.js†L18-L95】
 - **1080×1080 cover builder:** Lets the user upload an image, crop it with Cropper.js, and automatically resizes anything smaller than 1080 pixels so the saved JPEG meets platform requirements. A preview updates live while the editor adjusts the crop.【F:templates/index.html†L109-L147】【F:static/main.js†L149-L231】
@@ -16,7 +16,7 @@ TT-Game-Liste-2 is a password-protected web application for curating game metada
 ## How the workflow operates
 
 1. **Authentication gate:** The site is protected by a shared password (`APP_PASSWORD`). Editors reach the login form at `/login`, enter the password, and receive a session cookie that unlocks the workspace. You can change the default password via environment variables for production deployments.【F:app.py†L113-L147】【F:templates/login.html†L1-L48】
-2. **Game loading:** The server reads `igdb_all_games.xlsx` on startup, removing empty rows and harmonising duplicates. Each row’s index becomes the “Source Index” that drives navigation.【F:app.py†L30-L103】
+2. **Game loading:** The server reads `igdb_all_games.xlsx` on startup, removing empty rows while preserving duplicate entries. Each row’s index becomes the “Source Index” that drives navigation.【F:app.py†L30-L103】
 3. **Cover discovery:** When a game already has a local or remote cover URL, the app tries to display it so editors can start from a reasonable crop. Fallback logic downloads remote images on the fly and converts them to inline JPEGs.【F:app.py†L104-L144】
 4. **Editing session:** For the active game the UI surfaces editable fields plus a live cropper. Any missing mandatory metadata triggers a warning toast so editors know what to fill in before saving.【F:templates/index.html†L37-L147】【F:static/main.js†L232-L305】
 5. **Saving:** On save the client crops the image to 1080×1080, posts the metadata and base64 cover to `/api/save`, and the server writes the record to SQLite while exporting the JPEG. The processed sequence counter increments so IDs remain contiguous.【F:static/main.js†L306-L353】【F:app.py†L248-L338】
