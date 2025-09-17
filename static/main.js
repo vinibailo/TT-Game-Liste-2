@@ -327,20 +327,59 @@ async function saveGame() {
         saveBtn.disabled = true;
     }
     setSaveButtonLabel('Saving...');
+    const pendingUpload = currentUpload;
     const attemptSave = async (allowRetry = true) => {
+        const payload = {
+            index: currentIndex,
+            id: currentId,
+            fields,
+            image: dataUrl,
+            upload_name: pendingUpload
+        };
         const response = await fetch('api/save', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({index: currentIndex, id: currentId, fields, image: dataUrl, upload_name: currentUpload})
+            body: JSON.stringify(payload)
         });
         const result = await response.json();
         if (response.status === 409 && result && result.error === 'index mismatch') {
             if (Object.prototype.hasOwnProperty.call(result, 'expected')) {
-                currentIndex = result.expected;
+                const nextIndex = Number(result.expected);
+                if (!Number.isNaN(nextIndex)) {
+                    currentIndex = nextIndex;
+                }
             }
-            if (allowRetry) {
-                return attemptSave(false);
+            let expectedIdStr = null;
+            if (Object.prototype.hasOwnProperty.call(result, 'expected_id')) {
+                const expectedIdValue = result.expected_id;
+                if (expectedIdValue !== null && expectedIdValue !== undefined) {
+                    expectedIdStr = String(expectedIdValue);
+                }
             }
+            currentId = expectedIdStr;
+            updateGameIdDisplay(currentId);
+            await loadGame();
+            setNavDisabled(true);
+            const refreshedId = currentId != null ? String(currentId) : null;
+            if (!allowRetry) {
+                showToast('Save aborted: the record changed again. Review the refreshed data before saving once more.', 'warning');
+                const err = new Error('index mismatch');
+                err.handled = true;
+                throw err;
+            }
+            if (!expectedIdStr) {
+                showToast('Save aborted: unable to determine the expected record. Review the refreshed data before trying again.', 'warning');
+                const err = new Error('missing expected id');
+                err.handled = true;
+                throw err;
+            }
+            if (refreshedId !== expectedIdStr) {
+                showToast('Save aborted: the record changed while saving. Review the refreshed data before trying again.', 'warning');
+                const err = new Error('stale data mismatch');
+                err.handled = true;
+                throw err;
+            }
+            return attemptSave(false);
         }
         if (!response.ok || result.error) {
             throw new Error(result.error || 'save failed');
@@ -355,7 +394,9 @@ async function saveGame() {
         await nextGame(true);
     } catch (err) {
         console.error(err);
-        showToast('Failed to save game: ' + err.message, 'warning');
+        if (!err || !err.handled) {
+            showToast('Failed to save game: ' + err.message, 'warning');
+        }
     } finally {
         if (saveBtn) {
             saveBtn.disabled = false;
