@@ -327,16 +327,28 @@ async function saveGame() {
         saveBtn.disabled = true;
     }
     setSaveButtonLabel('Saving...');
-    try {
+    const attemptSave = async (allowRetry = true) => {
         const response = await fetch('api/save', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({index: currentIndex, id: currentId, fields, image: dataUrl, upload_name: currentUpload})
         });
         const result = await response.json();
+        if (response.status === 409 && result && result.error === 'index mismatch') {
+            if (Object.prototype.hasOwnProperty.call(result, 'expected')) {
+                currentIndex = result.expected;
+            }
+            if (allowRetry) {
+                return attemptSave(false);
+            }
+        }
         if (!response.ok || result.error) {
             throw new Error(result.error || 'save failed');
         }
+        return result;
+    };
+    try {
+        await attemptSave(true);
         localStorage.removeItem('session');
         currentUpload = null;
         showToast(`Saved ✔ Game ${currentIndex + 1} of ${totalGames}`, 'success');
