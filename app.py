@@ -19,6 +19,7 @@ from flask import (
     g,
     has_app_context,
 )
+from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
@@ -156,6 +157,12 @@ def handle_exception(e):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'internal server error'}), 500
     return "Internal Server Error", 500
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    app.logger.warning("File upload too large for path %s", request.path)
+    return jsonify({'error': 'file too large'}), 413
 
 
 def open_image_auto_rotate(source: Any) -> Image.Image:
