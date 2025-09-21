@@ -14,6 +14,9 @@ const saveButtonLabel = saveButton ? saveButton.querySelector('.btn-label') : nu
 const saveButtonDefaultLabel = saveButtonLabel
     ? saveButtonLabel.textContent.trim()
     : (saveButton ? saveButton.textContent.trim() : '');
+const jumpForm = document.getElementById('jump-form');
+const jumpInput = document.getElementById('jump-input');
+const jumpSubmit = document.getElementById('jump-submit');
 
 function setSaveButtonLabel(text) {
     if (!saveButton) return;
@@ -93,6 +96,15 @@ function setNavDisabled(state) {
             button.disabled = state;
         }
     });
+}
+
+function setJumpControlsDisabled(state) {
+    if (jumpInput) {
+        jumpInput.disabled = state;
+    }
+    if (jumpSubmit) {
+        jumpSubmit.disabled = state;
+    }
 }
 
 function isTypingElement(element) {
@@ -429,6 +441,94 @@ async function skipGame() {
     }
 }
 
+function translateJumpError(code) {
+    switch (code) {
+        case 'missing id':
+        case 'invalid id':
+            return 'Digite um ID válido.';
+        case 'id not found':
+            return 'ID não encontrado.';
+        case 'invalid index':
+            return 'Registro não disponível.';
+        case 'invalid source index':
+            return 'Não foi possível localizar o índice desse ID.';
+        default:
+            return 'Não foi possível carregar o jogo solicitado.';
+    }
+}
+
+async function goToGameById(event) {
+    if (event) {
+        event.preventDefault();
+    }
+    if (!jumpInput) {
+        return;
+    }
+    const rawValue = jumpInput.value.trim();
+    if (!rawValue) {
+        showToast('Digite um ID válido.', 'warning');
+        jumpInput.focus();
+        return;
+    }
+    if (!/^\d+$/.test(rawValue)) {
+        showToast('Digite um ID válido.', 'warning');
+        jumpInput.focus();
+        jumpInput.select();
+        return;
+    }
+    const idValue = Number.parseInt(rawValue, 10);
+    if (!Number.isInteger(idValue) || idValue < 1) {
+        showToast('Digite um ID válido.', 'warning');
+        jumpInput.focus();
+        jumpInput.select();
+        return;
+    }
+    if (navigating) {
+        return;
+    }
+    navigating = true;
+    setNavDisabled(true);
+    setJumpControlsDisabled(true);
+    let shouldRefocus = false;
+    try {
+        const response = await fetch('api/game_by_id', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: idValue, upload_name: currentUpload})
+        });
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (err) {
+            payload = null;
+        }
+        if (!response.ok || !payload || payload.error) {
+            const errorCode = payload && payload.error ? payload.error : 'jump failed';
+            const error = new Error(errorCode);
+            error.code = errorCode;
+            throw error;
+        }
+        localStorage.removeItem('session');
+        currentUpload = null;
+        applyGameData(payload);
+        jumpInput.value = '';
+    } catch (err) {
+        console.error(err);
+        const code = err && (err.code || err.message);
+        const message = translateJumpError(code);
+        showToast(message, 'warning');
+        shouldRefocus = true;
+    } finally {
+        navigating = false;
+        setJumpControlsDisabled(false);
+        setNavDisabled(false);
+        if (shouldRefocus) {
+            jumpInput.focus();
+            jumpInput.select();
+        }
+    }
+}
+
 function nextGame(autoAdvance = false) {
     if (navigating) return Promise.resolve();
     navigating = true;
@@ -527,6 +627,9 @@ document.getElementById('skip').addEventListener('click', skipGame);
 document.getElementById('next').addEventListener('click', () => nextGame());
 document.getElementById('previous').addEventListener('click', previousGame);
 document.getElementById('reset').addEventListener('click', resetFields);
+if (jumpForm) {
+    jumpForm.addEventListener('submit', goToGameById);
+}
 function revertImage() {
     fetch(`api/game/${currentIndex}/raw`).then(r=>r.json()).then(data=>{
         if (data.cover) {
