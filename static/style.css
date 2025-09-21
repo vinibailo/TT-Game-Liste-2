@@ -94,6 +94,32 @@ body {
   color: var(--color-muted);
 }
 
+.jump-form {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.jump-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.jump-controls input {
+  width: 120px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 0.95rem;
+}
+
+.jump-controls input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .meta-label {
   text-transform: uppercase;
   letter-spacing: 0.08em;

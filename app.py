@@ -845,6 +845,53 @@ def api_set_index():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/game_by_id', methods=['POST'])
+def api_game_by_id():
+    data = request.get_json(silent=True) or {}
+    raw_id = data.get('id')
+    if raw_id is None:
+        return jsonify({'error': 'missing id'}), 400
+    try:
+        game_id = int(str(raw_id).strip())
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid id'}), 400
+
+    upload_name = data.get('upload_name')
+    if upload_name:
+        up_path = os.path.join(UPLOAD_DIR, upload_name)
+        if os.path.exists(up_path):
+            os.remove(up_path)
+
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            'SELECT "Source Index" FROM processed_games WHERE "ID"=?',
+            (game_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return jsonify({'error': 'id not found'}), 404
+
+    try:
+        index = int(str(row['Source Index']))
+    except (TypeError, ValueError):
+        app.logger.error(
+            "Invalid source index for ID %s: %s", game_id, row['Source Index']
+        )
+        return jsonify({'error': 'invalid source index'}), 500
+
+    try:
+        navigator.set_index(index)
+        payload = build_game_payload(index, navigator.seq_index)
+        return jsonify(payload)
+    except IndexError:
+        return jsonify({'error': 'invalid index'}), 404
+    except Exception as e:
+        app.logger.exception("api_game_by_id failed")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/next', methods=['POST'])
 def api_next():
     data = request.get_json(silent=True) or {}
