@@ -502,6 +502,26 @@ textarea {
   letter-spacing: 0.04em;
 }
 
+.resolution-warning {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(239, 68, 68, 0.88);
+  color: #fff5f5;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  display: none;
+  box-shadow: 0 6px 16px rgba(8, 15, 35, 0.45);
+}
+
+.resolution-warning.visible {
+  display: inline-flex;
+  align-items: center;
+}
+
 .header-preview {
   width: 140px;
   height: 140px;
