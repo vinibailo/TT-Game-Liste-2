@@ -14,6 +14,9 @@ const saveButtonLabel = saveButton ? saveButton.querySelector('.btn-label') : nu
 const saveButtonDefaultLabel = saveButtonLabel
     ? saveButtonLabel.textContent.trim()
     : (saveButton ? saveButton.textContent.trim() : '');
+const imageResolutionLabel = document.getElementById('image-resolution');
+const resolutionWarningTag = document.getElementById('image-warning');
+const LOW_RESOLUTION_WARNING = 'Imagem menor que 1080px será ampliada.';
 const jumpForm = document.getElementById('jump-form');
 const jumpInput = document.getElementById('jump-input');
 const jumpSubmit = document.getElementById('jump-submit');
@@ -26,6 +29,20 @@ function setSaveButtonLabel(text) {
         saveButton.textContent = text;
     }
 }
+
+function showResolutionWarning(message = LOW_RESOLUTION_WARNING) {
+    if (!resolutionWarningTag) return;
+    resolutionWarningTag.textContent = message;
+    resolutionWarningTag.classList.add('visible');
+}
+
+function hideResolutionWarning() {
+    if (!resolutionWarningTag) return;
+    resolutionWarningTag.textContent = '';
+    resolutionWarningTag.classList.remove('visible');
+}
+
+hideResolutionWarning();
 const categoriesList = window.categoriesList || [];
 const platformsList = window.platformsList || [];
 const genresList = [
@@ -210,6 +227,7 @@ function setImage(dataUrl) {
         saveBtn.disabled = true;
     }
     setSaveButtonLabel('Loading...');
+    hideResolutionWarning();
 
     img.onload = function(){
         try {
@@ -223,13 +241,19 @@ function setImage(dataUrl) {
                 ready: updatePreview,
                 background: false
             });
-            if (Math.min(img.naturalWidth, img.naturalHeight) < 1080) {
-                showToast('Imagem menor que 1080px será ampliada.', 'warning');
+            const isLowResolution = Math.min(img.naturalWidth, img.naturalHeight) < 1080;
+            if (isLowResolution) {
+                showResolutionWarning();
+            } else {
+                hideResolutionWarning();
             }
-            document.getElementById('image-resolution').textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+            if (imageResolutionLabel) {
+                imageResolutionLabel.textContent = `${img.naturalWidth}x${img.naturalHeight}`;
+            }
         } catch (err) {
             console.error(err);
             showToast('Failed to initialize image: ' + (err.message || err), 'warning');
+            hideResolutionWarning();
         } finally {
             // Re-enable the save button after cropper is ready or on error
             if (saveBtn) {
@@ -244,6 +268,10 @@ function setImage(dataUrl) {
             saveBtn.disabled = false;
         }
         setSaveButtonLabel(saveButtonDefaultLabel);
+        hideResolutionWarning();
+        if (imageResolutionLabel) {
+            imageResolutionLabel.textContent = '';
+        }
     };
     img.src = dataUrl;
     imageUploadInput.value = '';
@@ -256,9 +284,12 @@ function clearImage() {
     if (cropper) { cropper.destroy(); cropper = null; }
     document.getElementById('image').src = '';
     document.getElementById('preview').src = '';
-    document.getElementById('image-resolution').textContent = '';
+    if (imageResolutionLabel) {
+        imageResolutionLabel.textContent = '';
+    }
     currentUpload = null;
     imageUploadInput.value = '';
+    hideResolutionWarning();
     saveSession();
 }
 
