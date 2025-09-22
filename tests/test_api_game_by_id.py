@@ -1,4 +1,3 @@
-import json
 import os
 import uuid
 import importlib.util
@@ -64,18 +63,25 @@ def test_game_by_id_returns_payload(tmp_path):
             ).lastrowid
             app_module.db.execute(
                 'INSERT INTO processed_games ('
-                '"ID", "Source Index", "Name", "Developers", "Genres", '
-                'developers_ids, genres_ids'
-                ') VALUES (?, ?, ?, ?, ?, ?, ?)',
+                '"ID", "Source Index", "Name", "Developers", "Genres"'
+                ') VALUES (?, ?, ?, ?, ?)',
                 (
                     1,
                     '0',
                     'Catalogued Game',
                     'Catalogued Dev',
                     'Adventure',
-                    json.dumps([dev_id]),
-                    json.dumps([genre_id]),
                 ),
+            )
+            app_module.db.execute(
+                'INSERT INTO processed_game_developers (processed_game_id, developer_id) '
+                'VALUES (?, ?)',
+                (1, dev_id),
+            )
+            app_module.db.execute(
+                'INSERT INTO processed_game_genres (processed_game_id, genre_id) '
+                'VALUES (?, ?)',
+                (1, genre_id),
             )
     app_module.navigator.current_index = 1
     client = app_module.app.test_client()

@@ -1,4 +1,3 @@
-import json
 import os
 import uuid
 import importlib.util
@@ -94,7 +93,7 @@ def test_api_save_success_increments_seq(tmp_path):
     assert app.navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID", "igdb_id", "Developers", "Genres", developers_ids, genres_ids '
+            'SELECT "ID", "igdb_id", "Developers", "Genres" '
             'FROM processed_games WHERE "Source Index"=?',
             ('0',),
         )
@@ -103,19 +102,19 @@ def test_api_save_success_increments_seq(tmp_path):
     assert row['igdb_id'] == '4321'
     assert row['Developers'] == 'Dev Studio'
     assert row['Genres'] == 'Action'
-    developer_ids = json.loads(row['developers_ids'])
-    assert developer_ids
-    genre_ids = json.loads(row['genres_ids'])
-    assert genre_ids
     with app.db_lock:
         developer_row = app.db.execute(
-            'SELECT name FROM developers WHERE id=?',
-            (developer_ids[0],),
+            'SELECT d.name FROM processed_game_developers pgd '
+            'JOIN developers d ON d.id = pgd.developer_id '
+            'WHERE pgd.processed_game_id=?',
+            (row['ID'],),
         ).fetchone()
         assert developer_row['name'] == 'Dev Studio'
         genre_row = app.db.execute(
-            'SELECT name FROM genres WHERE id=?',
-            (genre_ids[0],),
+            'SELECT g.name FROM processed_game_genres pgg '
+            'JOIN genres g ON g.id = pgg.genre_id '
+            'WHERE pgg.processed_game_id=?',
+            (row['ID'],),
         ).fetchone()
         assert genre_row['name'] == 'Action'
 
