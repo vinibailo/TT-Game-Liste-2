@@ -12,8 +12,17 @@
     <script src="https://cdn.jsdelivr.net/npm/cropperjs@1.5.13/dist/cropper.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
 </head>
-<body>
+<body class="page-editor">
     <div id="toast" role="status" aria-live="polite"></div>
+    <header class="app-topbar" aria-label="Primary navigation">
+        <div class="topbar-content">
+            <a class="topbar-brand" href="{{ url_for('index') }}">Game Editor</a>
+            <nav class="topbar-nav" aria-label="Global">
+                <a class="topbar-link" href="{{ url_for('updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link" href="{{ url_for('logout') }}">Logout</a>
+            </nav>
+        </div>
+    </header>
     <header class="editor-header">
         <div class="header-main">
             <div class="header-left">

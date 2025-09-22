@@ -4,15 +4,136 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>IGDB Updates</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
 </head>
-<body>
-    <main class="updates-container">
-        <header>
-            <h1>IGDB Updates</h1>
-            <p>This page uses the updates API to populate data.</p>
+<body class="page-updates">
+    <div id="toast" role="status" aria-live="polite"></div>
+    <header class="app-topbar" aria-label="Primary navigation">
+        <div class="topbar-content">
+            <a class="topbar-brand" href="{{ url_for('index') }}">Game Editor</a>
+            <nav class="topbar-nav" aria-label="Global">
+                <a class="topbar-link is-active" href="{{ url_for('updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link" href="{{ url_for('logout') }}">Logout</a>
+            </nav>
+        </div>
+    </header>
+    <main class="updates-page">
+        <header class="updates-header">
+            <div class="updates-title">
+                <h1>IGDB Updates</h1>
+                <p>Monitor pending changes from IGDB before applying them to the local catalog.</p>
+            </div>
+            <div class="updates-actions">
+                <label class="updates-search" for="updates-search">
+                    <span class="sr-only">Search updates</span>
+                    <span class="material-symbols-rounded" aria-hidden="true">search</span>
+                    <input
+                        type="search"
+                        id="updates-search"
+                        placeholder="Search by game, ID or IGDB ID"
+                        autocomplete="off"
+                        data-search
+                    />
+                </label>
+                <button type="button" class="btn btn-blue" data-refresh>
+                    <span class="btn-icon" aria-hidden="true">
+                        <span class="material-symbols-rounded">refresh</span>
+                    </span>
+                    <span class="btn-label">Update</span>
+                </button>
+            </div>
         </header>
-        <section aria-live="polite" id="updates-root"></section>
+        <section class="updates-summary" aria-live="polite">
+            <span>Total entries:</span>
+            <strong data-count>0</strong>
+            <span class="updates-status" data-refresh-status></span>
+        </section>
+        <section class="updates-table-card">
+            <div class="table-scroll" role="region" aria-live="polite" aria-label="Updates table">
+                <table class="updates-table">
+                    <thead>
+                        <tr>
+                            <th scope="col" data-sortable aria-sort="descending">
+                                <button type="button" class="sort-button" data-sort="refreshed_at">
+                                    <span>Refreshed</span>
+                                    <span class="sort-indicator material-symbols-rounded" aria-hidden="true">arrow_downward</span>
+                                </button>
+                            </th>
+                            <th scope="col" data-sortable aria-sort="none">
+                                <button type="button" class="sort-button" data-sort="name">
+                                    <span>Game</span>
+                                    <span class="sort-indicator material-symbols-rounded" aria-hidden="true">unfold_more</span>
+                                </button>
+                            </th>
+                            <th scope="col" data-sortable aria-sort="none">
+                                <button type="button" class="sort-button" data-sort="processed_game_id">
+                                    <span>Game ID</span>
+                                    <span class="sort-indicator material-symbols-rounded" aria-hidden="true">unfold_more</span>
+                                </button>
+                            </th>
+                            <th scope="col">IGDB ID</th>
+                            <th scope="col">IGDB Updated</th>
+                            <th scope="col">Local Edited</th>
+                            <th scope="col" class="actions-column">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody data-updates-body></tbody>
+                </table>
+            </div>
+            <div class="table-empty" data-empty-state hidden>
+                <p>No updates found. Try refreshing or adjust your search.</p>
+            </div>
+            <div class="table-loading" data-loading-state hidden>
+                <span class="material-symbols-rounded" aria-hidden="true">hourglass_empty</span>
+                <p>Loading updates…</p>
+            </div>
+        </section>
     </main>
+    <div class="modal-backdrop hidden" data-modal hidden>
+        <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="diff-modal-title">
+            <header class="modal-header">
+                <div class="modal-titles">
+                    <h2 id="diff-modal-title">Update details</h2>
+                    <p class="modal-subtitle" data-modal-subtitle></p>
+                </div>
+                <button type="button" class="icon-button" data-close-modal aria-label="Close dialog">
+                    <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                </button>
+            </header>
+            <div class="modal-meta">
+                <div class="meta-item">
+                    <span class="meta-label">Game ID</span>
+                    <span class="meta-value" data-modal-game-id></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">IGDB ID</span>
+                    <span class="meta-value" data-modal-igdb-id></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">IGDB Updated</span>
+                    <span class="meta-value" data-modal-igdb-updated></span>
+                </div>
+                <div class="meta-item">
+                    <span class="meta-label">Local Edited</span>
+                    <span class="meta-value" data-modal-local-edited></span>
+                </div>
+            </div>
+            <div class="modal-body" data-modal-body>
+                <p class="modal-empty" data-modal-empty hidden>No differences were recorded for this game.</p>
+                <div class="diff-list" data-diff-list></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        window.updatesConfig = {
+            editBaseUrl: {{ url_for('index')|tojson }},
+            updatesUrl: {{ url_for('api_updates_list')|tojson }},
+            refreshUrl: {{ url_for('api_updates_refresh')|tojson }},
+            detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }}
+        };
+    </script>
+    <script src="{{ url_for('static', filename='updates.js') }}" defer></script>
 </body>
 </html>
