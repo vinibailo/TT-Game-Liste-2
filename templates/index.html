@@ -137,12 +137,14 @@
                         <label>Category
                             <select id="category"></select>
                         </label>
-                        <label>Developers
-                            <input type="text" id="developers" autocomplete="off" />
-                        </label>
-                        <label>Publishers
-                            <input type="text" id="publishers" autocomplete="off" />
-                        </label>
+                        <div class="chip-field">
+                            <label for="developers">Developers</label>
+                            <select id="developers" multiple aria-label="Developers"></select>
+                        </div>
+                        <div class="chip-field">
+                            <label for="publishers">Publishers</label>
+                            <select id="publishers" multiple aria-label="Publishers"></select>
+                        </div>
                     </div>
                 </details>
             </form>
@@ -164,7 +166,6 @@
     </main>
     <script>
         window.categoriesList = {{ categories|tojson }};
-        window.platformsList = {{ platforms|tojson }};
     </script>
     <script src="{{ url_for('static', filename='main.js') }}"></script>
 </body>

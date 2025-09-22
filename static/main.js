@@ -4,10 +4,19 @@ let currentId = null;
 let currentIgdbId = null;
 let currentUpload = null;
 let originalImage = null;
-let genresChoices, modesChoices, platformsChoices;
 let navigating = false;
 let totalGames = 0;
 let toastTimeout = null;
+const lookupConfigs = {
+    Developers: { endpoint: 'developers', elementId: 'developers' },
+    Publishers: { endpoint: 'publishers', elementId: 'publishers' },
+    Genres: { endpoint: 'genres', elementId: 'genres' },
+    GameModes: { endpoint: 'game_modes', elementId: 'modes' },
+    Platforms: { endpoint: 'platforms', elementId: 'platforms' },
+};
+const lookupChoicesInstances = {};
+const lookupIdToName = {};
+const lookupNameToId = {};
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
 const saveButton = document.getElementById('save');
@@ -58,47 +67,253 @@ function hideResolutionWarning() {
 
 hideResolutionWarning();
 const categoriesList = window.categoriesList || [];
-const platformsList = window.platformsList || [];
-const genresList = [
-    'Ação e Aventura',
-    'Cartas e Tabuleiro',
-    'Clássicos',
-    'Família e Crianças',
-    'Luta',
-    'Indie',
-    'Multijogador',
-    'Plataformas',
-    'Quebra-cabeça e Trivia',
-    'Corrida e Voo',
-    'RPG',
-    'Tiro',
-    'Simulação',
-    'Esportes',
-    'Estratégia',
-    'Horror de Sobrevivência',
-    'Mundo Aberto',
-    'Outros'
-];
-const modesList = [
-    'Single-player',
-    'Multiplayer local',
-    'Multiplayer online',
-    'Cooperativo (Co-op)',
-    'Competitivo (PvP)'
-];
 
 function populateSelect(id, options) {
     const sel = document.getElementById(id);
+    if (!sel) return;
+    sel.innerHTML = '';
     options.forEach(o => {
         const opt = document.createElement('option');
-        opt.value = o; opt.textContent = o;
+        opt.value = o;
+        opt.textContent = o;
         sel.appendChild(opt);
     });
 }
 
-function setChoices(instance, values) {
+function normalizeLookupName(value) {
+    if (value == null) return '';
+    return String(value).trim();
+}
+
+function lookupNameFingerprint(value) {
+    const normalized = normalizeLookupName(value);
+    return normalized ? normalized.toLocaleLowerCase() : '';
+}
+
+async function fetchLookupOptions(type) {
+    const response = await fetch(`/api/lookups/${type}`);
+    if (!response.ok) {
+        throw new Error(`Failed to load lookup options for ${type}`);
+    }
+    const payload = await response.json();
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    return items
+        .map(item => {
+            if (!item || item.id == null) {
+                return null;
+            }
+            const name = normalizeLookupName(item.name);
+            const idNumber = Number.parseInt(item.id, 10);
+            if (!name || Number.isNaN(idNumber)) {
+                return null;
+            }
+            return { id: idNumber, name };
+        })
+        .filter(Boolean);
+}
+
+function populateLookupSelectElement(element, items) {
+    element.innerHTML = '';
+    const idMap = new Map();
+    const nameIndex = new Map();
+    items.forEach(item => {
+        const value = String(item.id);
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = item.name;
+        element.appendChild(option);
+        idMap.set(value, item.name);
+        const fingerprint = lookupNameFingerprint(item.name);
+        if (fingerprint && !nameIndex.has(fingerprint)) {
+            nameIndex.set(fingerprint, value);
+        }
+    });
+    return { idMap, nameIndex };
+}
+
+function setLookupSelection(key, values) {
+    const instance = lookupChoicesInstances[key];
+    if (!instance) return;
+    const normalized = Array.isArray(values)
+        ? values
+              .map(value => String(value).trim())
+              .filter(Boolean)
+        : [];
     instance.removeActiveItems();
-    instance.setValue(values || []);
+    if (!normalized.length) {
+        return;
+    }
+    if (typeof instance.setChoiceByValue === 'function') {
+        instance.setChoiceByValue(normalized);
+    } else {
+        instance.setValue(normalized);
+    }
+}
+
+function mapNamesToLookupIds(key, names) {
+    const index = lookupNameToId[key];
+    if (!index) return [];
+    const seen = new Set();
+    const results = [];
+    names.forEach(name => {
+        const fingerprint = lookupNameFingerprint(name);
+        if (!fingerprint) {
+            return;
+        }
+        const value = index.get(fingerprint);
+        if (value && !seen.has(value)) {
+            seen.add(value);
+            results.push(value);
+        }
+    });
+    return results;
+}
+
+function coerceNameArray(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+        return value.map(normalizeLookupName).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+        return value
+            .split(',')
+            .map(normalizeLookupName)
+            .filter(Boolean);
+    }
+    return [];
+}
+
+function extractLookupIds(key, selection, fallbackValue) {
+    const idMap = lookupIdToName[key] || new Map();
+    const ids = [];
+    const seen = new Set();
+    if (selection && Array.isArray(selection.ids)) {
+        selection.ids.forEach(idValue => {
+            if (idValue == null) return;
+            const strValue = String(idValue).trim();
+            if (!strValue || seen.has(strValue)) {
+                return;
+            }
+            if (idMap.size && !idMap.has(strValue)) {
+                return;
+            }
+            seen.add(strValue);
+            ids.push(strValue);
+        });
+    }
+    if (!ids.length && selection && Array.isArray(selection.selected)) {
+        selection.selected.forEach(item => {
+            if (!item) return;
+            if (item.id == null) return;
+            const strValue = String(item.id).trim();
+            if (!strValue || seen.has(strValue)) return;
+            if (idMap.size && !idMap.has(strValue)) {
+                return;
+            }
+            seen.add(strValue);
+            ids.push(strValue);
+        });
+    }
+    if (!ids.length) {
+        let fallbackNames = [];
+        if (selection && Array.isArray(selection.names) && selection.names.length) {
+            fallbackNames = selection.names;
+        } else if (fallbackValue !== undefined) {
+            fallbackNames = coerceNameArray(fallbackValue);
+        }
+        if (fallbackNames.length) {
+            const mapped = mapNamesToLookupIds(key, fallbackNames);
+            mapped.forEach(value => {
+                if (!seen.has(value)) {
+                    seen.add(value);
+                    ids.push(value);
+                }
+            });
+        }
+    }
+    return ids;
+}
+
+function applyLookupSelection(key, selection, fallbackValue) {
+    const values = extractLookupIds(key, selection, fallbackValue);
+    setLookupSelection(key, values);
+}
+
+function buildLookupSelections() {
+    const result = {};
+    Object.keys(lookupConfigs).forEach(key => {
+        const instance = lookupChoicesInstances[key];
+        const idMap = lookupIdToName[key] || new Map();
+        const selection = {
+            ids: [],
+            names: [],
+            selected: [],
+            display: '',
+        };
+        if (instance && typeof instance.getValue === 'function') {
+            const rawValues = instance.getValue(true);
+            const seenIds = new Set();
+            if (Array.isArray(rawValues)) {
+                rawValues.forEach(value => {
+                    if (value == null) return;
+                    const strValue = String(value).trim();
+                    if (!strValue) return;
+                    const label = idMap.get(strValue) || '';
+                    const parsed = Number.parseInt(strValue, 10);
+                    const numericId = Number.isNaN(parsed) ? null : parsed;
+                    if (numericId !== null) {
+                        if (seenIds.has(numericId)) {
+                            return;
+                        }
+                        seenIds.add(numericId);
+                        selection.ids.push(numericId);
+                    }
+                    if (label) {
+                        selection.names.push(label);
+                    }
+                    selection.selected.push({
+                        id: numericId,
+                        name: label || null,
+                    });
+                });
+            }
+        }
+        selection.display = selection.names.join(', ');
+        result[key] = selection;
+    });
+    return result;
+}
+
+async function initializeLookupControls() {
+    const entries = await Promise.all(
+        Object.entries(lookupConfigs).map(async ([key, config]) => {
+            try {
+                const items = await fetchLookupOptions(config.endpoint);
+                return { key, config, items };
+            } catch (err) {
+                console.error(`Failed to load lookup options for ${config.endpoint}`, err);
+                return { key, config, items: [] };
+            }
+        })
+    );
+    entries.forEach(({ key, config, items }) => {
+        const element = document.getElementById(config.elementId);
+        if (!element) {
+            lookupChoicesInstances[key] = null;
+            lookupIdToName[key] = new Map();
+            lookupNameToId[key] = new Map();
+            return;
+        }
+        const { idMap, nameIndex } = populateLookupSelectElement(element, items);
+        lookupIdToName[key] = idMap;
+        lookupNameToId[key] = nameIndex;
+        const choices = new Choices(element, {
+            removeItemButton: true,
+            shouldSort: false,
+        });
+        choices.passedElement.element.addEventListener('change', saveSession);
+        lookupChoicesInstances[key] = choices;
+    });
 }
 
 function updateGameIdDisplay(idValue) {
@@ -114,16 +329,13 @@ function updateIgdbIdDisplay(idValue) {
 }
 
 function collectFields() {
+    const lookups = buildLookupSelections();
     return {
         Name: document.getElementById('name').value,
         Summary: document.getElementById('summary').value,
         FirstLaunchDate: document.getElementById('first-launch').value,
-        Developers: document.getElementById('developers').value,
-        Publishers: document.getElementById('publishers').value,
         Category: document.getElementById('category').value,
-        Genres: genresChoices.getValue(true),
-        GameModes: modesChoices.getValue(true),
-        Platforms: platformsChoices.getValue(true)
+        Lookups: lookups,
     };
 }
 
@@ -182,12 +394,13 @@ function restoreSession() {
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.fields.Summary;
     document.getElementById('first-launch').value = data.fields.FirstLaunchDate;
-    document.getElementById('developers').value = data.fields.Developers;
-    document.getElementById('publishers').value = data.fields.Publishers;
     document.getElementById('category').value = data.fields.Category;
-    setChoices(genresChoices, data.fields.Genres);
-    setChoices(modesChoices, data.fields.GameModes);
-    setChoices(platformsChoices, data.fields.Platforms);
+    const lookups = (data.fields && data.fields.Lookups) || {};
+    applyLookupSelection('Developers', lookups.Developers, data.fields.Developers);
+    applyLookupSelection('Publishers', lookups.Publishers, data.fields.Publishers);
+    applyLookupSelection('Genres', lookups.Genres, data.fields.Genres);
+    applyLookupSelection('GameModes', lookups.GameModes, data.fields.GameModes);
+    applyLookupSelection('Platforms', lookups.Platforms, data.fields.Platforms);
     if (data.image) setImage(data.image);
     currentUpload = data.upload_name;
 }
@@ -349,12 +562,13 @@ function applyGameData(data) {
     const summaryEl = document.getElementById('summary');
     summaryEl.value = data.game.Summary || '';
     document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
-    document.getElementById('developers').value = data.game.Developers || '';
-    document.getElementById('publishers').value = data.game.Publishers || '';
     document.getElementById('category').value = data.game.Category || '';
-    setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
-    setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
-    setChoices(platformsChoices, Array.isArray(data.game.Platforms)?data.game.Platforms:[]);
+    const lookupSelections = (data.game && data.game.Lookups) || {};
+    applyLookupSelection('Developers', lookupSelections.Developers, data.game.Developers);
+    applyLookupSelection('Publishers', lookupSelections.Publishers, data.game.Publishers);
+    applyLookupSelection('Genres', lookupSelections.Genres, data.game.Genres);
+    applyLookupSelection('GameModes', lookupSelections.GameModes, data.game.GameModes);
+    applyLookupSelection('Platforms', lookupSelections.Platforms, data.game.Platforms);
     if (data.cover) {
         setImage(data.cover);
         originalImage = data.cover;
@@ -676,12 +890,12 @@ function resetFields() {
         const summaryEl = document.getElementById('summary');
         summaryEl.value = data.game.Summary || '';
         document.getElementById('first-launch').value = data.game.FirstLaunchDate || '';
-        document.getElementById('developers').value = data.game.Developers || '';
-        document.getElementById('publishers').value = data.game.Publishers || '';
         document.getElementById('category').value = data.game.Category || '';
-        setChoices(genresChoices, Array.isArray(data.game.Genres)?data.game.Genres:[]);
-        setChoices(modesChoices, Array.isArray(data.game.GameModes)?data.game.GameModes:[]);
-        setChoices(platformsChoices, Array.isArray(data.game.Platforms)?data.game.Platforms:[]);
+        applyLookupSelection('Developers', undefined, data.game.Developers);
+        applyLookupSelection('Publishers', undefined, data.game.Publishers);
+        applyLookupSelection('Genres', undefined, data.game.Genres);
+        applyLookupSelection('GameModes', undefined, data.game.GameModes);
+        applyLookupSelection('Platforms', undefined, data.game.Platforms);
         if (data.cover) {
             setImage(data.cover);
             originalImage = data.cover;
@@ -789,13 +1003,12 @@ document.addEventListener('keydown', (event) => {
 });
 
 populateSelect('category', categoriesList);
-populateSelect('platforms', platformsList);
-populateSelect('genres', genresList);
-populateSelect('modes', modesList);
-genresChoices = new Choices('#genres', { removeItemButton: true });
-modesChoices = new Choices('#modes', { removeItemButton: true });
-platformsChoices = new Choices('#platforms', { removeItemButton: true });
-genresChoices.passedElement.element.addEventListener('change', saveSession);
-modesChoices.passedElement.element.addEventListener('change', saveSession);
-platformsChoices.passedElement.element.addEventListener('change', saveSession);
-loadInitialGame();
+
+initializeLookupControls()
+    .catch(err => {
+        console.error(err);
+        showToast('Failed to load lookup options.', 'warning');
+    })
+    .finally(() => {
+        loadInitialGame();
+    });
