@@ -40,6 +40,9 @@ COVERS_DIR = 'covers_out'
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
+IGDB_USER_AGENT = os.environ.get(
+    'IGDB_USER_AGENT', 'TT-Game-Liste/1.0 (support@example.com)'
+)
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
@@ -410,6 +413,7 @@ def fetch_igdb_metadata(
     request.add_header('Client-ID', client_id)
     request.add_header('Authorization', f'Bearer {access_token}')
     request.add_header('Accept', 'application/json')
+    request.add_header('User-Agent', IGDB_USER_AGENT)
 
     try:
         with urlopen(request) as response:

@@ -134,6 +134,53 @@ def test_refresh_surfaces_igdb_failure(tmp_path):
     assert payload == {'error': 'IGDB request failed: 401 invalid credentials'}
 
 
+def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
+    app_module = load_app(tmp_path)
+
+    captured = {}
+
+    class DummyRequest:
+        def __init__(self, url, data=None, method=None):
+            self.url = url
+            self.data = data
+            self.method = method
+            self.headers = {}
+
+        def add_header(self, key, value):
+            self.headers[key] = value
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'[]'
+
+    def fake_urlopen(request):
+        captured['request'] = request
+        return DummyResponse()
+
+    original_request = app_module.Request
+    original_urlopen = app_module.urlopen
+    try:
+        app_module.Request = DummyRequest
+        app_module.urlopen = fake_urlopen
+        result = app_module.fetch_igdb_metadata('token', 'client', ['100'])
+    finally:
+        app_module.Request = original_request
+        app_module.urlopen = original_urlopen
+
+    assert result == {}
+    assert 'request' in captured
+    assert (
+        captured['request'].headers.get('User-Agent')
+        == app_module.IGDB_USER_AGENT
+    )
+
+
 def test_updates_detail_returns_diff(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
