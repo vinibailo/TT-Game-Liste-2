@@ -21,6 +21,19 @@ const LOW_RESOLUTION_WARNING = 'Imagem menor que 1080px será ampliada.';
 const jumpForm = document.getElementById('jump-form');
 const jumpInput = document.getElementById('jump-input');
 const jumpSubmit = document.getElementById('jump-submit');
+const urlSearchParams = new URLSearchParams(window.location.search);
+const initialGameIdParam = (() => {
+    const value = urlSearchParams.get('game_id');
+    if (!value) {
+        return null;
+    }
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) {
+        return null;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+})();
 
 function setSaveButtonLabel(text) {
     if (!saveButton) return;
@@ -371,6 +384,29 @@ function loadGame() {
         .finally(() => setNavDisabled(false));
 }
 
+async function loadInitialGame() {
+    if (initialGameIdParam) {
+        navigating = true;
+        setNavDisabled(true);
+        setJumpControlsDisabled(true);
+        try {
+            await requestGameById(initialGameIdParam);
+        } catch (err) {
+            console.error(err);
+            const code = err && (err.code || err.message);
+            const message = translateJumpError(code);
+            showToast(message, 'warning');
+            await loadGame();
+        } finally {
+            navigating = false;
+            setNavDisabled(false);
+            setJumpControlsDisabled(false);
+        }
+        return;
+    }
+    await loadGame();
+}
+
 async function saveGame() {
     if (!cropper) {
         showToast('Selecione uma imagem', 'warning');
@@ -543,26 +579,7 @@ async function goToGameById(event) {
     setJumpControlsDisabled(true);
     let shouldRefocus = false;
     try {
-        const response = await fetch('api/game_by_id', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id: idValue, upload_name: currentUpload})
-        });
-        let payload = null;
-        try {
-            payload = await response.json();
-        } catch (err) {
-            payload = null;
-        }
-        if (!response.ok || !payload || payload.error) {
-            const errorCode = payload && payload.error ? payload.error : 'jump failed';
-            const error = new Error(errorCode);
-            error.code = errorCode;
-            throw error;
-        }
-        localStorage.removeItem('session');
-        currentUpload = null;
-        applyGameData(payload);
+        await requestGameById(idValue);
         jumpInput.value = '';
     } catch (err) {
         console.error(err);
@@ -579,6 +596,29 @@ async function goToGameById(event) {
             jumpInput.select();
         }
     }
+}
+
+async function requestGameById(idValue) {
+    const response = await fetch('api/game_by_id', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id: idValue, upload_name: currentUpload})
+    });
+    let payload = null;
+    try {
+        payload = await response.json();
+    } catch (err) {
+        payload = null;
+    }
+    if (!response.ok || !payload || payload.error) {
+        const errorCode = payload && payload.error ? payload.error : 'jump failed';
+        const error = new Error(errorCode);
+        error.code = errorCode;
+        throw error;
+    }
+    localStorage.removeItem('session');
+    currentUpload = null;
+    applyGameData(payload);
 }
 
 function nextGame(autoAdvance = false) {
@@ -758,4 +798,4 @@ platformsChoices = new Choices('#platforms', { removeItemButton: true });
 genresChoices.passedElement.element.addEventListener('change', saveSession);
 modesChoices.passedElement.element.addEventListener('change', saveSession);
 platformsChoices.passedElement.element.addEventListener('change', saveSession);
-loadGame();
+loadInitialGame();
