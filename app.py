@@ -4,6 +4,7 @@ import uuid
 import base64
 import io
 import sqlite3
+import numbers
 from typing import Any
 from threading import Lock
 import logging
@@ -77,6 +78,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                 "Game Modes" TEXT,
                 "Category" TEXT,
                 "Platforms" TEXT,
+                "igdb_id" TEXT,
                 "Cover Path" TEXT,
                 "Width" INTEGER,
                 "Height" INTEGER
@@ -84,11 +86,11 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
             INSERT INTO processed_games (
                 "ID", "Source Index", "Name", "Summary", "First Launch Date",
                 "Developers", "Publishers", "Genres", "Game Modes", "Category",
-                "Platforms", "Cover Path", "Width", "Height"
+                "Platforms", "igdb_id", "Cover Path", "Width", "Height"
             )
             SELECT CAST("ID" AS INTEGER), "Source Index", "Name", "Summary",
                    "First Launch Date", "Developers", "Publishers", "Genres",
-                   "Game Modes", '', '', "Cover Path", "Width", "Height"
+                   "Game Modes", '', '', '', "Cover Path", "Width", "Height"
             FROM processed_games_old;
             DROP TABLE processed_games_old;
             '''
@@ -112,6 +114,7 @@ def _init_db() -> None:
                     "Game Modes" TEXT,
                     "Category" TEXT,
                     "Platforms" TEXT,
+                    "igdb_id" TEXT,
                     "Cover Path" TEXT,
                     "Width" INTEGER,
                     "Height" INTEGER
@@ -132,6 +135,10 @@ def _init_db() -> None:
                 pass
             try:
                 conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
             except sqlite3.OperationalError:
                 pass
     finally:
@@ -252,6 +259,39 @@ def normalize_processed_games() -> None:
                     (-new_id, src_index),
                 )
             conn.execute('UPDATE processed_games SET "ID" = -"ID"')
+
+
+def backfill_igdb_ids() -> None:
+    if 'games_df' not in globals():
+        return
+    if games_df.empty:
+        return
+    with db_lock:
+        conn = get_db()
+        with conn:
+            cur = conn.execute(
+                'SELECT "Source Index", "igdb_id" FROM processed_games'
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                igdb_id_value = row['igdb_id']
+                if igdb_id_value:
+                    continue
+                src_index = row['Source Index']
+                try:
+                    idx = int(str(src_index))
+                except (TypeError, ValueError):
+                    continue
+                if idx < 0 or idx >= len(games_df):
+                    continue
+                candidate = extract_igdb_id(
+                    games_df.iloc[idx], allow_generic_id=True
+                )
+                if candidate:
+                    conn.execute(
+                        'UPDATE processed_games SET "igdb_id"=? WHERE "Source Index"=?',
+                        (candidate, src_index),
+                    )
 
 
 class GameNavigator:
@@ -430,6 +470,54 @@ def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
     return []
 
 
+def _normalize_column_name(name: str) -> str:
+    return ''.join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+def coerce_igdb_id(value: Any) -> str:
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text.lower() == 'nan':
+            return ''
+        if text.endswith('.0') and text[:-2].isdigit():
+            return text[:-2]
+        return text
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        if float(value).is_integer():
+            return str(int(value))
+        return str(value)
+    text = str(value).strip()
+    if not text or text.lower() == 'nan':
+        return ''
+    return text
+
+
+def extract_igdb_id(row: pd.Series, allow_generic_id: bool = False) -> str:
+    for key in row.index:
+        normalized = _normalize_column_name(key)
+        if 'igdb' in normalized and 'id' in normalized:
+            value = coerce_igdb_id(row.get(key))
+            if value:
+                return value
+    if allow_generic_id:
+        for key in row.index:
+            key_str = str(key)
+            if key_str.lower() == 'id':
+                value = coerce_igdb_id(row.get(key))
+                if value:
+                    return value
+    return ''
+
+
 def get_cell(row: pd.Series, key: str, missing: list[str]) -> str:
     """Return the cell value or an empty string if missing, tracking missing fields."""
     val = row.get(key, '')
@@ -484,6 +572,7 @@ platforms_list = sorted({
 })
 total_games = len(games_df)
 with app.app_context():
+    backfill_igdb_ids()
     normalize_processed_games()
     navigator = GameNavigator(total_games)
 
@@ -548,6 +637,9 @@ def build_game_payload(index: int, seq: int) -> dict:
         cover_data = find_cover(row)
 
     source_row = pd.Series(dict(processed_row)) if processed_row is not None else row
+    igdb_id = extract_igdb_id(source_row)
+    if not igdb_id:
+        igdb_id = extract_igdb_id(row, allow_generic_id=True)
     genres = extract_list(source_row, ['Genres', 'Genre'])
     modes = extract_list(source_row, ['Game Modes', 'Mode'])
     platforms = extract_list(source_row, ['Platforms', 'Platform'])
@@ -562,6 +654,7 @@ def build_game_payload(index: int, seq: int) -> dict:
         'GameModes': modes,
         'Category': get_cell(source_row, 'Category', missing),
         'Platforms': platforms,
+        'IGDBID': igdb_id or None,
     }
 
     game_id = processed_row['ID'] if processed_row is not None else str(seq)
@@ -604,6 +697,7 @@ def api_game_raw(index: int):
     modes = extract_list(row, ['Game Modes', 'Mode'])
     platforms = extract_list(row, ['Platforms', 'Platform'])
     dummy: list[str] = []
+    igdb_id = extract_igdb_id(row, allow_generic_id=True)
     game_fields = {
         'Name': get_cell(row, 'Name', dummy),
         'Summary': get_cell(row, 'Summary', dummy),
@@ -614,6 +708,7 @@ def api_game_raw(index: int):
         'GameModes': modes,
         'Category': get_cell(row, 'Category', dummy),
         'Platforms': platforms,
+        'IGDBID': igdb_id or None,
     }
     return jsonify({
         'index': int(index),
@@ -690,7 +785,7 @@ def api_save():
             with db_lock:
                 conn = get_db()
                 cur = conn.execute(
-                    'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "ID", "igdb_id" FROM processed_games WHERE "Source Index"=?',
                     (str(index),),
                 )
                 existing = cur.fetchone()
@@ -738,6 +833,22 @@ def api_save():
                 img.save(cover_path, format='JPEG', quality=90)
                 width, height = img.size
 
+            igdb_id_value = None
+            if existing is not None:
+                try:
+                    existing_raw = existing['igdb_id']
+                except (KeyError, IndexError):
+                    existing_raw = None
+                existing_coerced = coerce_igdb_id(existing_raw)
+                if existing_coerced:
+                    igdb_id_value = existing_coerced
+            if igdb_id_value is None and 0 <= index < len(games_df):
+                igdb_candidate = extract_igdb_id(
+                    games_df.iloc[index], allow_generic_id=True
+                )
+                if igdb_candidate:
+                    igdb_id_value = igdb_candidate
+
             row = {
                 "ID": seq_id,
                 "Source Index": str(index),
@@ -750,6 +861,7 @@ def api_save():
                 "Game Modes": ', '.join(fields.get('GameModes', [])),
                 "Category": fields.get('Category', ''),
                 "Platforms": ', '.join(fields.get('Platforms', [])),
+                "igdb_id": igdb_id_value,
                 "Cover Path": cover_path,
                 "Width": width,
                 "Height": height,
@@ -764,13 +876,13 @@ def api_save():
                                 "Name"=?, "Summary"=?, "First Launch Date"=?,
                                 "Developers"=?, "Publishers"=?, "Genres"=?,
                                 "Game Modes"=?, "Category"=?, "Platforms"=?,
-                                "Cover Path"=?, "Width"=?, "Height"=?
+                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?
                                WHERE "ID"=?''',
                             (
                                 row['Name'], row['Summary'], row['First Launch Date'],
                                 row['Developers'], row['Publishers'], row['Genres'],
                                 row['Game Modes'], row['Category'], row['Platforms'],
-                                row['Cover Path'], row['Width'], row['Height'],
+                                row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
                                 seq_id,
                             ),
                         )
@@ -780,14 +892,14 @@ def api_save():
                                 "ID", "Source Index", "Name", "Summary",
                                 "First Launch Date", "Developers", "Publishers",
                                 "Genres", "Game Modes", "Category", "Platforms",
-                                "Cover Path", "Width", "Height"
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                "igdb_id", "Cover Path", "Width", "Height"
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                             (
                                 seq_id,
                                 row['Source Index'], row['Name'], row['Summary'],
                                 row['First Launch Date'], row['Developers'], row['Publishers'],
                                 row['Genres'], row['Game Modes'], row['Category'],
-                                row['Platforms'], row['Cover Path'],
+                                row['Platforms'], row['igdb_id'], row['Cover Path'],
                                 row['Width'], row['Height'],
                             ),
                         )

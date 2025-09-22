@@ -3,6 +3,8 @@ import uuid
 import importlib.util
 from pathlib import Path
 
+import pandas as pd
+
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
@@ -60,6 +62,14 @@ def test_api_save_seq_mismatch(tmp_path):
 
 def test_api_save_success_increments_seq(tmp_path):
     app = load_app(tmp_path)
+    app.games_df = pd.DataFrame([
+        {
+            'Name': 'Test Game',
+            'id': 4321,
+        }
+    ])
+    app.total_games = len(app.games_df)
+    app.navigator.total = app.total_games
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
@@ -70,11 +80,12 @@ def test_api_save_success_increments_seq(tmp_path):
     assert app.navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+            'SELECT "ID", "igdb_id" FROM processed_games WHERE "Source Index"=?',
             ('0',),
         )
         row = cur.fetchone()
     assert row['ID'] == 1
+    assert row['igdb_id'] == '4321'
 
 
 def test_api_save_conflict_does_not_increment_seq(tmp_path):
