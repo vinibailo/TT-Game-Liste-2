@@ -1,7 +1,7 @@
 import json
 import os
-import uuid
 import importlib.util
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,15 +42,36 @@ def insert_processed_game(app_module, **overrides):
         "last_edited_at": "2024-01-01T00:00:00+00:00",
     }
     defaults.update(overrides)
+    for relation in app_module.LOOKUP_RELATIONS:
+        defaults.setdefault(relation['id_column'], '[]')
     with app_module.db_lock:
         with app_module.db:
+            for relation in app_module.LOOKUP_RELATIONS:
+                processed_column = relation['processed_column']
+                id_column = relation['id_column']
+                lookup_table = relation['lookup_table']
+                values = app_module._parse_iterable(defaults.get(processed_column, ''))
+                collected: list[int] = []
+                for value in values:
+                    normalized = app_module._normalize_lookup_name(value)
+                    if not normalized:
+                        continue
+                    lookup_id = app_module._get_or_create_lookup_id(
+                        app_module.db, lookup_table, normalized
+                    )
+                    if lookup_id is None or lookup_id in collected:
+                        continue
+                    collected.append(lookup_id)
+                defaults[id_column] = json.dumps(collected)
             app_module.db.execute(
                 '''INSERT INTO processed_games (
                     "ID", "Source Index", "Name", "Summary",
                     "First Launch Date", "Developers", "Publishers",
                     "Genres", "Game Modes", "Category", "Platforms",
-                    "igdb_id", "Cover Path", "Width", "Height", last_edited_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    "igdb_id", "Cover Path", "Width", "Height", last_edited_at,
+                    developers_ids, publishers_ids, genres_ids, game_modes_ids,
+                    platforms_ids
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (
                     defaults["ID"],
                     defaults["Source Index"],
@@ -68,29 +89,13 @@ def insert_processed_game(app_module, **overrides):
                     defaults["Width"],
                     defaults["Height"],
                     defaults["last_edited_at"],
+                    defaults['developers_ids'],
+                    defaults['publishers_ids'],
+                    defaults['genres_ids'],
+                    defaults['game_modes_ids'],
+                    defaults['platforms_ids'],
                 ),
             )
-            for relation in app_module.LOOKUP_RELATIONS:
-                processed_column = relation['processed_column']
-                values = app_module._parse_iterable(defaults.get(processed_column, ''))
-                for value in values:
-                    normalized = app_module._normalize_lookup_name(value)
-                    if not normalized:
-                        continue
-                    lookup_id = app_module._get_or_create_lookup_id(
-                        app_module.db, relation['lookup_table'], normalized
-                    )
-                    if lookup_id is None:
-                        continue
-                    app_module.db.execute(
-                        f'''INSERT OR IGNORE INTO {relation['join_table']} (
-                                processed_game_id, {relation['join_column']}
-                           ) VALUES (?, ?)''',
-                        (
-                            defaults["ID"],
-                            lookup_id,
-                        ),
-                    )
 
 
 def test_refresh_creates_update_records(tmp_path):
