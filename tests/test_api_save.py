@@ -75,17 +75,53 @@ def test_api_save_success_increments_seq(tmp_path):
         sess['authenticated'] = True
     app.navigator.current_index = 0
     app.navigator.seq_index = 1
-    resp = client.post('/api/save', json={'index': 0, 'id': '1', 'fields': {}})
+    fields_payload = {
+        'Name': 'Test Game',
+        'Lookups': {
+            'Developers': [{'name': 'Dev Studio'}],
+            'Publishers': [{'name': 'Pub Works'}],
+            'Genres': [{'name': 'Action'}],
+            'GameModes': [{'name': 'Single-player'}],
+            'Platforms': [{'name': 'PC'}],
+        },
+    }
+    resp = client.post(
+        '/api/save',
+        json={'index': 0, 'id': '1', 'fields': fields_payload},
+    )
     assert resp.status_code == 200
     assert app.navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID", "igdb_id" FROM processed_games WHERE "Source Index"=?',
+            'SELECT "ID", "igdb_id", "Developers", "Genres" FROM processed_games WHERE "Source Index"=?',
             ('0',),
         )
         row = cur.fetchone()
     assert row['ID'] == 1
     assert row['igdb_id'] == '4321'
+    assert row['Developers'] == 'Dev Studio'
+    assert row['Genres'] == 'Action'
+    with app.db_lock:
+        genre_link = app.db.execute(
+            'SELECT genre_id FROM processed_game_genres WHERE processed_game_id=?',
+            (1,),
+        ).fetchone()
+        assert genre_link is not None
+        genre_row = app.db.execute(
+            'SELECT name FROM genres WHERE id=?',
+            (genre_link['genre_id'],),
+        ).fetchone()
+        assert genre_row['name'] == 'Action'
+        developer_link = app.db.execute(
+            'SELECT developer_id FROM processed_game_developers WHERE processed_game_id=?',
+            (1,),
+        ).fetchone()
+        assert developer_link is not None
+        developer_row = app.db.execute(
+            'SELECT name FROM developers WHERE id=?',
+            (developer_link['developer_id'],),
+        ).fetchone()
+        assert developer_row['name'] == 'Dev Studio'
 
 
 def test_api_save_conflict_does_not_increment_seq(tmp_path):

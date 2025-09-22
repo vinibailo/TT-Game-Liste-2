@@ -70,6 +70,27 @@ def insert_processed_game(app_module, **overrides):
                     defaults["last_edited_at"],
                 ),
             )
+            for relation in app_module.LOOKUP_RELATIONS:
+                processed_column = relation['processed_column']
+                values = app_module._parse_iterable(defaults.get(processed_column, ''))
+                for value in values:
+                    normalized = app_module._normalize_lookup_name(value)
+                    if not normalized:
+                        continue
+                    lookup_id = app_module._get_or_create_lookup_id(
+                        app_module.db, relation['lookup_table'], normalized
+                    )
+                    if lookup_id is None:
+                        continue
+                    app_module.db.execute(
+                        f'''INSERT OR IGNORE INTO {relation['join_table']} (
+                                processed_game_id, {relation['join_column']}
+                           ) VALUES (?, ?)''',
+                        (
+                            defaults["ID"],
+                            lookup_id,
+                        ),
+                    )
 
 
 def test_refresh_creates_update_records(tmp_path):
