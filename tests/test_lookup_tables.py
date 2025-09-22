@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import uuid
+import json
 import importlib.util
 from pathlib import Path
 
@@ -105,53 +106,50 @@ def test_lookup_tables_backfilled(tmp_path):
 
         platform_rows = app.db.execute('SELECT name FROM platforms').fetchall()
         assert {row['name'] for row in platform_rows} == {"PC"}
-
-        developer_link = app.db.execute(
-            'SELECT processed_game_id, developer_id FROM processed_game_developers'
+        processed_row = app.db.execute(
+            '''SELECT developers_ids, publishers_ids, genres_ids,
+                      game_modes_ids, platforms_ids
+               FROM processed_games WHERE "ID"=?''',
+            (1,),
         ).fetchone()
-        assert developer_link['processed_game_id'] == 1
+        assert processed_row is not None
+
+        developer_ids = json.loads(processed_row['developers_ids'])
+        assert developer_ids
         developer_name = app.db.execute(
             'SELECT name FROM developers WHERE id=?',
-            (developer_link['developer_id'],),
+            (developer_ids[0],),
         ).fetchone()
         assert developer_name['name'] == "Foo Studio"
 
-        publisher_link = app.db.execute(
-            'SELECT processed_game_id, publisher_id FROM processed_game_publishers'
-        ).fetchone()
-        assert publisher_link['processed_game_id'] == 1
+        publisher_ids = json.loads(processed_row['publishers_ids'])
+        assert publisher_ids
         publisher_name = app.db.execute(
             'SELECT name FROM publishers WHERE id=?',
-            (publisher_link['publisher_id'],),
+            (publisher_ids[0],),
         ).fetchone()
         assert publisher_name['name'] == "Bar Publishing"
 
-        genre_link = app.db.execute(
-            'SELECT processed_game_id, genre_id FROM processed_game_genres'
-        ).fetchone()
-        assert genre_link['processed_game_id'] == 1
+        genre_ids = json.loads(processed_row['genres_ids'])
+        assert genre_ids
         genre_name = app.db.execute(
             'SELECT name FROM genres WHERE id=?',
-            (genre_link['genre_id'],),
+            (genre_ids[0],),
         ).fetchone()
         assert genre_name['name'] == "Action"
 
-        mode_link = app.db.execute(
-            'SELECT processed_game_id, game_mode_id FROM processed_game_game_modes'
-        ).fetchone()
-        assert mode_link['processed_game_id'] == 1
+        mode_ids = json.loads(processed_row['game_modes_ids'])
+        assert mode_ids
         mode_name = app.db.execute(
             'SELECT name FROM game_modes WHERE id=?',
-            (mode_link['game_mode_id'],),
+            (mode_ids[0],),
         ).fetchone()
         assert mode_name['name'] == "Single-player"
 
-        platform_link = app.db.execute(
-            'SELECT processed_game_id, platform_id FROM processed_game_platforms'
-        ).fetchone()
-        assert platform_link['processed_game_id'] == 1
+        platform_ids = json.loads(processed_row['platforms_ids'])
+        assert platform_ids
         platform_name = app.db.execute(
             'SELECT name FROM platforms WHERE id=?',
-            (platform_link['platform_id'],),
+            (platform_ids[0],),
         ).fetchone()
         assert platform_name['name'] == "PC"

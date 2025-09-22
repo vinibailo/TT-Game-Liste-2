@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 import importlib.util
@@ -93,7 +94,8 @@ def test_api_save_success_increments_seq(tmp_path):
     assert app.navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID", "igdb_id", "Developers", "Genres" FROM processed_games WHERE "Source Index"=?',
+            'SELECT "ID", "igdb_id", "Developers", "Genres", developers_ids, genres_ids '
+            'FROM processed_games WHERE "Source Index"=?',
             ('0',),
         )
         row = cur.fetchone()
@@ -101,27 +103,21 @@ def test_api_save_success_increments_seq(tmp_path):
     assert row['igdb_id'] == '4321'
     assert row['Developers'] == 'Dev Studio'
     assert row['Genres'] == 'Action'
+    developer_ids = json.loads(row['developers_ids'])
+    assert developer_ids
+    genre_ids = json.loads(row['genres_ids'])
+    assert genre_ids
     with app.db_lock:
-        genre_link = app.db.execute(
-            'SELECT genre_id FROM processed_game_genres WHERE processed_game_id=?',
-            (1,),
-        ).fetchone()
-        assert genre_link is not None
-        genre_row = app.db.execute(
-            'SELECT name FROM genres WHERE id=?',
-            (genre_link['genre_id'],),
-        ).fetchone()
-        assert genre_row['name'] == 'Action'
-        developer_link = app.db.execute(
-            'SELECT developer_id FROM processed_game_developers WHERE processed_game_id=?',
-            (1,),
-        ).fetchone()
-        assert developer_link is not None
         developer_row = app.db.execute(
             'SELECT name FROM developers WHERE id=?',
-            (developer_link['developer_id'],),
+            (developer_ids[0],),
         ).fetchone()
         assert developer_row['name'] == 'Dev Studio'
+        genre_row = app.db.execute(
+            'SELECT name FROM genres WHERE id=?',
+            (genre_ids[0],),
+        ).fetchone()
+        assert genre_row['name'] == 'Action'
 
 
 def test_api_save_conflict_does_not_increment_seq(tmp_path):
