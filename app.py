@@ -113,6 +113,20 @@ LOOKUP_RELATIONS_BY_KEY = {
     relation['response_key']: relation for relation in LOOKUP_RELATIONS
 }
 
+LOOKUP_TABLES_BY_NAME = {
+    table_config['table']: table_config for table_config in LOOKUP_TABLES
+}
+
+LOOKUP_ENDPOINT_MAP = {
+    'developers': 'developers',
+    'publishers': 'publishers',
+    'genres': 'genres',
+    'game_modes': 'game_modes',
+    'game-modes': 'game_modes',
+    'gamemodes': 'game_modes',
+    'platforms': 'platforms',
+}
+
 LOOKUP_SOURCE_KEYS = {
     'Developers': ['Developers', 'Developer'],
     'Publishers': ['Publishers', 'Publisher'],
@@ -1408,6 +1422,36 @@ def index():
         categories=categories_list,
         platforms=platforms_list,
     )
+
+
+@app.route('/api/lookups/<lookup_type>')
+def api_lookup_options(lookup_type: str):
+    normalized = lookup_type.strip().lower().replace('-', '_').replace(' ', '_')
+    table_name = LOOKUP_ENDPOINT_MAP.get(normalized)
+    if not table_name or table_name not in LOOKUP_TABLES_BY_NAME:
+        return jsonify({'error': 'unknown lookup type'}), 404
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE'
+        )
+        rows = cur.fetchall()
+    items: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for row in rows:
+        raw_id = _row_value(row, 'id', 0)
+        try:
+            coerced_id = int(raw_id)
+        except (TypeError, ValueError):
+            coerced_id = None
+        if coerced_id is None or coerced_id in seen_ids:
+            continue
+        name = _normalize_lookup_name(_row_value(row, 'name', 1))
+        if not name:
+            continue
+        seen_ids.add(coerced_id)
+        items.append({'id': coerced_id, 'name': name})
+    return jsonify({'items': items, 'type': table_name})
 
 
 @app.route('/updates')
