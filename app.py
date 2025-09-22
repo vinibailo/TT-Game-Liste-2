@@ -73,32 +73,53 @@ LOOKUP_RELATIONS = (
         'lookup_table': 'developers',
         'join_table': 'processed_game_developers',
         'join_column': 'developer_id',
+        'response_key': 'Developers',
     },
     {
         'processed_column': 'Publishers',
         'lookup_table': 'publishers',
         'join_table': 'processed_game_publishers',
         'join_column': 'publisher_id',
+        'response_key': 'Publishers',
     },
     {
         'processed_column': 'Genres',
         'lookup_table': 'genres',
         'join_table': 'processed_game_genres',
         'join_column': 'genre_id',
+        'response_key': 'Genres',
     },
     {
         'processed_column': 'Game Modes',
         'lookup_table': 'game_modes',
         'join_table': 'processed_game_game_modes',
         'join_column': 'game_mode_id',
+        'response_key': 'GameModes',
     },
     {
         'processed_column': 'Platforms',
         'lookup_table': 'platforms',
         'join_table': 'processed_game_platforms',
         'join_column': 'platform_id',
+        'response_key': 'Platforms',
     },
 )
+
+LOOKUP_RELATIONS_BY_COLUMN = {
+    relation['processed_column']: relation for relation in LOOKUP_RELATIONS
+}
+
+LOOKUP_RELATIONS_BY_KEY = {
+    relation['response_key']: relation for relation in LOOKUP_RELATIONS
+}
+
+LOOKUP_SOURCE_KEYS = {
+    'Developers': ['Developers', 'Developer'],
+    'Publishers': ['Publishers', 'Publisher'],
+    'Genres': ['Genres', 'Genre'],
+    'Game Modes': ['Game Modes', 'Mode'],
+    'Platforms': ['Platforms', 'Platform'],
+}
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
@@ -196,6 +217,215 @@ def _normalize_lookup_name(value: Any) -> str:
     except Exception:
         pass
     return str(value).strip()
+
+
+def _row_value(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    return row[index]
+
+
+def _fetch_lookup_entries_for_game(
+    conn: sqlite3.Connection, processed_game_id: int
+) -> dict[str, list[dict[str, Any]]]:
+    selections: dict[str, list[dict[str, Any]]] = {}
+    for relation in LOOKUP_RELATIONS:
+        response_key = relation['response_key']
+        join_table = relation['join_table']
+        join_column = relation['join_column']
+        lookup_table = relation['lookup_table']
+        cur = conn.execute(
+            f'''
+                SELECT l.id AS id, l.name AS name
+                FROM {join_table} j
+                JOIN {lookup_table} l ON l.id = j.{join_column}
+                WHERE j.processed_game_id=?
+                ORDER BY l.name COLLATE NOCASE
+            ''',
+            (processed_game_id,),
+        )
+        entries: list[dict[str, Any]] = []
+        for row in cur.fetchall():
+            entry_id = _row_value(row, 'id', 0)
+            entry_name = _row_value(row, 'name', 1)
+            try:
+                coerced_id = int(entry_id)
+            except (TypeError, ValueError):
+                coerced_id = None
+            normalized_name = _normalize_lookup_name(entry_name)
+            if coerced_id is None and not normalized_name:
+                continue
+            entries.append({'id': coerced_id, 'name': normalized_name})
+        selections[response_key] = entries
+    return selections
+
+
+def _parse_lookup_entries_from_source(
+    source_row: pd.Series | Mapping[str, Any], processed_column: str
+) -> list[dict[str, Any]]:
+    keys = LOOKUP_SOURCE_KEYS.get(processed_column, [processed_column])
+    values: list[str] = []
+    for key in keys:
+        try:
+            if isinstance(source_row, Mapping):
+                value = source_row.get(key)
+            else:
+                value = source_row[key] if key in source_row else None
+        except Exception:
+            value = None
+        if value is None:
+            continue
+        values.extend(_parse_iterable(value))
+        if values:
+            break
+    entries: list[dict[str, Any]] = []
+    for name in values:
+        normalized = _normalize_lookup_name(name)
+        if normalized:
+            entries.append({'id': None, 'name': normalized})
+    return entries
+
+
+def _format_lookup_response(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    formatted: list[dict[str, Any]] = []
+    names: list[str] = []
+    ids: list[int] = []
+    seen_ids: set[int] = set()
+    seen_names: set[str] = set()
+    for entry in entries:
+        entry_id = entry.get('id')
+        if entry_id is not None:
+            try:
+                entry_id = int(entry_id)
+            except (TypeError, ValueError):
+                entry_id = None
+        entry_name = _normalize_lookup_name(entry.get('name'))
+        if entry_id is None and not entry_name:
+            continue
+        if entry_id is not None:
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            ids.append(entry_id)
+        else:
+            fingerprint = entry_name.casefold()
+            if fingerprint in seen_names:
+                continue
+            seen_names.add(fingerprint)
+        if entry_name:
+            names.append(entry_name)
+        formatted.append({'id': entry_id, 'name': entry_name})
+    return {
+        'selected': formatted,
+        'names': names,
+        'ids': ids,
+    }
+
+
+def _lookup_display_text(names: list[str]) -> str:
+    return ', '.join(name for name in names if name)
+
+
+def _lookup_name_for_id(
+    conn: sqlite3.Connection, table_name: str, lookup_id: int
+) -> str:
+    cur = conn.execute(
+        f'SELECT name FROM {table_name} WHERE id = ?',
+        (lookup_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return ''
+    return _normalize_lookup_name(_row_value(row, 'name', 0))
+
+
+def _iter_lookup_payload(raw_value: Any) -> list[dict[str, Any]]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, Mapping):
+        if 'selected' in raw_value:
+            return _iter_lookup_payload(raw_value['selected'])
+        if 'entries' in raw_value:
+            return _iter_lookup_payload(raw_value['entries'])
+        ids_value = raw_value.get('ids')
+        names_value = raw_value.get('names')
+        results: list[dict[str, Any]] = []
+        if isinstance(ids_value, (list, tuple)):
+            for idx, entry_id in enumerate(ids_value):
+                entry_name = None
+                if isinstance(names_value, (list, tuple)) and idx < len(names_value):
+                    entry_name = names_value[idx]
+                results.append({'id': entry_id, 'name': entry_name})
+            return results
+        if isinstance(names_value, (list, tuple)):
+            for name in names_value:
+                results.append({'id': None, 'name': name})
+            return results
+        entry_id = raw_value.get('id')
+        entry_name = raw_value.get('name')
+        if entry_id is not None or entry_name is not None:
+            return [{'id': entry_id, 'name': entry_name}]
+        return []
+    if isinstance(raw_value, str):
+        text = _normalize_lookup_name(raw_value)
+        return [{'id': None, 'name': text}] if text else []
+    if isinstance(raw_value, numbers.Number):
+        try:
+            return [{'id': int(raw_value), 'name': None}]
+        except (TypeError, ValueError):
+            return []
+    try:
+        iterator = iter(raw_value)
+    except TypeError:
+        text = _normalize_lookup_name(raw_value)
+        return [{'id': None, 'name': text}] if text else []
+    results: list[dict[str, Any]] = []
+    for item in iterator:
+        results.extend(_iter_lookup_payload(item))
+    return results
+
+
+def _resolve_lookup_selection(
+    conn: sqlite3.Connection,
+    relation: Mapping[str, Any],
+    raw_value: Any,
+) -> dict[str, Any]:
+    lookup_table = relation['lookup_table']
+    entries = _iter_lookup_payload(raw_value)
+    resolved: list[dict[str, Any]] = []
+    for entry in entries:
+        entry_id = entry.get('id')
+        entry_name = _normalize_lookup_name(entry.get('name'))
+        coerced_id: int | None = None
+        if entry_id is not None:
+            try:
+                coerced_id = int(entry_id)
+            except (TypeError, ValueError):
+                coerced_id = None
+        if coerced_id is not None:
+            lookup_name = _lookup_name_for_id(conn, lookup_table, coerced_id)
+            if lookup_name:
+                resolved.append({'id': coerced_id, 'name': lookup_name})
+                continue
+            coerced_id = None
+        if not entry_name:
+            continue
+        lookup_id = _get_or_create_lookup_id(conn, lookup_table, entry_name)
+        if lookup_id is None:
+            continue
+        lookup_name = _lookup_name_for_id(conn, lookup_table, lookup_id) or entry_name
+        resolved.append({'id': lookup_id, 'name': lookup_name})
+    deduped: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for entry in resolved:
+        entry_id = entry['id']
+        if entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+        deduped.append(entry)
+    names = [entry['name'] for entry in deduped if entry['name']]
+    ids = [entry['id'] for entry in deduped]
+    return {'entries': deduped, 'names': names, 'ids': ids}
 
 
 def _load_lookup_tables(conn: sqlite3.Connection) -> None:
@@ -778,6 +1008,46 @@ IGDB_DIFF_FIELDS = {
 }
 
 
+def _extract_lookup_names_from_processed(
+    processed_row: Mapping[str, Any], local_field: str
+) -> list[str]:
+    relation = LOOKUP_RELATIONS_BY_COLUMN.get(local_field)
+    response_key = None
+    if relation:
+        response_key = relation['response_key']
+    elif local_field in LOOKUP_RELATIONS_BY_KEY:
+        response_key = local_field
+    lookups_obj = processed_row.get('_lookup_entries') or processed_row.get('Lookups')
+    names: list[str] = []
+    if response_key and isinstance(lookups_obj, Mapping):
+        data = lookups_obj.get(response_key)
+        if isinstance(data, Mapping):
+            raw_names = data.get('names')
+            if isinstance(raw_names, (list, tuple)):
+                for item in raw_names:
+                    normalized = _normalize_lookup_name(item)
+                    if normalized:
+                        names.append(normalized)
+            selected = data.get('selected')
+            if not names and isinstance(selected, (list, tuple)):
+                for entry in selected:
+                    if isinstance(entry, Mapping):
+                        normalized = _normalize_lookup_name(entry.get('name'))
+                        if normalized:
+                            names.append(normalized)
+        elif isinstance(data, (list, tuple)):
+            for entry in data:
+                if isinstance(entry, Mapping):
+                    normalized = _normalize_lookup_name(entry.get('name'))
+                else:
+                    normalized = _normalize_lookup_name(entry)
+                if normalized:
+                    names.append(normalized)
+    if names:
+        return names
+    return _parse_iterable(processed_row.get(local_field))
+
+
 def build_igdb_diff(
     processed_row: Mapping[str, Any], igdb_payload: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -787,7 +1057,9 @@ def build_igdb_diff(
         local_value = processed_row.get(local_field)
         if field_type == 'list':
             remote_set = set(_parse_iterable(remote_value))
-            local_set = set(_parse_iterable(local_value))
+            local_set = set(
+                _extract_lookup_names_from_processed(processed_row, local_field)
+            )
             added = sorted(remote_set - local_set)
             removed = sorted(local_set - remote_set)
             if added or removed:
@@ -797,7 +1069,9 @@ def build_igdb_diff(
                 }
         elif field_type == 'company_list':
             remote_set = set(_parse_company_names(remote_value))
-            local_set = set(_parse_iterable(local_value))
+            local_set = set(
+                _extract_lookup_names_from_processed(processed_row, local_field)
+            )
             added = sorted(remote_set - local_set)
             removed = sorted(local_set - remote_set)
             if added or removed:
@@ -1147,10 +1421,15 @@ def build_game_payload(index: int, seq: int) -> dict:
     except Exception:
         raise IndexError('invalid index')
     processed_row = None
+    processed_lookup_entries: dict[str, list[dict[str, Any]]] = {}
     with db_lock:
         conn = get_db()
         cur = conn.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
         processed_row = cur.fetchone()
+        if processed_row is not None:
+            processed_lookup_entries = _fetch_lookup_entries_for_game(
+                conn, processed_row['ID']
+            )
 
     if processed_row is not None and processed_row['Cover Path']:
         cover_path = processed_row['Cover Path']
@@ -1169,25 +1448,46 @@ def build_game_payload(index: int, seq: int) -> dict:
     else:
         cover_data = find_cover(row)
 
-    source_row = pd.Series(dict(processed_row)) if processed_row is not None else row
+    processed_mapping: Mapping[str, Any] = (
+        dict(processed_row) if processed_row is not None else {}
+    )
+    source_row = pd.Series(processed_mapping) if processed_mapping else row
     igdb_id = extract_igdb_id(source_row)
     if not igdb_id:
         igdb_id = extract_igdb_id(row, allow_generic_id=True)
-    genres = extract_list(source_row, ['Genres', 'Genre'])
-    modes = extract_list(source_row, ['Game Modes', 'Mode'])
-    platforms = extract_list(source_row, ['Platforms', 'Platform'])
+    lookup_payloads: dict[str, dict[str, Any]] = {}
+    for relation in LOOKUP_RELATIONS:
+        response_key = relation['response_key']
+        processed_column = relation['processed_column']
+        entries = list(processed_lookup_entries.get(response_key, []))
+        if not entries and processed_mapping:
+            entries = _parse_lookup_entries_from_source(
+                processed_mapping, processed_column
+            )
+        if not entries:
+            entries = _parse_lookup_entries_from_source(row, processed_column)
+        formatted = _format_lookup_response(entries)
+        formatted['display'] = _lookup_display_text(formatted['names'])
+        lookup_payloads[response_key] = formatted
+
+    developers_display = lookup_payloads['Developers']['display']
+    publishers_display = lookup_payloads['Publishers']['display']
+    genres = lookup_payloads['Genres']['names']
+    modes = lookup_payloads['GameModes']['names']
+    platforms = lookup_payloads['Platforms']['names']
     missing: list[str] = []
     game_fields = {
         'Name': get_cell(source_row, 'Name', missing),
         'Summary': get_cell(source_row, 'Summary', missing),
         'FirstLaunchDate': get_cell(source_row, 'First Launch Date', missing),
-        'Developers': get_cell(source_row, 'Developers', missing),
-        'Publishers': get_cell(source_row, 'Publishers', missing),
+        'Developers': developers_display,
+        'Publishers': publishers_display,
         'Genres': genres,
         'GameModes': modes,
         'Category': get_cell(source_row, 'Category', missing),
         'Platforms': platforms,
         'IGDBID': igdb_id or None,
+        'Lookups': lookup_payloads,
     }
 
     game_id = processed_row['ID'] if processed_row is not None else str(seq)
@@ -1389,12 +1689,7 @@ def api_save():
                 "Name": fields.get('Name', ''),
                 "Summary": fields.get('Summary', ''),
                 "First Launch Date": fields.get('FirstLaunchDate', ''),
-                "Developers": fields.get('Developers', ''),
-                "Publishers": fields.get('Publishers', ''),
-                "Genres": ', '.join(fields.get('Genres', [])),
-                "Game Modes": ', '.join(fields.get('GameModes', [])),
                 "Category": fields.get('Category', ''),
-                "Platforms": ', '.join(fields.get('Platforms', [])),
                 "igdb_id": igdb_id_value,
                 "Cover Path": cover_path,
                 "Width": width,
@@ -1402,9 +1697,28 @@ def api_save():
                 'last_edited_at': last_edit_ts,
             }
 
+            lookups_input = fields.get('Lookups') if isinstance(fields, Mapping) else {}
+
             with db_lock:
                 conn = get_db()
                 try:
+                    normalized_lookups: dict[str, dict[str, Any]] = {}
+                    for relation in LOOKUP_RELATIONS:
+                        response_key = relation['response_key']
+                        processed_column = relation['processed_column']
+                        raw_value: Any = None
+                        if isinstance(lookups_input, Mapping):
+                            raw_value = lookups_input.get(response_key)
+                            if raw_value is None:
+                                raw_value = lookups_input.get(processed_column)
+                        if raw_value is None:
+                            raw_value = fields.get(response_key)
+                            if raw_value is None:
+                                raw_value = fields.get(processed_column)
+                        selection = _resolve_lookup_selection(conn, relation, raw_value)
+                        normalized_lookups[response_key] = selection
+                        row[processed_column] = _lookup_display_text(selection['names'])
+
                     if existing:
                         conn.execute(
                             '''UPDATE processed_games SET
@@ -1416,8 +1730,8 @@ def api_save():
                                WHERE "ID"=?''',
                             (
                                 row['Name'], row['Summary'], row['First Launch Date'],
-                                row['Developers'], row['Publishers'], row['Genres'],
-                                row['Game Modes'], row['Category'], row['Platforms'],
+                                row.get('Developers', ''), row.get('Publishers', ''), row.get('Genres', ''),
+                                row.get('Game Modes', ''), row['Category'], row.get('Platforms', ''),
                                 row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
                                 row['last_edited_at'],
                                 seq_id,
@@ -1434,12 +1748,29 @@ def api_save():
                             (
                                 seq_id,
                                 row['Source Index'], row['Name'], row['Summary'],
-                                row['First Launch Date'], row['Developers'], row['Publishers'],
-                                row['Genres'], row['Game Modes'], row['Category'],
-                                row['Platforms'], row['igdb_id'], row['Cover Path'],
+                                row['First Launch Date'], row.get('Developers', ''), row.get('Publishers', ''),
+                                row.get('Genres', ''), row.get('Game Modes', ''), row['Category'],
+                                row.get('Platforms', ''), row['igdb_id'], row['Cover Path'],
                                 row['Width'], row['Height'], row['last_edited_at'],
                             ),
                         )
+
+                    for relation in LOOKUP_RELATIONS:
+                        response_key = relation['response_key']
+                        join_table = relation['join_table']
+                        join_column = relation['join_column']
+                        selection = normalized_lookups.get(response_key, {'ids': []})
+                        conn.execute(
+                            f'DELETE FROM {join_table} WHERE processed_game_id=?',
+                            (seq_id,),
+                        )
+                        for lookup_id in selection.get('ids', []):
+                            conn.execute(
+                                f'''INSERT OR IGNORE INTO {join_table} (processed_game_id, {join_column})
+                                    VALUES (?, ?)''',
+                                (seq_id, lookup_id),
+                            )
+
                     conn.commit()
                     if new_record:
                         navigator.seq_index += 1
@@ -1484,7 +1815,21 @@ def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
             "SELECT * FROM processed_games WHERE COALESCE(\"igdb_id\", '') != ''"
         )
         rows = cur.fetchall()
-    return [dict(row) for row in rows]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            row_dict = dict(row)
+            try:
+                processed_id = int(row_dict['ID'])
+            except (KeyError, TypeError, ValueError):
+                processed_id = None
+            if processed_id is not None:
+                row_dict['_lookup_entries'] = _fetch_lookup_entries_for_game(
+                    conn, processed_id
+                )
+            else:
+                row_dict['_lookup_entries'] = {}
+            results.append(row_dict)
+    return results
 
 
 def fetch_cached_updates() -> list[dict[str, Any]]:

@@ -57,6 +57,22 @@ def test_game_by_id_returns_payload(tmp_path):
                 'INSERT INTO processed_games ("ID", "Source Index", "Name") VALUES (?, ?, ?)',
                 (1, '0', 'Catalogued Game'),
             )
+            dev_id = app_module.db.execute(
+                'INSERT INTO developers (name) VALUES (?)',
+                ('Catalogued Dev',),
+            ).lastrowid
+            genre_id = app_module.db.execute(
+                'INSERT INTO genres (name) VALUES (?)',
+                ('Adventure',),
+            ).lastrowid
+            app_module.db.execute(
+                'INSERT INTO processed_game_developers (processed_game_id, developer_id) VALUES (?, ?)',
+                (1, dev_id),
+            )
+            app_module.db.execute(
+                'INSERT INTO processed_game_genres (processed_game_id, genre_id) VALUES (?, ?)',
+                (1, genre_id),
+            )
     app_module.navigator.current_index = 1
     client = app_module.app.test_client()
     authenticate(client)
@@ -70,6 +86,10 @@ def test_game_by_id_returns_payload(tmp_path):
     assert data['id'] == 1
     assert data['game']['Name'] == 'Catalogued Game'
     assert data['game']['IGDBID'] == '987654321'
+    assert data['game']['Developers'] == 'Catalogued Dev'
+    lookups = data['game']['Lookups']
+    assert lookups['Developers']['selected'][0]['name'] == 'Catalogued Dev'
+    assert lookups['Genres']['names'] == ['Adventure']
     assert app_module.navigator.current_index == 0
     assert not (upload_dir / temp_name).exists()
 
