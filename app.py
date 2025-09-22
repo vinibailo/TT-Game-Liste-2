@@ -5,7 +5,8 @@ import base64
 import io
 import sqlite3
 import numbers
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Mapping
 from threading import Lock
 import logging
 
@@ -24,8 +25,8 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image, ExifTags
 import pandas as pd
 from openai import OpenAI
-from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.parse import urlparse, urlencode
+from urllib.request import urlopen, Request
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,8 @@ def _init_db() -> None:
                     "igdb_id" TEXT,
                     "Cover Path" TEXT,
                     "Width" INTEGER,
-                    "Height" INTEGER
+                    "Height" INTEGER,
+                    last_edited_at TEXT
                 )'''
             )
             conn.execute(
@@ -141,6 +143,54 @@ def _init_db() -> None:
                 conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    '''CREATE TABLE IF NOT EXISTS igdb_updates (
+                        processed_game_id INTEGER PRIMARY KEY,
+                        igdb_id TEXT,
+                        igdb_updated_at TEXT,
+                        igdb_payload TEXT,
+                        diff TEXT,
+                        local_last_edited_at TEXT,
+                        refreshed_at TEXT,
+                        FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
+                    )'''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
+            rows = cur.fetchall()
+            for game_id, last_edit in rows:
+                if not last_edit:
+                    conn.execute(
+                        'UPDATE processed_games SET last_edited_at=? WHERE "ID"=?',
+                        (
+                            datetime.now(timezone.utc).isoformat(),
+                            game_id,
+                        ),
+                    )
+
+            cur = conn.execute(
+                'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
+            )
+            for game_id, igdb_id_value, last_edit in cur.fetchall():
+                if not igdb_id_value:
+                    continue
+                conn.execute(
+                    '''INSERT OR IGNORE INTO igdb_updates (
+                        processed_game_id, igdb_id, local_last_edited_at
+                    ) VALUES (?, ?, ?)''',
+                    (
+                        game_id,
+                        str(igdb_id_value),
+                        last_edit,
+                    ),
+                )
     finally:
         conn.close()
 
@@ -292,6 +342,174 @@ def backfill_igdb_ids() -> None:
                         'UPDATE processed_games SET "igdb_id"=? WHERE "Source Index"=?',
                         (candidate, src_index),
                     )
+
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def exchange_twitch_credentials() -> tuple[str, str]:
+    client_id = os.environ.get('TWITCH_CLIENT_ID')
+    client_secret = os.environ.get('TWITCH_CLIENT_SECRET')
+    if not client_id or not client_secret:
+        raise RuntimeError('missing twitch client credentials')
+
+    payload = urlencode(
+        {
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'grant_type': 'client_credentials',
+        }
+    ).encode('utf-8')
+
+    request = Request(
+        'https://id.twitch.tv/oauth2/token',
+        data=payload,
+        method='POST',
+    )
+    request.add_header('Content-Type', 'application/x-www-form-urlencoded')
+
+    try:
+        with urlopen(request) as response:
+            data = json.loads(response.read().decode('utf-8'))
+    except Exception as exc:  # pragma: no cover - network failures surfaced
+        raise RuntimeError(f'failed to obtain twitch token: {exc}') from exc
+
+    token = data.get('access_token')
+    if not token:
+        raise RuntimeError('missing access token in twitch response')
+    return token, client_id
+
+
+def fetch_igdb_metadata(
+    access_token: str, client_id: str, igdb_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    if not igdb_ids:
+        return {}
+
+    numeric_ids: list[int] = []
+    for value in igdb_ids:
+        try:
+            numeric_ids.append(int(str(value).strip()))
+        except (TypeError, ValueError):
+            logger.warning('Skipping invalid IGDB id %s', value)
+    if not numeric_ids:
+        return {}
+
+    query = (
+        'fields id,name,summary,updated_at,first_release_date,'
+        'genres,platforms,game_modes,category,developers,publishers; '
+        f"where id = ({', '.join(str(v) for v in numeric_ids)});"
+    )
+    request = Request(
+        'https://api.igdb.com/v4/games',
+        data=query.encode('utf-8'),
+        method='POST',
+    )
+    request.add_header('Client-ID', client_id)
+    request.add_header('Authorization', f'Bearer {access_token}')
+    request.add_header('Accept', 'application/json')
+
+    try:
+        with urlopen(request) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except Exception as exc:  # pragma: no cover - network failures surfaced
+        logger.warning('Failed to query IGDB: %s', exc)
+        return {}
+
+    results: dict[str, dict[str, Any]] = {}
+    for item in payload or []:
+        igdb_id = item.get('id')
+        if igdb_id is None:
+            continue
+        results[str(igdb_id)] = item
+    return results
+
+
+def _parse_iterable(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(',') if v.strip()]
+    if isinstance(value, numbers.Number):
+        return [str(value)]
+    items: list[str] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return [str(value)]
+    for element in iterator:
+        if isinstance(element, dict):
+            name = element.get('name') if isinstance(element, dict) else None
+            if name:
+                items.append(str(name).strip())
+            else:
+                items.append(str(element).strip())
+        else:
+            items.append(str(element).strip())
+    return [item for item in items if item]
+
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, numbers.Number):
+        return str(value)
+    return str(value).strip()
+
+
+def _normalize_timestamp(value: Any) -> str | None:
+    if isinstance(value, numbers.Number):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+        except Exception:
+            return None
+    if isinstance(value, str):
+        return value
+    return None
+
+
+IGDB_DIFF_FIELDS = {
+    'name': ('Name', 'text'),
+    'summary': ('Summary', 'text'),
+    'first_release_date': ('First Launch Date', 'text'),
+    'genres': ('Genres', 'list'),
+    'platforms': ('Platforms', 'list'),
+    'game_modes': ('Game Modes', 'list'),
+    'developers': ('Developers', 'list'),
+    'publishers': ('Publishers', 'list'),
+    'category': ('Category', 'text'),
+}
+
+
+def build_igdb_diff(
+    processed_row: Mapping[str, Any], igdb_payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    diff: dict[str, Any] = {}
+    for igdb_field, (local_field, field_type) in IGDB_DIFF_FIELDS.items():
+        remote_value = igdb_payload.get(igdb_field)
+        local_value = processed_row.get(local_field)
+        if field_type == 'list':
+            remote_set = set(_parse_iterable(remote_value))
+            local_set = set(_parse_iterable(local_value))
+            added = sorted(remote_set - local_set)
+            removed = sorted(local_set - remote_set)
+            if added or removed:
+                diff[local_field] = {
+                    'added': added,
+                    'removed': removed,
+                }
+        else:
+            remote_text = _normalize_text(remote_value)
+            local_text = _normalize_text(local_value)
+            if remote_text != local_text:
+                entry: dict[str, Any] = {}
+                if remote_text:
+                    entry['added'] = remote_text
+                if local_text:
+                    entry['removed'] = local_text
+                diff[local_field] = entry
+    return diff
 
 
 class GameNavigator:
@@ -608,6 +826,11 @@ def index():
     )
 
 
+@app.route('/updates')
+def updates_page():
+    return render_template('updates.html')
+
+
 def build_game_payload(index: int, seq: int) -> dict:
     try:
         row = games_df.iloc[index]
@@ -849,6 +1072,7 @@ def api_save():
                 if igdb_candidate:
                     igdb_id_value = igdb_candidate
 
+            last_edit_ts = now_utc_iso()
             row = {
                 "ID": seq_id,
                 "Source Index": str(index),
@@ -865,6 +1089,7 @@ def api_save():
                 "Cover Path": cover_path,
                 "Width": width,
                 "Height": height,
+                'last_edited_at': last_edit_ts,
             }
 
             with db_lock:
@@ -876,13 +1101,15 @@ def api_save():
                                 "Name"=?, "Summary"=?, "First Launch Date"=?,
                                 "Developers"=?, "Publishers"=?, "Genres"=?,
                                 "Game Modes"=?, "Category"=?, "Platforms"=?,
-                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?
+                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
+                                last_edited_at=?
                                WHERE "ID"=?''',
                             (
                                 row['Name'], row['Summary'], row['First Launch Date'],
                                 row['Developers'], row['Publishers'], row['Genres'],
                                 row['Game Modes'], row['Category'], row['Platforms'],
                                 row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
+                                row['last_edited_at'],
                                 seq_id,
                             ),
                         )
@@ -892,15 +1119,15 @@ def api_save():
                                 "ID", "Source Index", "Name", "Summary",
                                 "First Launch Date", "Developers", "Publishers",
                                 "Genres", "Game Modes", "Category", "Platforms",
-                                "igdb_id", "Cover Path", "Width", "Height"
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                "igdb_id", "Cover Path", "Width", "Height", last_edited_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                             (
                                 seq_id,
                                 row['Source Index'], row['Name'], row['Summary'],
                                 row['First Launch Date'], row['Developers'], row['Publishers'],
                                 row['Genres'], row['Game Modes'], row['Category'],
                                 row['Platforms'], row['igdb_id'], row['Cover Path'],
-                                row['Width'], row['Height'],
+                                row['Width'], row['Height'], row['last_edited_at'],
                             ),
                         )
                     conn.commit()
@@ -938,6 +1165,161 @@ def api_skip():
     except Exception as e:
         app.logger.exception("api_skip failed")
         return jsonify({'error': str(e)}), 500
+
+
+def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            "SELECT * FROM processed_games WHERE COALESCE(\"igdb_id\", '') != ''"
+        )
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_cached_updates() -> list[dict[str, Any]]:
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            '''SELECT
+                   u.processed_game_id,
+                   u.igdb_id,
+                   u.igdb_updated_at,
+                   u.local_last_edited_at,
+                   u.refreshed_at,
+                   u.diff,
+                   p."Name" AS game_name
+               FROM igdb_updates u
+               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
+               ORDER BY p."Name" COLLATE NOCASE
+            '''
+        )
+        rows = cur.fetchall()
+
+    updates: list[dict[str, Any]] = []
+    for row in rows:
+        updates.append(
+            {
+                'processed_game_id': row['processed_game_id'],
+                'igdb_id': row['igdb_id'],
+                'igdb_updated_at': row['igdb_updated_at'],
+                'local_last_edited_at': row['local_last_edited_at'],
+                'refreshed_at': row['refreshed_at'],
+                'name': row['game_name'],
+                'has_diff': bool(row['diff']),
+            }
+        )
+    return updates
+
+
+@app.route('/api/updates/refresh', methods=['POST'])
+def api_updates_refresh():
+    processed_rows = _collect_processed_games_with_igdb()
+    if not processed_rows:
+        return jsonify({'status': 'ok', 'updated': 0, 'missing': []})
+
+    try:
+        access_token, client_id = exchange_twitch_credentials()
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    igdb_payloads = fetch_igdb_metadata(
+        access_token,
+        client_id,
+        [row.get('igdb_id') for row in processed_rows],
+    )
+
+    updated = 0
+    missing: list[int] = []
+    refreshed_at = now_utc_iso()
+
+    with db_lock:
+        conn = get_db()
+        for row in processed_rows:
+            igdb_id_value = row.get('igdb_id')
+            if not igdb_id_value:
+                continue
+            payload = igdb_payloads.get(str(igdb_id_value))
+            if not payload:
+                try:
+                    missing.append(int(row.get('ID', 0)))
+                except (TypeError, ValueError):
+                    pass
+                continue
+            igdb_updated_at = _normalize_timestamp(payload.get('updated_at'))
+            diff = build_igdb_diff(row, payload)
+            conn.execute(
+                '''INSERT INTO igdb_updates (
+                        processed_game_id, igdb_id, igdb_updated_at,
+                        igdb_payload, diff, local_last_edited_at, refreshed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(processed_game_id) DO UPDATE SET
+                        igdb_id=excluded.igdb_id,
+                        igdb_updated_at=excluded.igdb_updated_at,
+                        igdb_payload=excluded.igdb_payload,
+                        diff=excluded.diff,
+                        local_last_edited_at=excluded.local_last_edited_at,
+                        refreshed_at=excluded.refreshed_at''',
+                (
+                    int(row['ID']),
+                    str(igdb_id_value),
+                    igdb_updated_at,
+                    json.dumps(payload),
+                    json.dumps(diff),
+                    row.get('last_edited_at') or refreshed_at,
+                    refreshed_at,
+                ),
+            )
+            updated += 1
+        conn.commit()
+
+    return jsonify({'status': 'ok', 'updated': updated, 'missing': missing})
+
+
+@app.route('/api/updates', methods=['GET'])
+def api_updates_list():
+    return jsonify({'updates': fetch_cached_updates()})
+
+
+@app.route('/api/updates/<int:processed_game_id>', methods=['GET'])
+def api_updates_detail(processed_game_id: int):
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            '''SELECT
+                   u.processed_game_id,
+                   u.igdb_id,
+                   u.igdb_updated_at,
+                   u.igdb_payload,
+                   u.diff,
+                   u.local_last_edited_at,
+                   u.refreshed_at,
+                   p."Name" AS game_name
+               FROM igdb_updates u
+               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
+               WHERE u.processed_game_id=?''',
+            (processed_game_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return jsonify({'error': 'not found'}), 404
+
+    payload = json.loads(row['igdb_payload']) if row['igdb_payload'] else None
+    diff = json.loads(row['diff']) if row['diff'] else {}
+
+    return jsonify(
+        {
+            'processed_game_id': row['processed_game_id'],
+            'igdb_id': row['igdb_id'],
+            'igdb_updated_at': row['igdb_updated_at'],
+            'igdb_payload': payload,
+            'diff': diff,
+            'local_last_edited_at': row['local_last_edited_at'],
+            'refreshed_at': row['refreshed_at'],
+            'name': row['game_name'],
+        }
+    )
 
 
 @app.route('/api/set_index', methods=['POST'])

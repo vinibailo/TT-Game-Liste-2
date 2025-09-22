@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IGDB Updates</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+    <main class="updates-container">
+        <header>
+            <h1>IGDB Updates</h1>
+            <p>This page uses the updates API to populate data.</p>
+        </header>
+        <section aria-live="polite" id="updates-root"></section>
+    </main>
+</body>
+</html>
