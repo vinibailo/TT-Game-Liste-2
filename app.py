@@ -6,6 +6,7 @@ import io
 import sqlite3
 import numbers
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping
 from threading import Lock
 import logging
@@ -37,6 +38,68 @@ UPLOAD_DIR = 'uploaded_sources'
 PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
 
+BASE_DIR = Path(__file__).resolve().parent
+LOOKUP_DATA_DIR = Path(os.environ.get('LOOKUP_DATA_DIR', BASE_DIR))
+LOOKUP_TABLES = (
+    {
+        'table': 'developers',
+        'column': 'Developer',
+        'filename': 'Developers_unique.xlsx',
+    },
+    {
+        'table': 'publishers',
+        'column': 'Publisher',
+        'filename': 'Publishers_unique.xlsx',
+    },
+    {
+        'table': 'genres',
+        'column': 'Genre',
+        'filename': 'Genres_unique.xlsx',
+    },
+    {
+        'table': 'game_modes',
+        'column': 'GameMode',
+        'filename': 'GameModes_unique.xlsx',
+    },
+    {
+        'table': 'platforms',
+        'column': 'Platform',
+        'filename': 'Platforms_unique.xlsx',
+    },
+)
+LOOKUP_RELATIONS = (
+    {
+        'processed_column': 'Developers',
+        'lookup_table': 'developers',
+        'join_table': 'processed_game_developers',
+        'join_column': 'developer_id',
+    },
+    {
+        'processed_column': 'Publishers',
+        'lookup_table': 'publishers',
+        'join_table': 'processed_game_publishers',
+        'join_column': 'publisher_id',
+    },
+    {
+        'processed_column': 'Genres',
+        'lookup_table': 'genres',
+        'join_table': 'processed_game_genres',
+        'join_column': 'genre_id',
+    },
+    {
+        'processed_column': 'Game Modes',
+        'lookup_table': 'game_modes',
+        'join_table': 'processed_game_game_modes',
+        'join_column': 'game_mode_id',
+    },
+    {
+        'processed_column': 'Platforms',
+        'lookup_table': 'platforms',
+        'join_table': 'processed_game_platforms',
+        'join_column': 'platform_id',
+    },
+)
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
@@ -61,6 +124,170 @@ def get_db():
         g.db.row_factory = sqlite3.Row
     return g.db
 
+
+
+def _parse_iterable(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(',') if v.strip()]
+    if isinstance(value, numbers.Number):
+        return [str(value)]
+    items: list[str] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        return [str(value)]
+    for element in iterator:
+        if isinstance(element, Mapping):
+            name = element.get('name')
+            if isinstance(name, str) and name.strip():
+                items.append(name.strip())
+            else:
+                items.append(str(element).strip())
+        else:
+            items.append(str(element).strip())
+    return [item for item in items if item]
+
+
+def _parse_company_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, numbers.Number):
+        return [str(value)]
+    names: list[str] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+    for element in iterator:
+        name_value: Any = None
+        if isinstance(element, Mapping):
+            if isinstance(element.get('name'), str):
+                name_value = element['name']
+            else:
+                company_obj = element.get('company')
+                if isinstance(company_obj, Mapping) and isinstance(
+                    company_obj.get('name'), str
+                ):
+                    name_value = company_obj['name']
+                elif isinstance(company_obj, str):
+                    name_value = company_obj
+        else:
+            name_value = element
+        text = _normalize_lookup_name(name_value)
+        if text:
+            names.append(text)
+    return names
+
+
+def _normalize_lookup_name(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _load_lookup_tables(conn: sqlite3.Connection) -> None:
+    for table_config in LOOKUP_TABLES:
+        path = LOOKUP_DATA_DIR / table_config['filename']
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            logger.exception('Failed to load lookup workbook %s', path)
+            continue
+        column_name = table_config['column']
+        if column_name not in df.columns:
+            logger.warning(
+                'Workbook %s missing expected column %s', path, column_name
+            )
+            continue
+        series = df[column_name].dropna()
+        for raw_value in series:
+            name = _normalize_lookup_name(raw_value)
+            if not name:
+                continue
+            conn.execute(
+                f'''
+                INSERT INTO {table_config['table']} (name)
+                VALUES (?)
+                ON CONFLICT(name) DO UPDATE SET name=excluded.name
+                ''',
+                (name,),
+            )
+
+
+def _get_or_create_lookup_id(
+    conn: sqlite3.Connection, table_name: str, raw_name: Any
+) -> int | None:
+    name = _normalize_lookup_name(raw_name)
+    if not name:
+        return None
+    cur = conn.execute(
+        f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE', (name,)
+    )
+    row = cur.fetchone()
+    if row is not None:
+        return row[0]
+    cur = conn.execute(
+        f'INSERT INTO {table_name} (name) VALUES (?)',
+        (name,),
+    )
+    return cur.lastrowid
+
+
+def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
+    for relation in LOOKUP_RELATIONS:
+        processed_column = relation['processed_column']
+        join_table = relation['join_table']
+        join_column = relation['join_column']
+        lookup_table = relation['lookup_table']
+        try:
+            cur = conn.execute(
+                f'SELECT "ID", "{processed_column}" FROM processed_games'
+            )
+        except sqlite3.OperationalError:
+            logger.warning(
+                'Skipping backfill for missing column %s on processed_games',
+                processed_column,
+            )
+            continue
+        rows = cur.fetchall()
+        for game_id, raw_value in rows:
+            if raw_value is None or raw_value == '':
+                continue
+            names = _parse_iterable(raw_value)
+            seen: set[str] = set()
+            for name in names:
+                normalized = _normalize_lookup_name(name)
+                if not normalized:
+                    continue
+                fingerprint = normalized.casefold()
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                lookup_id = _get_or_create_lookup_id(conn, lookup_table, normalized)
+                if lookup_id is None:
+                    continue
+                conn.execute(
+                    f'''
+                    INSERT OR IGNORE INTO {join_table} (processed_game_id, {join_column})
+                    VALUES (?, ?)
+                    ''',
+                    (game_id, lookup_id),
+                )
 
 
 def _migrate_id_column(conn: sqlite3.Connection) -> None:
@@ -106,6 +333,7 @@ def _init_db() -> None:
     conn = sqlite3.connect(PROCESSED_DB)
     try:
         with conn:
+            conn.execute('PRAGMA foreign_keys = ON')
             conn.execute(
                 '''CREATE TABLE IF NOT EXISTS processed_games (
                     "ID" INTEGER PRIMARY KEY,
@@ -166,6 +394,32 @@ def _init_db() -> None:
                 )
             except sqlite3.OperationalError:
                 pass
+
+            for table_config in LOOKUP_TABLES:
+                conn.execute(
+                    f'''
+                    CREATE TABLE IF NOT EXISTS {table_config['table']} (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL COLLATE NOCASE UNIQUE
+                    )
+                    '''
+                )
+
+            for relation in LOOKUP_RELATIONS:
+                conn.execute(
+                    f'''
+                    CREATE TABLE IF NOT EXISTS {relation['join_table']} (
+                        processed_game_id INTEGER NOT NULL,
+                        {relation['join_column']} INTEGER NOT NULL,
+                        PRIMARY KEY (processed_game_id, {relation['join_column']}),
+                        FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID") ON DELETE CASCADE,
+                        FOREIGN KEY({relation['join_column']}) REFERENCES {relation['lookup_table']}(id) ON DELETE CASCADE
+                    )
+                    '''
+                )
+
+            _load_lookup_tables(conn)
+            _backfill_lookup_relations(conn)
 
             cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
             rows = cur.fetchall()
@@ -482,65 +736,6 @@ def fetch_igdb_metadata(
             parsed_item['publishers'] = publisher_names
             results[str(igdb_id)] = parsed_item
     return results
-
-
-def _parse_iterable(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [v.strip() for v in value.split(',') if v.strip()]
-    if isinstance(value, numbers.Number):
-        return [str(value)]
-    items: list[str] = []
-    try:
-        iterator = iter(value)
-    except TypeError:
-        return [str(value)]
-    for element in iterator:
-        if isinstance(element, Mapping):
-            name = element.get('name')
-            if isinstance(name, str) and name.strip():
-                items.append(name.strip())
-            else:
-                items.append(str(element).strip())
-        else:
-            items.append(str(element).strip())
-    return [item for item in items if item]
-
-
-def _parse_company_names(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        cleaned = value.strip()
-        return [cleaned] if cleaned else []
-    if isinstance(value, numbers.Number):
-        return [str(value)]
-    names: list[str] = []
-    try:
-        iterator = iter(value)
-    except TypeError:
-        text = str(value).strip()
-        return [text] if text else []
-    for element in iterator:
-        name_value: Any = None
-        if isinstance(element, Mapping):
-            if isinstance(element.get('name'), str):
-                name_value = element['name']
-            else:
-                company_obj = element.get('company')
-                if isinstance(company_obj, Mapping) and isinstance(
-                    company_obj.get('name'), str
-                ):
-                    name_value = company_obj['name']
-                elif isinstance(company_obj, str):
-                    name_value = company_obj
-        else:
-            name_value = element
-        text = _normalize_text(name_value)
-        if text:
-            names.append(text)
-    return names
 
 
 def _normalize_text(value: Any) -> str:
