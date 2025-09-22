@@ -115,6 +115,25 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['has_diff'] is True
 
 
+def test_refresh_surfaces_igdb_failure(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    app_module.exchange_twitch_credentials = lambda: ("token", "client")
+
+    def failing_fetch(*_args, **_kwargs):
+        raise RuntimeError("IGDB request failed: 401 invalid credentials")
+
+    app_module.fetch_igdb_metadata = failing_fetch
+
+    response = client.post('/api/updates/refresh')
+    assert response.status_code == 502
+    payload = response.get_json()
+    assert payload == {'error': 'IGDB request failed: 401 invalid credentials'}
+
+
 def test_updates_detail_returns_diff(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
