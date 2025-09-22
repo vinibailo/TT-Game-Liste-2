@@ -42,6 +42,7 @@ app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 DEFAULT_IGDB_USER_AGENT = 'TT-Game-Liste/1.0 (support@example.com)'
 IGDB_USER_AGENT = os.environ.get('IGDB_USER_AGENT') or DEFAULT_IGDB_USER_AGENT
+IGDB_BATCH_SIZE = 500
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
@@ -399,81 +400,87 @@ def fetch_igdb_metadata(
     if not numeric_ids:
         return {}
 
-    query = (
-        'fields '
-        'id,name,summary,updated_at,first_release_date,'
-        'genres,platforms,game_modes,category,'
-        'involved_companies.company.name,'
-        'involved_companies.developer,'
-        'involved_companies.publisher; '
-        f"where id = ({', '.join(str(v) for v in numeric_ids)});"
-    )
-    request = Request(
-        'https://api.igdb.com/v4/games',
-        data=query.encode('utf-8'),
-        method='POST',
-    )
-    request.add_header('Client-ID', client_id)
-    request.add_header('Authorization', f'Bearer {access_token}')
-    request.add_header('Accept', 'application/json')
-    request.add_header('User-Agent', IGDB_USER_AGENT)
-
-    try:
-        with urlopen(request) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-    except HTTPError as exc:
-        error_message = ''
-        try:
-            error_body = exc.read()
-        except Exception:  # pragma: no cover - best effort to capture error body
-            error_body = b''
-        if error_body:
-            try:
-                error_message = error_body.decode('utf-8', errors='replace').strip()
-            except Exception:  # pragma: no cover - unexpected decoding failures
-                error_message = ''
-        if not error_message and exc.reason:
-            error_message = str(exc.reason)
-        message = f"IGDB request failed: {exc.code}"
-        if error_message:
-            message = f"{message} {error_message}"
-        raise RuntimeError(message) from exc
-    except Exception as exc:  # pragma: no cover - network failures surfaced
-        logger.warning('Failed to query IGDB: %s', exc)
-        return {}
-
     results: dict[str, dict[str, Any]] = {}
-    for item in payload or []:
-        if not isinstance(item, dict):
+    batch_size = IGDB_BATCH_SIZE if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0 else 500
+    for start in range(0, len(numeric_ids), batch_size):
+        chunk = numeric_ids[start : start + batch_size]
+        if not chunk:
             continue
-        igdb_id = item.get('id')
-        if igdb_id is None:
-            continue
-        parsed_item = dict(item)
-        involved_companies = item.get('involved_companies')
-        developer_names: list[str] = []
-        publisher_names: list[str] = []
-        if isinstance(involved_companies, list):
-            for company in involved_companies:
-                if not isinstance(company, Mapping):
-                    continue
-                company_obj = company.get('company')
-                company_name: str | None = None
-                if isinstance(company_obj, Mapping):
-                    name_value = company_obj.get('name')
-                    if isinstance(name_value, str):
-                        company_name = name_value.strip()
-                elif isinstance(company_obj, str):
-                    company_name = company_obj.strip()
-                if not company_name:
-                    continue
-                if company.get('developer'):
-                    developer_names.append(company_name)
-                if company.get('publisher'):
-                    publisher_names.append(company_name)
-        parsed_item['developers'] = developer_names
-        parsed_item['publishers'] = publisher_names
-        results[str(igdb_id)] = parsed_item
+        query = (
+            'fields '
+            'id,name,summary,updated_at,first_release_date,'
+            'genres,platforms,game_modes,category,'
+            'involved_companies.company.name,'
+            'involved_companies.developer,'
+            'involved_companies.publisher; '
+            f"where id = ({', '.join(str(v) for v in chunk)}); "
+            f'limit {len(chunk)};'
+        )
+        request = Request(
+            'https://api.igdb.com/v4/games',
+            data=query.encode('utf-8'),
+            method='POST',
+        )
+        request.add_header('Client-ID', client_id)
+        request.add_header('Authorization', f'Bearer {access_token}')
+        request.add_header('Accept', 'application/json')
+        request.add_header('User-Agent', IGDB_USER_AGENT)
+
+        try:
+            with urlopen(request) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except HTTPError as exc:
+            error_message = ''
+            try:
+                error_body = exc.read()
+            except Exception:  # pragma: no cover - best effort to capture error body
+                error_body = b''
+            if error_body:
+                try:
+                    error_message = error_body.decode('utf-8', errors='replace').strip()
+                except Exception:  # pragma: no cover - unexpected decoding failures
+                    error_message = ''
+            if not error_message and exc.reason:
+                error_message = str(exc.reason)
+            message = f"IGDB request failed: {exc.code}"
+            if error_message:
+                message = f"{message} {error_message}"
+            raise RuntimeError(message) from exc
+        except Exception as exc:  # pragma: no cover - network failures surfaced
+            logger.warning('Failed to query IGDB: %s', exc)
+            return {}
+
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            igdb_id = item.get('id')
+            if igdb_id is None:
+                continue
+            parsed_item = dict(item)
+            involved_companies = item.get('involved_companies')
+            developer_names: list[str] = []
+            publisher_names: list[str] = []
+            if isinstance(involved_companies, list):
+                for company in involved_companies:
+                    if not isinstance(company, Mapping):
+                        continue
+                    company_obj = company.get('company')
+                    company_name: str | None = None
+                    if isinstance(company_obj, Mapping):
+                        name_value = company_obj.get('name')
+                        if isinstance(name_value, str):
+                            company_name = name_value.strip()
+                    elif isinstance(company_obj, str):
+                        company_name = company_obj.strip()
+                    if not company_name:
+                        continue
+                    if company.get('developer'):
+                        developer_names.append(company_name)
+                    if company.get('publisher'):
+                        publisher_names.append(company_name)
+            parsed_item['developers'] = developer_names
+            parsed_item['publishers'] = publisher_names
+            results[str(igdb_id)] = parsed_item
     return results
 
 
