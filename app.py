@@ -551,21 +551,29 @@ def _normalize_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _normalize_timestamp(value: Any) -> str | None:
+def _normalize_timestamp(value: Any) -> str:
+    if value is None:
+        return ''
     if isinstance(value, numbers.Number):
         try:
-            return datetime.fromtimestamp(float(value), tz=timezone.utc).isoformat()
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).date().isoformat()
         except Exception:
-            return None
+            return ''
     if isinstance(value, str):
-        return value
-    return None
+        stripped = value.strip()
+        if not stripped:
+            return ''
+        try:
+            return datetime.fromtimestamp(float(stripped), tz=timezone.utc).date().isoformat()
+        except Exception:
+            return stripped
+    return _normalize_text(value)
 
 
 IGDB_DIFF_FIELDS = {
     'name': ('Name', 'text'),
     'summary': ('Summary', 'text'),
-    'first_release_date': ('First Launch Date', 'text'),
+    'first_release_date': ('First Launch Date', 'timestamp'),
     'genres': ('Genres', 'list'),
     'platforms': ('Platforms', 'list'),
     'game_modes': ('Game Modes', 'list'),
@@ -603,8 +611,12 @@ def build_igdb_diff(
                     'removed': removed,
                 }
         else:
-            remote_text = _normalize_text(remote_value)
-            local_text = _normalize_text(local_value)
+            if field_type == 'timestamp':
+                remote_text = _normalize_timestamp(remote_value)
+                local_text = _normalize_timestamp(local_value)
+            else:
+                remote_text = _normalize_text(remote_value)
+                local_text = _normalize_text(local_value)
             if remote_text != local_text:
                 entry: dict[str, Any] = {}
                 if remote_text:
