@@ -2,6 +2,7 @@ import os
 import uuid
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -137,17 +138,13 @@ def test_refresh_surfaces_igdb_failure(tmp_path):
 def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
     app_module = load_app(tmp_path)
 
+    original_request = app_module.Request
     captured = {}
 
-    class DummyRequest:
-        def __init__(self, url, data=None, method=None):
-            self.url = url
-            self.data = data
-            self.method = method
-            self.headers = {}
-
-        def add_header(self, key, value):
-            self.headers[key] = value
+    def capturing_request(*args, **kwargs):
+        request = original_request(*args, **kwargs)
+        captured['request'] = request
+        return request
 
     class DummyResponse:
         def __enter__(self):
@@ -160,23 +157,18 @@ def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
             return b'[]'
 
     def fake_urlopen(request):
-        captured['request'] = request
+        captured['opened_request'] = request
         return DummyResponse()
 
-    original_request = app_module.Request
-    original_urlopen = app_module.urlopen
-    try:
-        app_module.Request = DummyRequest
-        app_module.urlopen = fake_urlopen
+    with patch.object(app_module, 'Request', new=capturing_request), patch.object(
+        app_module, 'urlopen', new=fake_urlopen
+    ):
         result = app_module.fetch_igdb_metadata('token', 'client', ['100'])
-    finally:
-        app_module.Request = original_request
-        app_module.urlopen = original_urlopen
 
     assert result == {}
-    assert 'request' in captured
+    assert captured['request'] is captured['opened_request']
     assert (
-        captured['request'].headers.get('User-Agent')
+        captured['request'].get_header('User-agent')
         == app_module.IGDB_USER_AGENT
     )
 
