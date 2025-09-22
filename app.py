@@ -1186,7 +1186,7 @@ def fetch_igdb_metadata(
         query = (
             'fields '
             'id,name,summary,updated_at,first_release_date,'
-            'genres,platforms,game_modes,category,'
+            'genres.name,platforms.name,game_modes.name,category,'
             'involved_companies.company.name,'
             'involved_companies.developer,'
             'involved_companies.publisher; '
@@ -1257,6 +1257,9 @@ def fetch_igdb_metadata(
                         publisher_names.append(company_name)
             parsed_item['developers'] = developer_names
             parsed_item['publishers'] = publisher_names
+            parsed_item['genres'] = _parse_iterable(item.get('genres'))
+            parsed_item['platforms'] = _parse_iterable(item.get('platforms'))
+            parsed_item['game_modes'] = _parse_iterable(item.get('game_modes'))
             results[str(igdb_id)] = parsed_item
     return results
 
