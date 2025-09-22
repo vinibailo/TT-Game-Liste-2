@@ -3,6 +3,7 @@ import os
 import importlib.util
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -42,13 +43,11 @@ def insert_processed_game(app_module, **overrides):
         "last_edited_at": "2024-01-01T00:00:00+00:00",
     }
     defaults.update(overrides)
-    for relation in app_module.LOOKUP_RELATIONS:
-        defaults.setdefault(relation['id_column'], '[]')
     with app_module.db_lock:
         with app_module.db:
+            lookup_selections: dict[str, dict[str, Any]] = {}
             for relation in app_module.LOOKUP_RELATIONS:
                 processed_column = relation['processed_column']
-                id_column = relation['id_column']
                 lookup_table = relation['lookup_table']
                 values = app_module._parse_iterable(defaults.get(processed_column, ''))
                 collected: list[int] = []
@@ -62,16 +61,17 @@ def insert_processed_game(app_module, **overrides):
                     if lookup_id is None or lookup_id in collected:
                         continue
                     collected.append(lookup_id)
-                defaults[id_column] = json.dumps(collected)
+                lookup_selections[relation['response_key']] = {
+                    'ids': list(collected),
+                    'names': values,
+                }
             app_module.db.execute(
                 '''INSERT INTO processed_games (
                     "ID", "Source Index", "Name", "Summary",
                     "First Launch Date", "Developers", "Publishers",
                     "Genres", "Game Modes", "Category", "Platforms",
-                    "igdb_id", "Cover Path", "Width", "Height", last_edited_at,
-                    developers_ids, publishers_ids, genres_ids, game_modes_ids,
-                    platforms_ids
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    "igdb_id", "Cover Path", "Width", "Height", last_edited_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (
                     defaults["ID"],
                     defaults["Source Index"],
@@ -89,12 +89,10 @@ def insert_processed_game(app_module, **overrides):
                     defaults["Width"],
                     defaults["Height"],
                     defaults["last_edited_at"],
-                    defaults['developers_ids'],
-                    defaults['publishers_ids'],
-                    defaults['genres_ids'],
-                    defaults['game_modes_ids'],
-                    defaults['platforms_ids'],
                 ),
+            )
+            app_module._persist_lookup_relations(
+                app_module.db, defaults['ID'], lookup_selections
             )
 
 
