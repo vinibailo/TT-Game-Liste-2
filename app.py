@@ -400,8 +400,12 @@ def fetch_igdb_metadata(
         return {}
 
     query = (
-        'fields id,name,summary,updated_at,first_release_date,'
-        'genres,platforms,game_modes,category,developers,publishers; '
+        'fields '
+        'id,name,summary,updated_at,first_release_date,'
+        'genres,platforms,game_modes,category,'
+        'involved_companies.company.name,'
+        'involved_companies.developer,'
+        'involved_companies.publisher; '
         f"where id = ({', '.join(str(v) for v in numeric_ids)});"
     )
     request = Request(
@@ -440,10 +444,36 @@ def fetch_igdb_metadata(
 
     results: dict[str, dict[str, Any]] = {}
     for item in payload or []:
+        if not isinstance(item, dict):
+            continue
         igdb_id = item.get('id')
         if igdb_id is None:
             continue
-        results[str(igdb_id)] = item
+        parsed_item = dict(item)
+        involved_companies = item.get('involved_companies')
+        developer_names: list[str] = []
+        publisher_names: list[str] = []
+        if isinstance(involved_companies, list):
+            for company in involved_companies:
+                if not isinstance(company, Mapping):
+                    continue
+                company_obj = company.get('company')
+                company_name: str | None = None
+                if isinstance(company_obj, Mapping):
+                    name_value = company_obj.get('name')
+                    if isinstance(name_value, str):
+                        company_name = name_value.strip()
+                elif isinstance(company_obj, str):
+                    company_name = company_obj.strip()
+                if not company_name:
+                    continue
+                if company.get('developer'):
+                    developer_names.append(company_name)
+                if company.get('publisher'):
+                    publisher_names.append(company_name)
+        parsed_item['developers'] = developer_names
+        parsed_item['publishers'] = publisher_names
+        results[str(igdb_id)] = parsed_item
     return results
 
 
@@ -460,15 +490,50 @@ def _parse_iterable(value: Any) -> list[str]:
     except TypeError:
         return [str(value)]
     for element in iterator:
-        if isinstance(element, dict):
-            name = element.get('name') if isinstance(element, dict) else None
-            if name:
-                items.append(str(name).strip())
+        if isinstance(element, Mapping):
+            name = element.get('name')
+            if isinstance(name, str) and name.strip():
+                items.append(name.strip())
             else:
                 items.append(str(element).strip())
         else:
             items.append(str(element).strip())
     return [item for item in items if item]
+
+
+def _parse_company_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, numbers.Number):
+        return [str(value)]
+    names: list[str] = []
+    try:
+        iterator = iter(value)
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+    for element in iterator:
+        name_value: Any = None
+        if isinstance(element, Mapping):
+            if isinstance(element.get('name'), str):
+                name_value = element['name']
+            else:
+                company_obj = element.get('company')
+                if isinstance(company_obj, Mapping) and isinstance(
+                    company_obj.get('name'), str
+                ):
+                    name_value = company_obj['name']
+                elif isinstance(company_obj, str):
+                    name_value = company_obj
+        else:
+            name_value = element
+        text = _normalize_text(name_value)
+        if text:
+            names.append(text)
+    return names
 
 
 def _normalize_text(value: Any) -> str:
@@ -497,8 +562,8 @@ IGDB_DIFF_FIELDS = {
     'genres': ('Genres', 'list'),
     'platforms': ('Platforms', 'list'),
     'game_modes': ('Game Modes', 'list'),
-    'developers': ('Developers', 'list'),
-    'publishers': ('Publishers', 'list'),
+    'developers': ('Developers', 'company_list'),
+    'publishers': ('Publishers', 'company_list'),
     'category': ('Category', 'text'),
 }
 
@@ -512,6 +577,16 @@ def build_igdb_diff(
         local_value = processed_row.get(local_field)
         if field_type == 'list':
             remote_set = set(_parse_iterable(remote_value))
+            local_set = set(_parse_iterable(local_value))
+            added = sorted(remote_set - local_set)
+            removed = sorted(local_set - remote_set)
+            if added or removed:
+                diff[local_field] = {
+                    'added': added,
+                    'removed': removed,
+                }
+        elif field_type == 'company_list':
+            remote_set = set(_parse_company_names(remote_value))
             local_set = set(_parse_iterable(local_value))
             added = sorted(remote_set - local_set)
             removed = sorted(local_set - remote_set)
