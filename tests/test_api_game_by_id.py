@@ -31,6 +31,7 @@ def seed_games(app_module):
                 "Category": "",
                 "Platforms": "",
                 "Large Cover Image (URL)": "",
+                "id": 987654321,
             }
         ]
     )
@@ -68,6 +69,7 @@ def test_game_by_id_returns_payload(tmp_path):
     assert data['index'] == 0
     assert data['id'] == 1
     assert data['game']['Name'] == 'Catalogued Game'
+    assert data['game']['IGDBID'] == '987654321'
     assert app_module.navigator.current_index == 0
     assert not (upload_dir / temp_name).exists()
 

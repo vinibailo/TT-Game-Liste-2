@@ -1,6 +1,7 @@
 let cropper = null;
 let currentIndex = 0;
 let currentId = null;
+let currentIgdbId = null;
 let currentUpload = null;
 let originalImage = null;
 let genresChoices, modesChoices, platformsChoices;
@@ -92,6 +93,13 @@ function updateGameIdDisplay(idValue) {
     document.getElementById('game-id').textContent = idText;
 }
 
+function updateIgdbIdDisplay(idValue) {
+    const span = document.getElementById('igdb-id');
+    if (!span) return;
+    const idText = idValue ? String(idValue) : '—';
+    span.textContent = idText;
+}
+
 function collectFields() {
     return {
         Name: document.getElementById('name').value,
@@ -136,6 +144,7 @@ function saveSession() {
     const data = {
         index: currentIndex,
         id: currentId,
+        igdbId: currentIgdbId,
         fields: collectFields(),
         image: imgSrc && imgSrc !== placeholderImage ? imgSrc : '',
         upload_name: currentUpload
@@ -150,6 +159,11 @@ function restoreSession() {
     if (data.index !== currentIndex) return;
     currentId = data.id != null ? String(data.id) : null;
     updateGameIdDisplay(currentId);
+    if (Object.prototype.hasOwnProperty.call(data, 'igdbId')) {
+        const storedIgdb = data.igdbId;
+        currentIgdbId = storedIgdb != null && storedIgdb !== '' ? String(storedIgdb) : null;
+        updateIgdbIdDisplay(currentIgdbId);
+    }
     document.getElementById('name').value = data.fields.Name;
     document.getElementById('game-name').textContent = data.fields.Name || 'Untitled Game';
     const summaryEl = document.getElementById('summary');
@@ -300,8 +314,13 @@ function applyGameData(data) {
     }
     currentIndex = data.index;
     currentId = data.id != null ? String(data.id) : null;
+    const igdbValue = data.game && data.game.IGDBID != null
+        ? String(data.game.IGDBID).trim()
+        : '';
+    currentIgdbId = igdbValue ? igdbValue : null;
     document.getElementById('game-name').textContent = data.game.Name || 'Untitled Game';
     updateGameIdDisplay(currentId);
+    updateIgdbIdDisplay(currentIgdbId);
     const processed = Math.max(0, (data.seq || 1) - 1);
     const total = data.total || 0;
     totalGames = total;
@@ -401,6 +420,8 @@ async function saveGame() {
             }
             currentId = expectedIdStr;
             updateGameIdDisplay(currentId);
+            currentIgdbId = null;
+            updateIgdbIdDisplay(currentIgdbId);
             await loadGame();
             setNavDisabled(true);
             const refreshedId = currentId != null ? String(currentId) : null;
