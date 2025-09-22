@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 import importlib.util
@@ -114,6 +115,81 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['igdb_id'] == '100'
     assert entry['name'] == 'Local Game'
     assert entry['has_diff'] is True
+
+
+def test_refresh_parses_involved_companies(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(
+        app_module,
+        Developers='Local Dev',
+        Publishers='Local Pub',
+    )
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    app_module.exchange_twitch_credentials = lambda: ("token", "client")
+
+    response_payload = json.dumps(
+        [
+            {
+                "id": 100,
+                "updated_at": 1_700_000_000,
+                "involved_companies": [
+                    {"company": {"name": "Remote Dev Co"}, "developer": True},
+                    {"company": {"name": "Remote Pub Co"}, "publisher": True},
+                    {
+                        "company": {"name": "Dual Role Co"},
+                        "developer": True,
+                        "publisher": True,
+                    },
+                    {"company": "String Company", "developer": True},
+                ],
+            }
+        ]
+    ).encode('utf-8')
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return response_payload
+
+    def fake_urlopen(_request):
+        return DummyResponse()
+
+    with patch.object(app_module, 'urlopen', new=fake_urlopen):
+        refresh = client.post('/api/updates/refresh')
+    assert refresh.status_code == 200
+    payload = refresh.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['updated'] == 1
+
+    detail = client.get('/api/updates/1')
+    assert detail.status_code == 200
+    detail_payload = detail.get_json()
+    assert detail_payload['igdb_id'] == '100'
+    assert detail_payload['igdb_payload']['developers'] == [
+        'Remote Dev Co',
+        'Dual Role Co',
+        'String Company',
+    ]
+    assert detail_payload['igdb_payload']['publishers'] == [
+        'Remote Pub Co',
+        'Dual Role Co',
+    ]
+    diff = detail_payload['diff']
+    assert sorted(diff['Developers']['added']) == [
+        'Dual Role Co',
+        'Remote Dev Co',
+        'String Company',
+    ]
+    assert diff['Developers']['removed'] == ['Local Dev']
+    assert sorted(diff['Publishers']['added']) == ['Dual Role Co', 'Remote Pub Co']
+    assert diff['Publishers']['removed'] == ['Local Pub']
 
 
 def test_refresh_surfaces_igdb_failure(tmp_path):
