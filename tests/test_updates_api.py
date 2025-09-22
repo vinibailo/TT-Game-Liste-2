@@ -249,6 +249,75 @@ def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
     )
 
 
+def test_fetch_igdb_metadata_batches_requests(tmp_path):
+    app_module = load_app(tmp_path)
+    app_module.IGDB_BATCH_SIZE = 5
+
+    igdb_ids = [str(i) for i in range(1, 13)]
+
+    def build_payload(start, end):
+        return [
+            {
+                "id": idx,
+                "involved_companies": [
+                    {"company": {"name": f"Dev {idx}"}, "developer": True},
+                    {"company": {"name": f"Pub {idx}"}, "publisher": True},
+                ],
+            }
+            for idx in range(start, end)
+        ]
+
+    responses = [
+        json.dumps(build_payload(1, 6)).encode('utf-8'),
+        json.dumps(build_payload(6, 11)).encode('utf-8'),
+        json.dumps(build_payload(11, 13)).encode('utf-8'),
+    ]
+
+    queries: list[str] = []
+
+    class DummyResponse:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body
+
+    def fake_urlopen(request):
+        queries.append(request.data.decode('utf-8'))
+        index = len(queries) - 1
+        try:
+            body = responses[index]
+        except IndexError as exc:  # pragma: no cover - guard against unexpected calls
+            raise AssertionError('Too many IGDB requests') from exc
+        return DummyResponse(body)
+
+    with patch.object(app_module, 'urlopen', new=fake_urlopen):
+        results = app_module.fetch_igdb_metadata('token', 'client', igdb_ids)
+
+    assert len(queries) == 3
+    assert 'limit 5;' in queries[0]
+    assert 'limit 5;' in queries[1]
+    assert 'limit 2;' in queries[2]
+    assert 'where id = (1, 2, 3, 4, 5);' in queries[0]
+    assert 'where id = (6, 7, 8, 9, 10);' in queries[1]
+    assert 'where id = (11, 12);' in queries[2]
+
+    expected_ids = [str(i) for i in range(1, 13)]
+    assert sorted(results.keys(), key=int) == expected_ids
+    assert results['1']['id'] == 1
+    assert results['1']['developers'] == ['Dev 1']
+    assert results['1']['publishers'] == ['Pub 1']
+    assert results['12']['id'] == 12
+    assert results['12']['developers'] == ['Dev 12']
+    assert results['12']['publishers'] == ['Pub 12']
+
+
 def test_updates_detail_returns_diff(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
