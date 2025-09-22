@@ -192,6 +192,20 @@ def test_refresh_parses_involved_companies(tmp_path):
     assert diff['Publishers']['removed'] == ['Local Pub']
 
 
+def test_build_igdb_diff_formats_first_release_date(tmp_path):
+    app_module = load_app(tmp_path)
+
+    processed_row = {'First Launch Date': '2020-01-01'}
+    igdb_payload = {'first_release_date': 1623715200}
+
+    diff = app_module.build_igdb_diff(processed_row, igdb_payload)
+
+    launch_date_diff = diff['First Launch Date']
+    assert launch_date_diff['added'] == '2021-06-15'
+    assert launch_date_diff['removed'] == '2020-01-01'
+    assert launch_date_diff['added'] != str(igdb_payload['first_release_date'])
+
+
 def test_refresh_surfaces_igdb_failure(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
