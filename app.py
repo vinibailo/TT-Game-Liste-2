@@ -27,6 +27,7 @@ import pandas as pd
 from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +414,23 @@ def fetch_igdb_metadata(
     try:
         with urlopen(request) as response:
             payload = json.loads(response.read().decode('utf-8'))
+    except HTTPError as exc:
+        error_message = ''
+        try:
+            error_body = exc.read()
+        except Exception:  # pragma: no cover - best effort to capture error body
+            error_body = b''
+        if error_body:
+            try:
+                error_message = error_body.decode('utf-8', errors='replace').strip()
+            except Exception:  # pragma: no cover - unexpected decoding failures
+                error_message = ''
+        if not error_message and exc.reason:
+            error_message = str(exc.reason)
+        message = f"IGDB request failed: {exc.code}"
+        if error_message:
+            message = f"{message} {error_message}"
+        raise RuntimeError(message) from exc
     except Exception as exc:  # pragma: no cover - network failures surfaced
         logger.warning('Failed to query IGDB: %s', exc)
         return {}
@@ -1223,11 +1241,14 @@ def api_updates_refresh():
     except RuntimeError as exc:
         return jsonify({'error': str(exc)}), 400
 
-    igdb_payloads = fetch_igdb_metadata(
-        access_token,
-        client_id,
-        [row.get('igdb_id') for row in processed_rows],
-    )
+    try:
+        igdb_payloads = fetch_igdb_metadata(
+            access_token,
+            client_id,
+            [row.get('igdb_id') for row in processed_rows],
+        )
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 502
 
     updated = 0
     missing: list[int] = []
