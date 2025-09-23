@@ -1740,6 +1740,84 @@ def normalize_processed_games() -> None:
             conn.execute('UPDATE igdb_updates SET processed_game_id = -processed_game_id')
 
 
+def seed_processed_games_from_source() -> None:
+    """Ensure ``processed_games`` has a seeded row for each IGDB source entry."""
+
+    if 'games_df' not in globals():
+        return
+    if games_df.empty:
+        return
+
+    def _normalize_name(value: Any) -> str:
+        if value is None:
+            return ''
+        if isinstance(value, str):
+            return value.strip()
+        try:
+            if pd.isna(value):
+                return ''
+        except Exception:
+            pass
+        text = str(value).strip()
+        if text.lower() == 'nan':
+            return ''
+        return text
+
+    def _coerce_source_index(value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            return str(int(str(value).strip()))
+        except (TypeError, ValueError):
+            text = str(value).strip()
+            return text or None
+
+    with db_lock:
+        conn = get_db()
+        with conn:
+            cur = conn.execute(
+                'SELECT "Source Index", "Name" FROM processed_games'
+            )
+            existing: dict[str, tuple[str, str]] = {}
+            for row in cur.fetchall():
+                stored_source = row['Source Index']
+                if stored_source is None:
+                    continue
+                stored_text = str(stored_source)
+                canonical = _coerce_source_index(stored_source)
+                if canonical is None:
+                    canonical = stored_text if stored_text else None
+                if canonical is None:
+                    continue
+                existing[canonical] = (stored_text, _normalize_name(row['Name']))
+
+            name_series = games_df['Name'] if 'Name' in games_df.columns else pd.Series(dtype=str)
+            for idx in games_df.index:
+                src_index = _coerce_source_index(idx)
+                if src_index is None:
+                    continue
+                igdb_name = _normalize_name(
+                    name_series.at[idx]
+                    if idx in name_series.index
+                    else games_df.iloc[idx].get('Name')
+                )
+                stored_name: str | None = igdb_name if igdb_name else None
+
+                if src_index not in existing:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO processed_games ("Source Index", "Name") VALUES (?, ?)',
+                        (src_index, stored_name),
+                    )
+                    continue
+
+                stored_source, existing_name = existing[src_index]
+                if igdb_name and existing_name != igdb_name:
+                    conn.execute(
+                        'UPDATE processed_games SET "Name"=? WHERE "Source Index"=?',
+                        (igdb_name, stored_source),
+                    )
+
+
 def backfill_igdb_ids() -> None:
     if 'games_df' not in globals():
         return
@@ -2051,6 +2129,7 @@ class GameNavigator:
         self.total = total_rows
         self.current_index = 0
         self.seq_index = 1
+        self.processed_total = 0
         self.skip_queue: list[dict[str, int]] = []
         self._load_initial()
 
@@ -2059,12 +2138,43 @@ class GameNavigator:
             conn = get_db()
             cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
-            cur = conn.execute('SELECT "Source Index", "ID" FROM processed_games')
+            cur = conn.execute(
+                'SELECT "Source Index", "ID", last_edited_at, "Name" FROM processed_games'
+            )
             rows = cur.fetchall()
-        processed = {int(r['Source Index']) for r in rows if str(r['Source Index']).isdigit()}
-        max_seq = max((r['ID'] for r in rows), default=0)
+        processed: set[int] = set()
+        max_seq = 0
+        for row in rows:
+            raw_index = row['Source Index']
+            try:
+                index_value = int(str(raw_index).strip())
+            except (TypeError, ValueError):
+                index_value = None
+            if index_value is not None and 0 <= index_value < self.total:
+                processed_flag = False
+                last_edited = row['last_edited_at']
+                if last_edited:
+                    processed_flag = True
+                else:
+                    try:
+                        name_value = row['Name']
+                    except (KeyError, IndexError):
+                        name_value = None
+                    if name_value is None:
+                        processed_flag = True
+                    elif isinstance(name_value, str) and not name_value.strip():
+                        processed_flag = True
+                if processed_flag:
+                    processed.add(index_value)
+            try:
+                row_id = int(row['ID'])
+            except (TypeError, ValueError):
+                row_id = None
+            if row_id is not None and row_id > max_seq:
+                max_seq = row_id
         next_index = next((i for i in range(self.total) if i not in processed), self.total)
-        expected_seq = max_seq + 1
+        expected_seq = max_seq + 1 if max_seq > 0 else 1
+        self.processed_total = len(processed)
         if state_row is not None:
             try:
                 file_current = int(state_row['current_index'])
@@ -2100,6 +2210,22 @@ class GameNavigator:
             conn = get_db()
             cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
+            cur = conn.execute(
+                "SELECT COUNT(*) AS processed_count FROM processed_games "
+                "WHERE COALESCE(TRIM(last_edited_at), '') != '' "
+                "   OR COALESCE(TRIM(\"Name\"), '') = ''"
+            )
+            processed_row = cur.fetchone()
+        processed_total = 0
+        if processed_row is not None:
+            try:
+                processed_total = int(processed_row['processed_count'])
+            except (KeyError, TypeError, ValueError):
+                try:
+                    processed_total = int(processed_row[0])
+                except Exception:
+                    processed_total = 0
+        self.processed_total = max(processed_total, 0)
         if state_row is not None:
             try:
                 self.current_index = int(state_row['current_index'])
@@ -2321,8 +2447,9 @@ platforms_list = sorted({
 })
 total_games = len(games_df)
 with app.app_context():
-    backfill_igdb_ids()
+    seed_processed_games_from_source()
     normalize_processed_games()
+    backfill_igdb_ids()
     navigator = GameNavigator(total_games)
 
 @app.before_request
@@ -2392,7 +2519,7 @@ def updates_page():
     return render_template('updates.html')
 
 
-def build_game_payload(index: int, seq: int) -> dict:
+def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
     try:
         row = games_df.iloc[index]
     except Exception:
@@ -2417,7 +2544,16 @@ def build_game_payload(index: int, seq: int) -> dict:
     processed_mapping: Mapping[str, Any] = (
         dict(processed_row) if processed_row is not None else {}
     )
-    source_row = pd.Series(processed_mapping) if processed_mapping else row
+    if processed_mapping:
+        source_row = row.copy()
+        for key, value in processed_mapping.items():
+            if key not in source_row.index:
+                continue
+            if value is None:
+                continue
+            source_row[key] = value
+    else:
+        source_row = row
     igdb_id = extract_igdb_id(source_row)
     if not igdb_id:
         igdb_id = extract_igdb_id(row, allow_generic_id=True)
@@ -2458,12 +2594,14 @@ def build_game_payload(index: int, seq: int) -> dict:
 
     game_id = processed_row['ID'] if processed_row is not None else str(seq)
 
+    progress_value = progress_seq if progress_seq is not None else seq
+
     return {
         'index': int(index),
         'total': total_games,
         'game': game_fields,
         'cover': cover_data,
-        'seq': seq,
+        'seq': progress_value,
         'id': game_id,
         'missing': missing,
     }
@@ -2475,7 +2613,11 @@ def api_game():
         index = navigator.current()
         if index >= total_games:
             return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-        data = build_game_payload(index, navigator.seq_index)
+        data = build_game_payload(
+            index,
+            navigator.seq_index,
+            navigator.processed_total + 1,
+        )
         return jsonify(data)
     except Exception as e:
         app.logger.exception("api_game failed")
@@ -2514,7 +2656,7 @@ def api_game_raw(index: int):
         'total': total_games,
         'game': game_fields,
         'cover': cover_data,
-        'seq': navigator.seq_index,
+        'seq': navigator.processed_total + 1,
     })
 
 
@@ -2581,10 +2723,12 @@ def api_save():
                     ),
                     409,
                 )
+            existing_last_edit = None
+            was_processed_before = False
             with db_lock:
                 conn = get_db()
                 cur = conn.execute(
-                    'SELECT "ID", "igdb_id" FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "ID", "igdb_id", last_edited_at FROM processed_games WHERE "Source Index"=?',
                     (str(index),),
                 )
                 existing = cur.fetchone()
@@ -2603,6 +2747,13 @@ def api_save():
                         )
                     seq_id = existing_id
                     new_record = False
+                    try:
+                        existing_last_edit = existing['last_edited_at']
+                    except (KeyError, IndexError):
+                        existing_last_edit = None
+                    if existing_last_edit is not None:
+                        text = str(existing_last_edit).strip()
+                        was_processed_before = bool(text)
                 else:
                     seq_id = navigator.seq_index
                     if expected_id != seq_id:
@@ -2725,6 +2876,11 @@ def api_save():
                     conn.commit()
                     if new_record:
                         navigator.seq_index += 1
+                    if not was_processed_before:
+                        navigator.processed_total = min(
+                            navigator.total,
+                            navigator.processed_total + 1,
+                        )
                 except sqlite3.IntegrityError:
                     conn.rollback()
                     return jsonify({'error': 'conflict'}), 409
@@ -3004,7 +3160,11 @@ def api_game_by_id():
 
     try:
         navigator.set_index(index)
-        payload = build_game_payload(index, navigator.seq_index)
+        payload = build_game_payload(
+            index,
+            navigator.seq_index,
+            navigator.processed_total + 1,
+        )
         return jsonify(payload)
     except IndexError:
         return jsonify({'error': 'invalid index'}), 404
@@ -3025,7 +3185,11 @@ def api_next():
         index = navigator.next()
         if index >= total_games:
             return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-        payload = build_game_payload(index, navigator.seq_index)
+        payload = build_game_payload(
+            index,
+            navigator.seq_index,
+            navigator.processed_total + 1,
+        )
         return jsonify(payload)
     except Exception as e:
         app.logger.exception("api_next failed")
@@ -3042,7 +3206,11 @@ def api_back():
             os.remove(up_path)
     try:
         index = navigator.back()
-        payload = build_game_payload(index, navigator.seq_index)
+        payload = build_game_payload(
+            index,
+            navigator.seq_index,
+            navigator.processed_total + 1,
+        )
         return jsonify(payload)
     except Exception as e:
         app.logger.exception("api_back failed")
