@@ -991,13 +991,110 @@ def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_id_column(conn: sqlite3.Connection) -> None:
-    cur = conn.execute("PRAGMA table_info(processed_games)")
+    try:
+        cur = conn.execute('PRAGMA table_info(processed_games)')
+    except sqlite3.OperationalError:
+        return
+
     cols = cur.fetchall()
-    id_col = next((c for c in cols if c[1] == "ID"), None)
-    if id_col and id_col[2].upper() != "INTEGER":
-        conn.executescript(
+    if not cols:
+        return
+
+    id_col = next((c for c in cols if c[1] == 'ID'), None)
+    has_source_index = any(c[1] == 'Source Index' for c in cols)
+    id_type = str(id_col[2]).upper() if id_col and id_col[2] is not None else ''
+    id_pk = id_col[5] if id_col else 0
+    if id_col and id_type == 'INTEGER' and id_pk == 1:
+        return
+
+    try:
+        cur = conn.execute('SELECT * FROM processed_games ORDER BY rowid')
+    except sqlite3.OperationalError:
+        rows: list[sqlite3.Row] = []
+        column_names: list[str] = []
+    else:
+        rows = cur.fetchall()
+        column_names = [desc[0] for desc in cur.description] if cur.description else []
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        record: dict[str, Any] = {}
+        for idx, column in enumerate(column_names):
+            if idx < len(row):
+                record[column] = row[idx]
+        records.append(record)
+
+    desired_columns = [
+        'ID',
+        'Source Index',
+        'Name',
+        'Summary',
+        'First Launch Date',
+        'Developers',
+        'Publishers',
+        'Genres',
+        'Game Modes',
+        'Category',
+        'Platforms',
+        'igdb_id',
+        'Cover Path',
+        'Width',
+        'Height',
+        'last_edited_at',
+    ]
+
+    def _coerce_old_id(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            candidate = int(value)
+        elif isinstance(value, numbers.Integral):
+            candidate = int(value)
+        elif isinstance(value, numbers.Real):
+            float_value = float(value)
+            if not float_value.is_integer():
+                return None
+            candidate = int(float_value)
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                candidate = int(text)
+            except ValueError:
+                return None
+        return candidate
+
+    used_ids: set[int] = set()
+    new_rows: list[tuple[Any, ...]] = []
+    next_id = 1
+    for record in records:
+        candidate = _coerce_old_id(record.get('ID'))
+        if candidate is not None and candidate > 0 and candidate not in used_ids:
+            new_id = candidate
+        else:
+            while next_id in used_ids:
+                next_id += 1
+            new_id = next_id
+            next_id += 1
+        used_ids.add(new_id)
+
+        row_values: list[Any] = []
+        for column in desired_columns:
+            if column == 'ID':
+                row_values.append(new_id)
+            else:
+                row_values.append(record.get(column))
+        new_rows.append(tuple(row_values))
+
+    columns_sql = ', '.join(_quote_identifier(column) for column in desired_columns)
+    placeholders = ', '.join('?' for _ in desired_columns)
+
+    conn.execute('PRAGMA foreign_keys = OFF')
+    try:
+        conn.execute('ALTER TABLE processed_games RENAME TO processed_games_old')
+        conn.execute(
             '''
-            ALTER TABLE processed_games RENAME TO processed_games_old;
             CREATE TABLE processed_games (
                 "ID" INTEGER PRIMARY KEY,
                 "Source Index" TEXT UNIQUE,
@@ -1013,20 +1110,41 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                 "igdb_id" TEXT,
                 "Cover Path" TEXT,
                 "Width" INTEGER,
-                "Height" INTEGER
-            );
-            INSERT INTO processed_games (
-                "ID", "Source Index", "Name", "Summary", "First Launch Date",
-                "Developers", "Publishers", "Genres", "Game Modes", "Category",
-                "Platforms", "igdb_id", "Cover Path", "Width", "Height"
+                "Height" INTEGER,
+                last_edited_at TEXT
             )
-            SELECT CAST("ID" AS INTEGER), "Source Index", "Name", "Summary",
-                   "First Launch Date", "Developers", "Publishers", "Genres",
-                   "Game Modes", '', '', '', "Cover Path", "Width", "Height"
-            FROM processed_games_old;
-            DROP TABLE processed_games_old;
             '''
         )
+        if new_rows:
+            conn.executemany(
+                f'INSERT INTO processed_games ({columns_sql}) VALUES ({placeholders})',
+                new_rows,
+            )
+        if has_source_index:
+            try:
+                conn.execute(
+                    '''
+                    UPDATE igdb_updates
+                    SET processed_game_id = (
+                        SELECT pg."ID"
+                        FROM processed_games AS pg
+                        JOIN processed_games_old AS old
+                            ON old."Source Index" = pg."Source Index"
+                        WHERE old."ID" = igdb_updates.processed_game_id
+                        LIMIT 1
+                    )
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM processed_games_old AS old
+                        WHERE old."ID" = igdb_updates.processed_game_id
+                    )
+                    '''
+                )
+            except sqlite3.OperationalError:
+                pass
+        conn.execute('DROP TABLE processed_games_old')
+    finally:
+        conn.execute('PRAGMA foreign_keys = ON')
 
 
 def _init_db() -> None:
@@ -1123,14 +1241,37 @@ def _init_db() -> None:
                     )
 
             conn.execute(
-                'DELETE FROM igdb_updates WHERE processed_game_id NOT IN (SELECT "ID" FROM processed_games)'
+                '''
+                DELETE FROM igdb_updates
+                WHERE processed_game_id IS NULL
+                   OR NOT EXISTS (
+                        SELECT 1
+                        FROM processed_games
+                        WHERE processed_games."ID" = igdb_updates.processed_game_id
+                    )
+                '''
             )
 
             cur = conn.execute(
                 'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
             )
-            for game_id, igdb_id_value, last_edit in cur.fetchall():
+            for raw_game_id, igdb_id_value, last_edit in cur.fetchall():
                 if not igdb_id_value:
+                    continue
+                try:
+                    if isinstance(raw_game_id, numbers.Integral):
+                        game_id = int(raw_game_id)
+                    elif isinstance(raw_game_id, numbers.Real):
+                        float_value = float(raw_game_id)
+                        if not float_value.is_integer():
+                            continue
+                        game_id = int(float_value)
+                    else:
+                        text = str(raw_game_id).strip()
+                        if not text:
+                            continue
+                        game_id = int(text)
+                except (TypeError, ValueError):
                     continue
                 conn.execute(
                     '''INSERT OR IGNORE INTO igdb_updates (
