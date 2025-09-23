@@ -1122,6 +1122,10 @@ def _init_db() -> None:
                         ),
                     )
 
+            conn.execute(
+                'DELETE FROM igdb_updates WHERE processed_game_id NOT IN (SELECT "ID" FROM processed_games)'
+            )
+
             cur = conn.execute(
                 'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
             )
@@ -1275,16 +1279,24 @@ def normalize_processed_games() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "Source Index" FROM processed_games '
+                'SELECT "ID", "Source Index" FROM processed_games '
                 'ORDER BY CAST("Source Index" AS INTEGER)'
             )
-            rows = [r["Source Index"] for r in cur.fetchall()]
-            for new_id, src_index in enumerate(rows, start=1):
+            rows = cur.fetchall()
+            for new_id, row in enumerate(rows, start=1):
+                old_id = row["ID"]
+                src_index = row["Source Index"]
                 conn.execute(
                     'UPDATE processed_games SET "ID"=? WHERE "Source Index"=?',
                     (-new_id, src_index),
                 )
+                if old_id is not None:
+                    conn.execute(
+                        'UPDATE igdb_updates SET processed_game_id=? WHERE processed_game_id=?',
+                        (-new_id, old_id),
+                    )
             conn.execute('UPDATE processed_games SET "ID" = -"ID"')
+            conn.execute('UPDATE igdb_updates SET processed_game_id = -processed_game_id')
 
 
 def backfill_igdb_ids() -> None:
