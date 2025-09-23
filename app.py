@@ -275,6 +275,7 @@ client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 # SQLite setup for processed games
 db_lock = Lock()
+_processed_games_columns_cache: set[str] | None = None
 
 
 def get_db():
@@ -284,6 +285,17 @@ def get_db():
         g.db = sqlite3.connect(PROCESSED_DB)
         g.db.row_factory = sqlite3.Row
     return g.db
+
+
+def get_processed_games_columns(conn: sqlite3.Connection | None = None) -> set[str]:
+    global _processed_games_columns_cache
+    if _processed_games_columns_cache is not None:
+        return _processed_games_columns_cache
+    if conn is None:
+        conn = get_db()
+    cur = conn.execute('PRAGMA table_info(processed_games)')
+    _processed_games_columns_cache = {row['name'] for row in cur.fetchall()}
+    return _processed_games_columns_cache
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -1199,28 +1211,57 @@ def load_games() -> pd.DataFrame:
 
 
 
-def find_cover(row: pd.Series) -> str | None:
-    url = str(row.get('Large Cover Image (URL)', ''))
+def _encode_cover_image(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+
+
+def cover_data_from_path(cover_path: str | None) -> str | None:
+    if not cover_path:
+        return None
+    if not os.path.exists(cover_path):
+        app.logger.warning("Cover path %s missing", cover_path)
+        return None
+    try:
+        img = open_image_auto_rotate(cover_path)
+    except Exception:
+        app.logger.warning("Failed to open cover path %s", cover_path)
+        return None
+    return _encode_cover_image(img)
+
+
+def cover_data_from_url(url: str | None) -> str | None:
     if not url:
         return None
-    parsed_path = urlparse(url).path
+    parsed_path = urlparse(str(url)).path
     base = os.path.splitext(os.path.basename(parsed_path))[0]
     for ext in ('.jpg', '.jpeg', '.png'):
         path = os.path.join(COVERS_DIR, base + ext)
         if os.path.exists(path):
             img = open_image_auto_rotate(path)
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG')
-            return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+            return _encode_cover_image(img)
     try:
         with urlopen(url) as resp:
             img = open_image_auto_rotate(resp)
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG')
-            return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+            return _encode_cover_image(img)
     except Exception:
         app.logger.warning("No cover found for URL %s", url)
     return None
+
+
+def load_cover_data(cover_path: str | None = None, fallback_url: str | None = None) -> str | None:
+    cover = cover_data_from_path(cover_path)
+    if cover:
+        return cover
+    return cover_data_from_url(fallback_url)
+
+
+def find_cover(row: pd.Series) -> str | None:
+    url = str(row.get('Large Cover Image (URL)', ''))
+    if not url:
+        return None
+    return cover_data_from_url(url)
 
 
 def ensure_dirs() -> None:
@@ -1916,22 +1957,11 @@ def build_game_payload(index: int, seq: int) -> dict:
                 conn, processed_row['ID']
             )
 
-    if processed_row is not None and processed_row['Cover Path']:
-        cover_path = processed_row['Cover Path']
-        if os.path.exists(cover_path):
-            try:
-                img = open_image_auto_rotate(cover_path)
-                buf = io.BytesIO()
-                img.save(buf, format='JPEG')
-                cover_data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
-            except Exception:
-                app.logger.warning("Failed to open cover path %s", cover_path)
-                cover_data = find_cover(row)
-        else:
-            app.logger.warning("Cover path %s missing", cover_path)
-            cover_data = find_cover(row)
-    else:
-        cover_data = find_cover(row)
+    processed_cover_path = None
+    if processed_row is not None:
+        processed_cover_path = processed_row['Cover Path'] or None
+    fallback_cover_url = str(row.get('Large Cover Image (URL)', ''))
+    cover_data = load_cover_data(processed_cover_path, fallback_cover_url)
 
     processed_mapping: Mapping[str, Any] = (
         dict(processed_row) if processed_row is not None else {}
@@ -2305,15 +2335,23 @@ def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
 def fetch_cached_updates() -> list[dict[str, Any]]:
     with db_lock:
         conn = get_db()
+        processed_columns = get_processed_games_columns(conn)
+        cover_url_select = (
+            'p."Large Cover Image (URL)" AS cover_url'
+            if 'Large Cover Image (URL)' in processed_columns
+            else 'NULL AS cover_url'
+        )
         cur = conn.execute(
-            '''SELECT
+            f'''SELECT
                    u.processed_game_id,
                    u.igdb_id,
                    u.igdb_updated_at,
                    u.local_last_edited_at,
                    u.refreshed_at,
                    u.diff,
-                   p."Name" AS game_name
+                   p."Name" AS game_name,
+                   p."Cover Path" AS cover_path,
+                   {cover_url_select}
                FROM igdb_updates u
                LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
                ORDER BY p."Name" COLLATE NOCASE
@@ -2332,6 +2370,7 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
                 'refreshed_at': row['refreshed_at'],
                 'name': row['game_name'],
                 'has_diff': bool(row['diff']),
+                'cover': load_cover_data(row['cover_path'], row['cover_url']),
             }
         )
     return updates
@@ -2413,8 +2452,14 @@ def api_updates_list():
 def api_updates_detail(processed_game_id: int):
     with db_lock:
         conn = get_db()
+        processed_columns = get_processed_games_columns(conn)
+        cover_url_select = (
+            'p."Large Cover Image (URL)" AS cover_url'
+            if 'Large Cover Image (URL)' in processed_columns
+            else 'NULL AS cover_url'
+        )
         cur = conn.execute(
-            '''SELECT
+            f'''SELECT
                    u.processed_game_id,
                    u.igdb_id,
                    u.igdb_updated_at,
@@ -2422,7 +2467,9 @@ def api_updates_detail(processed_game_id: int):
                    u.diff,
                    u.local_last_edited_at,
                    u.refreshed_at,
-                   p."Name" AS game_name
+                   p."Name" AS game_name,
+                   p."Cover Path" AS cover_path,
+                   {cover_url_select}
                FROM igdb_updates u
                LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
                WHERE u.processed_game_id=?''',
@@ -2446,6 +2493,7 @@ def api_updates_detail(processed_game_id: int):
             'local_last_edited_at': row['local_last_edited_at'],
             'refreshed_at': row['refreshed_at'],
             'name': row['game_name'],
+            'cover': load_cover_data(row['cover_path'], row['cover_url']),
         }
     )
 

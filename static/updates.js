@@ -10,6 +10,8 @@
         updateMap: new Map(),
     };
 
+    const placeholderImage = '/no-image.jpg';
+
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
         emptyState: document.querySelector('[data-empty-state]'),
@@ -31,6 +33,7 @@
         localEdited: document.querySelector('[data-modal-local-edited]'),
         empty: document.querySelector('[data-modal-empty]'),
         diffList: document.querySelector('[data-diff-list]'),
+        cover: document.querySelector('[data-modal-cover]'),
     };
 
     const modalEmptyDefaultText = modal.empty ? modal.empty.textContent : '';
@@ -195,6 +198,18 @@
         return span;
     }
 
+    function resolveCoverSource(source) {
+        return source ? source : placeholderImage;
+    }
+
+    function setModalCover(source, name) {
+        if (!modal.cover) {
+            return;
+        }
+        modal.cover.src = resolveCoverSource(source);
+        modal.cover.alt = name ? `${name} cover` : 'Game cover';
+    }
+
     function renderTable() {
         if (!elements.tableBody || !elements.emptyState) {
             return;
@@ -216,7 +231,22 @@
 
             const nameCell = document.createElement('td');
             nameCell.className = 'cell-primary';
-            nameCell.textContent = item.name || 'Unnamed game';
+            const gameCell = document.createElement('div');
+            gameCell.className = 'game-cell';
+            const coverWrapper = document.createElement('div');
+            coverWrapper.className = 'game-cover';
+            const coverImage = document.createElement('img');
+            coverImage.loading = 'lazy';
+            coverImage.decoding = 'async';
+            coverImage.alt = '';
+            coverImage.src = resolveCoverSource(item.cover);
+            coverWrapper.appendChild(coverImage);
+            const nameText = document.createElement('span');
+            nameText.className = 'game-name';
+            nameText.textContent = item.name || 'Unnamed game';
+            gameCell.appendChild(coverWrapper);
+            gameCell.appendChild(nameText);
+            nameCell.appendChild(gameCell);
             row.appendChild(nameCell);
 
             const idCell = document.createElement('td');
@@ -398,6 +428,7 @@
         if (modal.subtitle) {
             modal.subtitle.textContent = '';
         }
+        setModalCover(null, null);
         if (lastFocusedElement && document.body.contains(lastFocusedElement)) {
             lastFocusedElement.focus();
         }
@@ -478,6 +509,7 @@
             return;
         }
         showModalShell();
+        setModalCover(update.cover, update.name);
         if (modal.empty) {
             modal.empty.textContent = 'Loading changes…';
             modal.empty.hidden = false;
@@ -498,6 +530,7 @@
             setMetaValue(modal.igdbId, detail.igdb_id);
             setMetaValue(modal.igdbUpdated, formatDate(detail.igdb_updated_at));
             setMetaValue(modal.localEdited, formatDate(detail.local_last_edited_at));
+            setModalCover(detail.cover || update.cover, detail.name || update.name);
             if (modal.subtitle) {
                 const refreshed = formatDate(detail.refreshed_at);
                 modal.subtitle.textContent = detail.name

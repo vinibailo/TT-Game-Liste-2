@@ -31,29 +31,16 @@
                 </div>
                 <div class="header-info">
                     <h1 id="game-name"></h1>
-                    <div class="header-meta">
-                        <span class="meta-label">Game ID</span>
-                        <span id="game-id" class="meta-value">—</span>
-                    </div>
-                    <div class="header-meta">
-                        <span class="meta-label">IGDB ID</span>
-                        <span id="igdb-id" class="meta-value">—</span>
-                    </div>
-                    <form id="jump-form" class="jump-form" autocomplete="off" aria-label="Go to game by ID">
-                        <span class="meta-label">Go to ID</span>
-                        <div class="jump-controls">
-                            <input
-                                type="text"
-                                id="jump-input"
-                                inputmode="numeric"
-                                pattern="[0-9]*"
-                                autocomplete="off"
-                                placeholder="e.g. 42"
-                                aria-label="Enter a game ID to jump to"
-                            />
-                            <button type="submit" id="jump-submit" class="btn btn-outline">Go</button>
+                    <div class="header-meta-row">
+                        <div class="header-meta">
+                            <span class="meta-label">Game ID</span>
+                            <span id="game-id" class="meta-value">—</span>
                         </div>
-                    </form>
+                        <div class="header-meta">
+                            <span class="meta-label">IGDB ID</span>
+                            <span id="igdb-id" class="meta-value">—</span>
+                        </div>
+                    </div>
                 </div>
                 <nav class="action-row" id="action-bar" aria-label="Game actions">
                     <button type="button" id="previous" class="btn btn-blue" aria-label="Previous">
@@ -86,6 +73,31 @@
                         </span>
                         <span class="btn-label">Reset</span>
                     </button>
+                    <details id="jump-menu" class="jump-menu">
+                        <summary class="btn btn-outline jump-summary">
+                            <span class="btn-icon" aria-hidden="true">
+                                <span class="material-symbols-rounded">search</span>
+                            </span>
+                            <span class="btn-label">Go to ID</span>
+                        </summary>
+                        <div class="jump-popover">
+                            <form id="jump-form" class="jump-form" autocomplete="off" aria-label="Go to game by ID">
+                                <label class="meta-label" for="jump-input">Game ID</label>
+                                <div class="jump-controls">
+                                    <input
+                                        type="text"
+                                        id="jump-input"
+                                        inputmode="numeric"
+                                        pattern="[0-9]*"
+                                        autocomplete="off"
+                                        placeholder="e.g. 42"
+                                        aria-label="Enter a game ID to jump to"
+                                    />
+                                    <button type="submit" id="jump-submit" class="btn btn-outline">Go</button>
+                                </div>
+                            </form>
+                        </div>
+                    </details>
                 </nav>
             </div>
             <div class="header-right">
