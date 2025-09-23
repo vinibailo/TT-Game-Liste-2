@@ -18,7 +18,10 @@ def _iter_source_rows() -> list[tuple[str, str]]:
     if games_df.empty:
         return []
     return [
-        (str(index), extract_igdb_id(row, allow_generic_id=True))
+        (
+            (str(row.get("Source Index", index)).strip() or str(index)),
+            extract_igdb_id(row, allow_generic_id=True),
+        )
         for index, row in games_df.iterrows()
     ]
 

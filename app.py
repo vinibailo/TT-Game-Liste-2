@@ -1514,6 +1514,7 @@ def open_image_auto_rotate(source: Any) -> Image.Image:
 
 def load_games() -> pd.DataFrame:
     columns = [
+        'Source Index',
         'Name',
         'Summary',
         'First Launch Date',
@@ -1528,130 +1529,214 @@ def load_games() -> pd.DataFrame:
         'IGDB ID',
         'igdb_id',
     ]
-    try:
-        access_token, client_id = exchange_twitch_credentials()
-    except Exception as exc:
-        logger.warning(
-            "Unable to obtain Twitch credentials for IGDB fetch: %s", exc
-        )
-        return pd.DataFrame(columns=columns)
 
-    page_size = _igdb_page_size()
-    offset = 0
-    raw_items: list[Mapping[str, Any]] = []
+    def _finalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=columns)
 
-    while True:
-        query = (
-            'fields '
-            'id,name,summary,first_release_date,total_rating_count,rating_count,'
-            'genres.name,platforms.name,game_modes.name,category,'
-            'involved_companies.company.name,involved_companies.developer,'
-            'involved_companies.publisher,cover.image_id; '
-            f'limit {page_size}; '
-            f'offset {offset}; '
-            'sort total_rating_count desc;'
-        )
-        request = Request(
-            'https://api.igdb.com/v4/games',
-            data=query.encode('utf-8'),
-            method='POST',
-        )
-        request.add_header('Client-ID', client_id)
-        request.add_header('Authorization', f'Bearer {access_token}')
-        request.add_header('Accept', 'application/json')
-        request.add_header('User-Agent', IGDB_USER_AGENT)
+        df = df.copy()
 
-        response_bytes = b''
+        if 'Source Index' in df.columns:
+            def _coerce_source(value: Any) -> str:
+                try:
+                    return str(int(str(value).strip()))
+                except (TypeError, ValueError):
+                    text = str(value).strip() if value is not None else ''
+                    return text
+
+            df['Source Index'] = df['Source Index'].apply(_coerce_source)
+        else:
+            df.insert(0, 'Source Index', [str(i) for i in range(len(df))])
+
+        df = df.reset_index(drop=True)
+
+        if 'igdb_id' in df.columns:
+            df['igdb_id'] = df['igdb_id'].fillna('').astype(str)
+        else:
+            df['igdb_id'] = ''
+
+        df['IGDB ID'] = df['igdb_id']
+
+        if 'Rating Count' in df.columns:
+            df['Rating Count'] = (
+                pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
+            )
+        else:
+            df['Rating Count'] = 0
+
+        for column in columns:
+            if column not in df.columns:
+                df[column] = '' if column != 'Rating Count' else 0
+
+        ordered_columns = [col for col in columns if col in df.columns]
+        df = df[ordered_columns]
+        return df
+
+    def _load_from_db() -> tuple[pd.DataFrame, bool]:
+        with db_lock:
+            conn = get_db()
+            try:
+                cur = conn.execute('SELECT COUNT(*) FROM processed_games')
+            except sqlite3.OperationalError:
+                return pd.DataFrame(columns=columns), False
+            row = cur.fetchone()
+            total = row[0] if row else 0
+            if not total:
+                return pd.DataFrame(columns=columns), False
+
+            processed_columns = get_processed_games_columns(conn)
+            select_parts: list[str] = []
+            for column in columns:
+                if column == 'IGDB ID':
+                    continue
+                identifier = _quote_identifier(column)
+                if column in processed_columns:
+                    select_parts.append(identifier)
+                else:
+                    select_parts.append(f'NULL AS {identifier}')
+
+            query = (
+                'SELECT '
+                + ', '.join(select_parts)
+                + ' FROM processed_games ORDER BY CAST("Source Index" AS INTEGER)'
+            )
+            df = pd.read_sql_query(query, conn)
+
+        return _finalize_dataframe(df), True
+
+    def _load_from_igdb() -> pd.DataFrame:
         try:
-            with urlopen(request) as response:
-                response_bytes = response.read()
-        except HTTPError as exc:
+            access_token, client_id = exchange_twitch_credentials()
+        except Exception as exc:
             logger.warning(
-                "IGDB request failed while loading games: %s",
-                _read_http_error(exc),
+                "Unable to obtain Twitch credentials for IGDB fetch: %s", exc
             )
             return pd.DataFrame(columns=columns)
-        except Exception as exc:
-            logger.warning("Failed to query IGDB while loading games: %s", exc)
-            return pd.DataFrame(columns=columns)
 
-        try:
-            payload = json.loads(response_bytes.decode('utf-8'))
-        except Exception as exc:
-            logger.warning("Failed to decode IGDB payload: %s", exc)
-            return pd.DataFrame(columns=columns)
+        page_size = _igdb_page_size()
+        offset = 0
+        raw_items: list[Mapping[str, Any]] = []
 
-        if not payload:
-            break
-        if not isinstance(payload, list):
-            logger.warning(
-                "Unexpected IGDB payload type: %s", type(payload).__name__
+        while True:
+            query = (
+                'fields '
+                'id,name,summary,first_release_date,total_rating_count,rating_count,'
+                'genres.name,platforms.name,game_modes.name,category,'
+                'involved_companies.company.name,involved_companies.developer,'
+                'involved_companies.publisher,cover.image_id; '
+                f'limit {page_size}; '
+                f'offset {offset}; '
+                'sort total_rating_count desc;'
             )
-            break
-        for item in payload:
-            if isinstance(item, Mapping):
-                raw_items.append(item)
-        offset += len(payload)
+            request = Request(
+                'https://api.igdb.com/v4/games',
+                data=query.encode('utf-8'),
+                method='POST',
+            )
+            request.add_header('Client-ID', client_id)
+            request.add_header('Authorization', f'Bearer {access_token}')
+            request.add_header('Accept', 'application/json')
+            request.add_header('User-Agent', IGDB_USER_AGENT)
 
-    records: list[dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, Mapping):
-            continue
-        name_value = item.get('name')
-        name = str(name_value).strip() if name_value is not None else ''
-        if not name:
-            continue
-        summary_value = item.get('summary')
-        summary = (
-            str(summary_value).strip() if summary_value is not None else ''
-        )
-        release_date = _format_first_release_date(
-            item.get('first_release_date')
-        )
-        category = _igdb_category_display(item.get('category'))
-        companies = item.get('involved_companies')
-        developers = ', '.join(_collect_company_names(companies, 'developer'))
-        publishers = ', '.join(_collect_company_names(companies, 'publisher'))
-        genres = _format_name_list(item.get('genres'))
-        game_modes = _format_name_list(item.get('game_modes'))
-        platforms = _format_name_list(item.get('platforms'))
-        cover_url = _cover_url_from_cover(item.get('cover'))
-        rating_count = _coerce_rating_count(
-            item.get('total_rating_count'), item.get('rating_count')
-        )
-        igdb_id = coerce_igdb_id(item.get('id')) if 'id' in item else ''
+            response_bytes = b''
+            try:
+                with urlopen(request) as response:
+                    response_bytes = response.read()
+            except HTTPError as exc:
+                logger.warning(
+                    "IGDB request failed while loading games: %s",
+                    _read_http_error(exc),
+                )
+                return pd.DataFrame(columns=columns)
+            except Exception as exc:
+                logger.warning("Failed to query IGDB while loading games: %s", exc)
+                return pd.DataFrame(columns=columns)
 
-        records.append(
-            {
-                'Name': name,
-                'Summary': summary,
-                'First Launch Date': release_date,
-                'Category': category,
-                'Developers': developers,
-                'Publishers': publishers,
-                'Genres': genres,
-                'Game Modes': game_modes,
-                'Platforms': platforms,
-                'Large Cover Image (URL)': cover_url,
-                'Rating Count': rating_count if rating_count is not None else 0,
-                'IGDB ID': igdb_id,
-                'igdb_id': igdb_id,
-            }
-        )
+            try:
+                payload = json.loads(response_bytes.decode('utf-8'))
+            except Exception as exc:
+                logger.warning("Failed to decode IGDB payload: %s", exc)
+                return pd.DataFrame(columns=columns)
 
-    df = pd.DataFrame(records, columns=columns)
-    if 'Rating Count' in df.columns:
-        df['Rating Count'] = (
-            pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
-        )
-        df = df.sort_values(
-            by='Rating Count', ascending=False, kind='mergesort'
-        )
-    for col in ('IGDB ID', 'igdb_id'):
-        if col in df.columns:
-            df[col] = df[col].fillna('').astype(str)
-    df = df.reset_index(drop=True)
-    return df
+            if not payload:
+                break
+            if not isinstance(payload, list):
+                logger.warning(
+                    "Unexpected IGDB payload type: %s", type(payload).__name__
+                )
+                break
+            for item in payload:
+                if isinstance(item, Mapping):
+                    raw_items.append(item)
+            offset += len(payload)
+
+        records: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                continue
+            name_value = item.get('name')
+            name = str(name_value).strip() if name_value is not None else ''
+            if not name:
+                continue
+            summary_value = item.get('summary')
+            summary = (
+                str(summary_value).strip() if summary_value is not None else ''
+            )
+            release_date = _format_first_release_date(
+                item.get('first_release_date')
+            )
+            category = _igdb_category_display(item.get('category'))
+            companies = item.get('involved_companies')
+            developers = ', '.join(_collect_company_names(companies, 'developer'))
+            publishers = ', '.join(_collect_company_names(companies, 'publisher'))
+            genres = _format_name_list(item.get('genres'))
+            game_modes = _format_name_list(item.get('game_modes'))
+            platforms = _format_name_list(item.get('platforms'))
+            cover_url = _cover_url_from_cover(item.get('cover'))
+            rating_count = _coerce_rating_count(
+                item.get('total_rating_count'), item.get('rating_count')
+            )
+            igdb_id = coerce_igdb_id(item.get('id')) if 'id' in item else ''
+
+            records.append(
+                {
+                    'Name': name,
+                    'Summary': summary,
+                    'First Launch Date': release_date,
+                    'Category': category,
+                    'Developers': developers,
+                    'Publishers': publishers,
+                    'Genres': genres,
+                    'Game Modes': game_modes,
+                    'Platforms': platforms,
+                    'Large Cover Image (URL)': cover_url,
+                    'Rating Count': rating_count if rating_count is not None else 0,
+                    'IGDB ID': igdb_id,
+                    'igdb_id': igdb_id,
+                }
+            )
+
+        df = pd.DataFrame(records)
+        if df.empty:
+            return pd.DataFrame(columns=columns)
+
+        df.insert(0, 'Source Index', [str(i) for i in range(len(df))])
+        if 'Rating Count' in df.columns:
+            df['Rating Count'] = (
+                pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
+            )
+            df = df.sort_values(
+                by='Rating Count', ascending=False, kind='mergesort'
+            ).reset_index(drop=True)
+            df['Source Index'] = [str(i) for i in range(len(df))]
+
+        return _finalize_dataframe(df)
+
+    db_frame, has_rows = _load_from_db()
+    if has_rows:
+        return db_frame
+
+    return _load_from_igdb()
 
 
 
