@@ -1240,7 +1240,7 @@ def _init_db() -> None:
                         ),
                     )
 
-            conn.execute(
+            cleanup_cursor = conn.execute(
                 '''
                 DELETE FROM igdb_updates
                 WHERE processed_game_id IS NULL
@@ -1250,6 +1250,11 @@ def _init_db() -> None:
                         WHERE processed_games."ID" = igdb_updates.processed_game_id
                     )
                 '''
+            )
+            logger.info(
+                "Startup cleanup removed %d orphan igdb_update rows; database may still"
+                " require manual attention.",
+                cleanup_cursor.rowcount,
             )
 
             cur = conn.execute(
@@ -1273,16 +1278,30 @@ def _init_db() -> None:
                         game_id = int(text)
                 except (TypeError, ValueError):
                     continue
-                conn.execute(
-                    '''INSERT OR IGNORE INTO igdb_updates (
-                        processed_game_id, igdb_id, local_last_edited_at
-                    ) VALUES (?, ?, ?)''',
-                    (
-                        game_id,
-                        str(igdb_id_value),
-                        last_edit,
-                    ),
+                guard_cursor = conn.execute(
+                    'SELECT 1 FROM processed_games WHERE "ID"=?', (game_id,)
                 )
+                if guard_cursor.fetchone() is None:
+                    continue
+
+                try:
+                    conn.execute(
+                        '''INSERT OR IGNORE INTO igdb_updates (
+                            processed_game_id, igdb_id, local_last_edited_at
+                        ) VALUES (?, ?, ?)''',
+                        (
+                            game_id,
+                            str(igdb_id_value),
+                            last_edit,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    logger.warning(
+                        "Failed to reseed igdb_updates for processed_game_id=%s due to"
+                        " integrity error.",
+                        game_id,
+                    )
+                    continue
     finally:
         conn.close()
 
