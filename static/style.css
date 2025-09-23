@@ -844,7 +844,7 @@ textarea {
 
 .game-cover {
   width: 56px;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 1 / 1;
   border-radius: 12px;
   overflow: hidden;
   background: rgba(148, 163, 184, 0.18);
@@ -1007,7 +1007,7 @@ textarea {
 
 .modal-cover {
   width: 140px;
-  aspect-ratio: 3 / 4;
+  aspect-ratio: 1 / 1;
   border-radius: 18px;
   overflow: hidden;
   background: rgba(148, 163, 184, 0.16);
