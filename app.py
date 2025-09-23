@@ -147,6 +147,164 @@ DEFAULT_IGDB_USER_AGENT = 'TT-Game-Liste/1.0 (support@example.com)'
 IGDB_USER_AGENT = os.environ.get('IGDB_USER_AGENT') or DEFAULT_IGDB_USER_AGENT
 IGDB_BATCH_SIZE = 500
 
+IGDB_CATEGORY_LABELS = {
+    0: 'Main Game',
+    1: 'DLC / Add-on',
+    2: 'Expansion',
+    3: 'Bundle',
+    4: 'Standalone Expansion',
+    5: 'Mod',
+    6: 'Episode',
+    7: 'Season',
+    8: 'Remake',
+    9: 'Remaster',
+    10: 'Expanded Game',
+    11: 'Port',
+    12: 'Fork',
+    13: 'Pack',
+    14: 'Update',
+}
+
+
+def _igdb_page_size() -> int:
+    try:
+        size = int(IGDB_BATCH_SIZE)
+    except (TypeError, ValueError):
+        return 500
+    if size <= 0:
+        return 500
+    return min(size, 500)
+
+
+def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
+def _format_name_list(value: Any) -> str:
+    return ', '.join(_dedupe_preserve_order(_parse_iterable(value)))
+
+
+def _collect_company_names(
+    companies: Any, role_key: str
+) -> list[str]:  # pragma: no cover - simple data formatter
+    names: list[str] = []
+    if isinstance(companies, list):
+        for company in companies:
+            if not isinstance(company, Mapping):
+                continue
+            if not company.get(role_key):
+                continue
+            company_obj = company.get('company')
+            name_value: Any = None
+            if isinstance(company_obj, Mapping):
+                name_value = company_obj.get('name')
+            elif isinstance(company_obj, str):
+                name_value = company_obj
+            if not name_value:
+                continue
+            text = str(name_value).strip()
+            if text:
+                names.append(text)
+    return _dedupe_preserve_order(names)
+
+
+def _format_first_release_date(value: Any) -> str:
+    if value in (None, '', 0):
+        return ''
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        try:
+            timestamp = float(str(value).strip())
+        except (TypeError, ValueError):
+            return ''
+    if timestamp <= 0:
+        return ''
+    try:
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return ''
+    return dt.date().isoformat()
+
+
+def _cover_url_from_cover(value: Any) -> str:
+    image_id: str | None = None
+    if isinstance(value, Mapping):
+        raw_id = value.get('image_id')
+        if isinstance(raw_id, str):
+            image_id = raw_id.strip()
+        elif raw_id is not None:
+            image_id = str(raw_id).strip()
+    elif isinstance(value, str):
+        image_id = value.strip()
+    elif value is not None:
+        image_id = str(value).strip()
+    if not image_id:
+        return ''
+    return (
+        'https://images.igdb.com/igdb/image/upload/'
+        f't_cover_big/{image_id}.jpg'
+    )
+
+
+def _igdb_category_display(value: Any) -> str:
+    if value in (None, ''):
+        return ''
+    try:
+        key = int(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    return IGDB_CATEGORY_LABELS.get(key, 'Other')
+
+
+def _coerce_rating_count(primary: Any, secondary: Any) -> int | None:
+    for candidate in (primary, secondary):
+        if candidate in (None, ''):
+            continue
+        if isinstance(candidate, bool):
+            continue
+        if isinstance(candidate, numbers.Integral):
+            return int(candidate)
+        if isinstance(candidate, numbers.Real):
+            return int(float(candidate))
+        try:
+            text = str(candidate).strip()
+            if not text:
+                continue
+            return int(float(text))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _read_http_error(exc: HTTPError) -> str:
+    message = ''
+    try:
+        data = exc.read()
+    except Exception:  # pragma: no cover - best effort logging
+        data = b''
+    if data:
+        try:
+            message = data.decode('utf-8', errors='replace').strip()
+        except Exception:  # pragma: no cover - unexpected decoding failure
+            message = ''
+    if not message and getattr(exc, 'reason', None):
+        message = str(exc.reason)
+    if message:
+        return f"{exc.code} {message}".strip()
+    return str(exc)
+
 
 def _normalize_translation_key(value: str) -> str:
     key = str(value).strip().casefold()
@@ -1355,20 +1513,143 @@ def open_image_auto_rotate(source: Any) -> Image.Image:
 
 
 def load_games() -> pd.DataFrame:
-    if not os.path.exists(INPUT_XLSX):
-        logger.warning("%s not found", INPUT_XLSX)
-        return pd.DataFrame()
+    columns = [
+        'Name',
+        'Summary',
+        'First Launch Date',
+        'Category',
+        'Developers',
+        'Publishers',
+        'Genres',
+        'Game Modes',
+        'Platforms',
+        'Large Cover Image (URL)',
+        'Rating Count',
+        'IGDB ID',
+        'igdb_id',
+    ]
     try:
-        df = pd.read_excel(INPUT_XLSX)
-    except Exception:
-        logger.exception("Failed to read %s", INPUT_XLSX)
-        return pd.DataFrame()
-    df = df.dropna(how='all')
-    if 'Name' in df.columns:
-        df = df[df['Name'].notna()]
+        access_token, client_id = exchange_twitch_credentials()
+    except Exception as exc:
+        logger.warning(
+            "Unable to obtain Twitch credentials for IGDB fetch: %s", exc
+        )
+        return pd.DataFrame(columns=columns)
+
+    page_size = _igdb_page_size()
+    offset = 0
+    raw_items: list[Mapping[str, Any]] = []
+
+    while True:
+        query = (
+            'fields '
+            'id,name,summary,first_release_date,total_rating_count,rating_count,'
+            'genres.name,platforms.name,game_modes.name,category,'
+            'involved_companies.company.name,involved_companies.developer,'
+            'involved_companies.publisher,cover.image_id; '
+            f'limit {page_size}; '
+            f'offset {offset}; '
+            'sort total_rating_count desc;'
+        )
+        request = Request(
+            'https://api.igdb.com/v4/games',
+            data=query.encode('utf-8'),
+            method='POST',
+        )
+        request.add_header('Client-ID', client_id)
+        request.add_header('Authorization', f'Bearer {access_token}')
+        request.add_header('Accept', 'application/json')
+        request.add_header('User-Agent', IGDB_USER_AGENT)
+
+        response_bytes = b''
+        try:
+            with urlopen(request) as response:
+                response_bytes = response.read()
+        except HTTPError as exc:
+            logger.warning(
+                "IGDB request failed while loading games: %s",
+                _read_http_error(exc),
+            )
+            return pd.DataFrame(columns=columns)
+        except Exception as exc:
+            logger.warning("Failed to query IGDB while loading games: %s", exc)
+            return pd.DataFrame(columns=columns)
+
+        try:
+            payload = json.loads(response_bytes.decode('utf-8'))
+        except Exception as exc:
+            logger.warning("Failed to decode IGDB payload: %s", exc)
+            return pd.DataFrame(columns=columns)
+
+        if not payload:
+            break
+        if not isinstance(payload, list):
+            logger.warning(
+                "Unexpected IGDB payload type: %s", type(payload).__name__
+            )
+            break
+        for item in payload:
+            if isinstance(item, Mapping):
+                raw_items.append(item)
+        offset += len(payload)
+
+    records: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, Mapping):
+            continue
+        name_value = item.get('name')
+        name = str(name_value).strip() if name_value is not None else ''
+        if not name:
+            continue
+        summary_value = item.get('summary')
+        summary = (
+            str(summary_value).strip() if summary_value is not None else ''
+        )
+        release_date = _format_first_release_date(
+            item.get('first_release_date')
+        )
+        category = _igdb_category_display(item.get('category'))
+        companies = item.get('involved_companies')
+        developers = ', '.join(_collect_company_names(companies, 'developer'))
+        publishers = ', '.join(_collect_company_names(companies, 'publisher'))
+        genres = _format_name_list(item.get('genres'))
+        game_modes = _format_name_list(item.get('game_modes'))
+        platforms = _format_name_list(item.get('platforms'))
+        cover_url = _cover_url_from_cover(item.get('cover'))
+        rating_count = _coerce_rating_count(
+            item.get('total_rating_count'), item.get('rating_count')
+        )
+        igdb_id = coerce_igdb_id(item.get('id')) if 'id' in item else ''
+
+        records.append(
+            {
+                'Name': name,
+                'Summary': summary,
+                'First Launch Date': release_date,
+                'Category': category,
+                'Developers': developers,
+                'Publishers': publishers,
+                'Genres': genres,
+                'Game Modes': game_modes,
+                'Platforms': platforms,
+                'Large Cover Image (URL)': cover_url,
+                'Rating Count': rating_count if rating_count is not None else 0,
+                'IGDB ID': igdb_id,
+                'igdb_id': igdb_id,
+            }
+        )
+
+    df = pd.DataFrame(records, columns=columns)
     if 'Rating Count' in df.columns:
-        df['Rating Count'] = pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
-        df = df.sort_values(by='Rating Count', ascending=False, kind='mergesort')
+        df['Rating Count'] = (
+            pd.to_numeric(df['Rating Count'], errors='coerce').fillna(0)
+        )
+        df = df.sort_values(
+            by='Rating Count', ascending=False, kind='mergesort'
+        )
+    for col in ('IGDB ID', 'igdb_id'):
+        if col in df.columns:
+            df[col] = df[col].fillna('').astype(str)
     df = df.reset_index(drop=True)
     return df
 
