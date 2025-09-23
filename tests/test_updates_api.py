@@ -147,6 +147,8 @@ def test_refresh_parses_involved_companies(tmp_path):
         app_module,
         Developers='Local Dev',
         Publishers='Local Pub',
+        Genres='Ação e Aventura, Tiro',
+        **{'Game Modes': 'Single-player, Cooperativo (Co-op), Competitivo (PvP), Multiplayer local, Multiplayer online'},
     )
     client = app_module.app.test_client()
     authenticate(client)
@@ -159,16 +161,20 @@ def test_refresh_parses_involved_companies(tmp_path):
                 "id": 100,
                 "updated_at": 1_700_000_000,
                 "genres": [
-                    {"name": "Adventure"},
                     {"name": "Action"},
+                    {"name": "Adventure"},
+                    {"name": "Shooter"},
                 ],
                 "platforms": [
                     {"name": "PC"},
                     {"name": "Switch"},
                 ],
                 "game_modes": [
-                    {"name": "Single-player"},
-                    {"name": "Co-op"},
+                    {"name": "Single player"},
+                    {"name": "Multiplayer"},
+                    {"name": "Split screen"},
+                    {"name": "Battle Royale"},
+                    {"name": "Online co-op"},
                 ],
                 "involved_companies": [
                     {"company": {"name": "Remote Dev Co"}, "developer": True},
@@ -218,16 +224,20 @@ def test_refresh_parses_involved_companies(tmp_path):
         'Dual Role Co',
     ]
     assert detail_payload['igdb_payload']['genres'] == [
-        'Adventure',
         'Action',
+        'Adventure',
+        'Shooter',
     ]
     assert detail_payload['igdb_payload']['platforms'] == [
         'PC',
         'Switch',
     ]
     assert detail_payload['igdb_payload']['game_modes'] == [
-        'Single-player',
-        'Co-op',
+        'Single player',
+        'Multiplayer',
+        'Split screen',
+        'Battle Royale',
+        'Online co-op',
     ]
     diff = detail_payload['diff']
     assert sorted(diff['Developers']['added']) == [
@@ -238,12 +248,10 @@ def test_refresh_parses_involved_companies(tmp_path):
     assert diff['Developers']['removed'] == ['Local Dev']
     assert sorted(diff['Publishers']['added']) == ['Dual Role Co', 'Remote Pub Co']
     assert diff['Publishers']['removed'] == ['Local Pub']
-    assert diff['Genres']['added'] == ['Adventure']
-    assert diff['Genres']['removed'] == []
+    assert 'Genres' not in diff
     assert diff['Platforms']['added'] == ['Switch']
     assert diff['Platforms']['removed'] == []
-    assert diff['Game Modes']['added'] == ['Co-op']
-    assert diff['Game Modes']['removed'] == []
+    assert 'Game Modes' not in diff
 
 
 def test_build_igdb_diff_formats_first_release_date(tmp_path):
@@ -415,7 +423,8 @@ def test_updates_detail_returns_diff(tmp_path):
     payload = detail.get_json()
     assert payload['igdb_payload']['summary'] == 'Remote summary'
     assert payload['diff']['Summary']['added'] == 'Remote summary'
-    assert 'Adventure' in payload['diff']['Genres']['added']
+    assert payload['diff']['Genres']['added'] == ['Ação e Aventura']
+    assert payload['diff']['Genres']['removed'] == ['Action']
     assert payload['processed_game_id'] == 1
     assert payload['igdb_id'] == '100'
 

@@ -7,7 +7,7 @@ import sqlite3
 import numbers
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from threading import Lock
 import logging
 
@@ -146,6 +146,127 @@ APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
 DEFAULT_IGDB_USER_AGENT = 'TT-Game-Liste/1.0 (support@example.com)'
 IGDB_USER_AGENT = os.environ.get('IGDB_USER_AGENT') or DEFAULT_IGDB_USER_AGENT
 IGDB_BATCH_SIZE = 500
+
+
+def _normalize_translation_key(value: str) -> str:
+    key = str(value).strip().casefold()
+    for old, new in (
+        ('&', ' and '),
+        ('/', ' '),
+        ('-', ' '),
+        ('_', ' '),
+        ("'", ''),
+        (',', ' '),
+        ('.', ' '),
+        ('+', ' '),
+    ):
+        key = key.replace(old, new)
+    for char in '()[]{}':
+        key = key.replace(char, ' ')
+    key = ''.join(ch for ch in key if ch.isalnum() or ch.isspace())
+    return ' '.join(key.split())
+
+
+IGDB_GENRE_TRANSLATIONS: dict[str, tuple[str, ...]] = {
+    _normalize_translation_key('Action'): ('Ação e Aventura',),
+    _normalize_translation_key('Action Adventure'): ('Ação e Aventura',),
+    _normalize_translation_key('Adventure'): ('Ação e Aventura',),
+    _normalize_translation_key('Point-and-click'): ('Ação e Aventura',),
+    _normalize_translation_key('Stealth'): ('Ação e Aventura',),
+    _normalize_translation_key('Survival'): ('Ação e Aventura',),
+    _normalize_translation_key('Platform'): ('Plataformas',),
+    _normalize_translation_key('Platformer'): ('Plataformas',),
+    _normalize_translation_key('Shooter'): ('Tiro',),
+    _normalize_translation_key("Shoot 'em up"): ('Tiro',),
+    _normalize_translation_key('Fighting'): ('Luta',),
+    _normalize_translation_key("Hack and slash/Beat 'em up"): ('Luta',),
+    _normalize_translation_key('Brawler'): ('Luta',),
+    _normalize_translation_key('Racing'): ('Corrida e Voo',),
+    _normalize_translation_key('Driving Racing'): ('Corrida e Voo',),
+    _normalize_translation_key('Flight'): ('Corrida e Voo',),
+    _normalize_translation_key('Simulator'): ('Simulação',),
+    _normalize_translation_key('Simulation'): ('Simulação',),
+    _normalize_translation_key('Strategy'): ('Estratégia',),
+    _normalize_translation_key('Real Time Strategy (RTS)'): ('Estratégia',),
+    _normalize_translation_key('Turn-based strategy (TBS)'): ('Estratégia',),
+    _normalize_translation_key('Tactical'): ('Estratégia',),
+    _normalize_translation_key('MOBA'): ('Multijogador',),
+    _normalize_translation_key('Massively Multiplayer Online (MMO)'): ('Multijogador',),
+    _normalize_translation_key('Battle Royale'): ('Multijogador',),
+    _normalize_translation_key('MMORPG'): ('RPG', 'Multijogador'),
+    _normalize_translation_key('Role-playing (RPG)'): ('RPG',),
+    _normalize_translation_key('Role playing'): ('RPG',),
+    _normalize_translation_key('Roguelike'): ('RPG',),
+    _normalize_translation_key('Roguelite'): ('RPG',),
+    _normalize_translation_key('Puzzle'): ('Quebra-cabeça e Trivia',),
+    _normalize_translation_key('Quiz/Trivia'): ('Quebra-cabeça e Trivia',),
+    _normalize_translation_key('Trivia'): ('Quebra-cabeça e Trivia',),
+    _normalize_translation_key('Card & Board Game'): ('Cartas e Tabuleiro',),
+    _normalize_translation_key('Board game'): ('Cartas e Tabuleiro',),
+    _normalize_translation_key('Tabletop'): ('Cartas e Tabuleiro',),
+    _normalize_translation_key('Family'): ('Família e Crianças',),
+    _normalize_translation_key('Kids'): ('Família e Crianças',),
+    _normalize_translation_key('Educational'): ('Família e Crianças',),
+    _normalize_translation_key('Party'): ('Família e Crianças',),
+    _normalize_translation_key('Music'): ('Família e Crianças',),
+    _normalize_translation_key('Indie'): ('Indie',),
+    _normalize_translation_key('Arcade'): ('Clássicos',),
+    _normalize_translation_key('Pinball'): ('Clássicos',),
+    _normalize_translation_key('Classic'): ('Clássicos',),
+    _normalize_translation_key('Visual Novel'): ('Visual Novel',),
+    _normalize_translation_key('ação e aventura'): ('Ação e Aventura',),
+    _normalize_translation_key('plataformas'): ('Plataformas',),
+    _normalize_translation_key('tiro'): ('Tiro',),
+    _normalize_translation_key('luta'): ('Luta',),
+    _normalize_translation_key('corrida e voo'): ('Corrida e Voo',),
+    _normalize_translation_key('simulação'): ('Simulação',),
+    _normalize_translation_key('estratégia'): ('Estratégia',),
+    _normalize_translation_key('multijogador'): ('Multijogador',),
+    _normalize_translation_key('rpg'): ('RPG',),
+    _normalize_translation_key('quebra-cabeça e trivia'): ('Quebra-cabeça e Trivia',),
+    _normalize_translation_key('cartas e tabuleiro'): ('Cartas e Tabuleiro',),
+    _normalize_translation_key('família e crianças'): ('Família e Crianças',),
+    _normalize_translation_key('indie'): ('Indie',),
+    _normalize_translation_key('clássicos'): ('Clássicos',),
+    _normalize_translation_key('visual novel'): ('Visual Novel',),
+}
+
+
+IGDB_MODE_TRANSLATIONS: dict[str, tuple[str, ...]] = {
+    _normalize_translation_key('Single player'): ('Single-player',),
+    _normalize_translation_key('Single-player'): ('Single-player',),
+    _normalize_translation_key('Singleplayer'): ('Single-player',),
+    _normalize_translation_key('Solo'): ('Single-player',),
+    _normalize_translation_key('Campaign'): ('Single-player',),
+    _normalize_translation_key('Co-operative'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('Cooperative'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('Co-op'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('Co op'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('Local co-op'): ('Cooperativo (Co-op)', 'Multiplayer local'),
+    _normalize_translation_key('Offline co-op'): ('Cooperativo (Co-op)', 'Multiplayer local'),
+    _normalize_translation_key('Online co-op'): ('Cooperativo (Co-op)', 'Multiplayer online'),
+    _normalize_translation_key('Co-op campaign'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('Multiplayer'): ('Multiplayer online',),
+    _normalize_translation_key('Online multiplayer'): ('Multiplayer online',),
+    _normalize_translation_key('Multiplayer online'): ('Multiplayer online',),
+    _normalize_translation_key('Offline multiplayer'): ('Multiplayer local',),
+    _normalize_translation_key('Local multiplayer'): ('Multiplayer local',),
+    _normalize_translation_key('Split screen'): ('Multiplayer local',),
+    _normalize_translation_key('Shared/Split screen'): ('Multiplayer local',),
+    _normalize_translation_key('PvP'): ('Competitivo (PvP)',),
+    _normalize_translation_key('Player vs Player'): ('Competitivo (PvP)',),
+    _normalize_translation_key('Versus'): ('Competitivo (PvP)',),
+    _normalize_translation_key('Competitive'): ('Competitivo (PvP)',),
+    _normalize_translation_key('Battle Royale'): ('Competitivo (PvP)', 'Multiplayer online'),
+    _normalize_translation_key('Massively Multiplayer Online (MMO)'): ('Multiplayer online',),
+    _normalize_translation_key('MMO'): ('Multiplayer online',),
+    _normalize_translation_key('MMORPG'): ('Cooperativo (Co-op)', 'Multiplayer online'),
+    _normalize_translation_key('single-player'): ('Single-player',),
+    _normalize_translation_key('cooperativo (co-op)'): ('Cooperativo (Co-op)',),
+    _normalize_translation_key('multiplayer local'): ('Multiplayer local',),
+    _normalize_translation_key('multiplayer online'): ('Multiplayer online',),
+    _normalize_translation_key('competitivo (pvp)'): ('Competitivo (PvP)',),
+}
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
@@ -191,6 +312,39 @@ def _parse_iterable(value: Any) -> list[str]:
         else:
             items.append(str(element).strip())
     return [item for item in items if item]
+
+
+def _map_igdb_values(
+    names: Iterable[str], translations: Mapping[str, tuple[str, ...]]
+) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for raw_name in names:
+        normalized = _normalize_lookup_name(raw_name)
+        if not normalized:
+            continue
+        key = _normalize_translation_key(normalized)
+        mapped = translations.get(key)
+        if not mapped:
+            mapped = (normalized,)
+        for candidate in mapped:
+            final = _normalize_lookup_name(candidate)
+            if not final:
+                continue
+            dedupe_key = final.casefold()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            results.append(final)
+    return results
+
+
+def _map_igdb_genres(names: Iterable[str]) -> list[str]:
+    return _map_igdb_values(names, IGDB_GENRE_TRANSLATIONS)
+
+
+def _map_igdb_modes(names: Iterable[str]) -> list[str]:
+    return _map_igdb_values(names, IGDB_MODE_TRANSLATIONS)
 
 
 def _parse_company_names(value: Any) -> list[str]:
@@ -1352,7 +1506,12 @@ def build_igdb_diff(
         remote_value = igdb_payload.get(igdb_field)
         local_value = processed_row.get(local_field)
         if field_type == 'list':
-            remote_set = set(_parse_iterable(remote_value))
+            remote_items = _parse_iterable(remote_value)
+            if local_field == 'Genres':
+                remote_items = _map_igdb_genres(remote_items)
+            elif local_field == 'Game Modes':
+                remote_items = _map_igdb_modes(remote_items)
+            remote_set = set(remote_items)
             local_set = set(
                 _extract_lookup_names_from_processed(processed_row, local_field)
             )
