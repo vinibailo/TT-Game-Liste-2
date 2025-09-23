@@ -1488,14 +1488,12 @@ def _normalize_timestamp(value: Any) -> str:
 
 IGDB_DIFF_FIELDS = {
     'name': ('Name', 'text'),
-    'summary': ('Summary', 'text'),
     'first_release_date': ('First Launch Date', 'timestamp'),
     'genres': ('Genres', 'list'),
     'platforms': ('Platforms', 'list'),
     'game_modes': ('Game Modes', 'list'),
     'developers': ('Developers', 'company_list'),
     'publishers': ('Publishers', 'company_list'),
-    'category': ('Category', 'text'),
 }
 
 

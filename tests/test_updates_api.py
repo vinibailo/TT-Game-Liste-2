@@ -422,9 +422,10 @@ def test_updates_detail_returns_diff(tmp_path):
     assert detail.status_code == 200
     payload = detail.get_json()
     assert payload['igdb_payload']['summary'] == 'Remote summary'
-    assert payload['diff']['Summary']['added'] == 'Remote summary'
+    assert 'Summary' not in payload['diff']
     assert payload['diff']['Genres']['added'] == ['Ação e Aventura']
     assert payload['diff']['Genres']['removed'] == ['Action']
+    assert 'Category' not in payload['diff']
     assert payload['processed_game_id'] == 1
     assert payload['igdb_id'] == '100'
 
