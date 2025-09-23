@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Utility to resync processed_games.db with igdb_all_games.xlsx."""
+"""Utility to align processed_games.db with the live IGDB source list."""
+
+from typing import Any
 
 from app import (
     load_games,
@@ -7,34 +9,62 @@ from app import (
     get_db,
     db_lock,
     extract_igdb_id,
+    coerce_igdb_id,
 )
 
 
+def _iter_source_rows() -> list[tuple[str, str]]:
+    games_df = load_games()
+    if games_df.empty:
+        return []
+    return [
+        (str(index), extract_igdb_id(row, allow_generic_id=True))
+        for index, row in games_df.iterrows()
+    ]
+
+
+def _normalize_existing_id(row: Any) -> str:
+    if row is None:
+        return ""
+    if isinstance(row, dict):
+        value = row.get("igdb_id")
+    else:
+        try:
+            value = row[0]
+        except Exception:
+            value = None
+    return coerce_igdb_id(value)
+
+
 def main() -> None:
-    df = load_games()
-    if df.empty:
-        print("No games loaded; nothing to resync.")
+    sources = _iter_source_rows()
+    if not sources:
+        print("No games returned from IGDB; nothing to resync.")
         return
 
     conn = get_db()
     with db_lock:
         with conn:
-            for idx in df.index:
-                src_index = str(idx)
-                row = df.iloc[idx]
-                igdb_id = extract_igdb_id(row, allow_generic_id=True)
+            for src_index, igdb_id in sources:
                 cur = conn.execute(
-                    'SELECT 1 FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "igdb_id" FROM processed_games WHERE "Source Index"=?',
                     (src_index,),
                 )
-                if cur.fetchone() is None:
+                row = cur.fetchone()
+                if row is None:
                     conn.execute(
                         'INSERT INTO processed_games ("Source Index", "igdb_id") VALUES (?, ?)',
                         (src_index, igdb_id or None),
                     )
-                elif igdb_id:
+                    continue
+
+                if not igdb_id:
+                    continue
+
+                existing_id = _normalize_existing_id(row)
+                if not existing_id:
                     conn.execute(
-                        """UPDATE processed_games SET "igdb_id"=? WHERE "Source Index"=? AND ("igdb_id" IS NULL OR "igdb_id" = '')""",
+                        'UPDATE processed_games SET "igdb_id"=? WHERE "Source Index"=?',
                         (igdb_id, src_index),
                     )
 

@@ -1,21 +1,10 @@
 import os
 import sqlite3
-import uuid
-import importlib.util
 from pathlib import Path
 
 import pandas as pd
 
-APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
-
-
-def load_app(tmp_path):
-    os.chdir(tmp_path)
-    module_name = f"app_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from tests.app_helpers import load_app
 
 
 def write_lookup_workbooks(directory: Path) -> None:
