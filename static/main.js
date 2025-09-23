@@ -30,6 +30,8 @@ const LOW_RESOLUTION_WARNING = 'Imagem menor que 1080px será ampliada.';
 const jumpForm = document.getElementById('jump-form');
 const jumpInput = document.getElementById('jump-input');
 const jumpSubmit = document.getElementById('jump-submit');
+const jumpMenu = document.getElementById('jump-menu');
+const jumpSummary = jumpMenu ? jumpMenu.querySelector('summary') : null;
 const urlSearchParams = new URLSearchParams(window.location.search);
 const initialGameIdParam = (() => {
     const value = urlSearchParams.get('game_id');
@@ -354,6 +356,17 @@ function setJumpControlsDisabled(state) {
     }
     if (jumpSubmit) {
         jumpSubmit.disabled = state;
+    }
+    if (jumpMenu) {
+        if (state) {
+            jumpMenu.open = false;
+            jumpMenu.setAttribute('data-disabled', 'true');
+        } else {
+            jumpMenu.removeAttribute('data-disabled');
+        }
+    }
+    if (jumpSummary) {
+        jumpSummary.setAttribute('aria-disabled', state ? 'true' : 'false');
     }
 }
 
@@ -795,6 +808,9 @@ async function goToGameById(event) {
     try {
         await requestGameById(idValue);
         jumpInput.value = '';
+        if (jumpMenu) {
+            jumpMenu.open = false;
+        }
     } catch (err) {
         console.error(err);
         const code = err && (err.code || err.message);
