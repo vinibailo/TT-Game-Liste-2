@@ -4707,6 +4707,181 @@ def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
     return results
 
 
+def _scan_duplicate_candidates(
+    rows: Iterable[sqlite3.Row],
+    *,
+    progress_callback: Callable[[int, int, int, int], None] | None = None,
+) -> tuple[list[sqlite3.Row], int, int, int]:
+    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in rows:
+        name_value = _normalize_text(row['Name']).casefold()
+        igdb_value = coerce_igdb_id(row['igdb_id'])
+        if not name_value or not igdb_value:
+            continue
+        groups.setdefault((name_value, igdb_value), []).append(row)
+
+    group_values = list(groups.values())
+    total_groups = len(group_values)
+
+    duplicate_groups = 0
+    skipped_groups = 0
+    candidates: list[sqlite3.Row] = []
+    for index, group in enumerate(group_values, start=1):
+        if len(group) <= 1:
+            continue
+        duplicate_groups += 1
+        processed_rows: list[sqlite3.Row] = []
+        unprocessed_rows: list[sqlite3.Row] = []
+        for entry in group:
+            summary_value = entry['Summary']
+            cover_value = entry['Cover Path']
+            if is_processed_game_done(summary_value, cover_value):
+                processed_rows.append(entry)
+            else:
+                unprocessed_rows.append(entry)
+        if not processed_rows or not unprocessed_rows:
+            skipped_groups += 1
+            continue
+        candidates.extend(unprocessed_rows)
+        if progress_callback is not None:
+            progress_callback(index, total_groups or len(groups), duplicate_groups, skipped_groups)
+
+    return candidates, duplicate_groups, skipped_groups, total_groups
+
+
+def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
+    global games_df, total_games, navigator
+
+    unique_ids = sorted({int(game_id) for game_id in ids_to_delete if str(game_id).strip()})
+    if not unique_ids:
+        remaining_total = len(games_df) if games_df is not None else total_games
+        return 0, remaining_total
+
+    placeholders = ','.join('?' for _ in unique_ids)
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            f'SELECT "ID", "Source Index" FROM processed_games WHERE "ID" IN ({placeholders})',
+            tuple(unique_ids),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        remaining_total = len(games_df) if games_df is not None else total_games
+        return 0, remaining_total
+
+    delete_params = [(row['ID'],) for row in rows]
+    raw_source_indices = [row['Source Index'] for row in rows if row['Source Index'] is not None]
+
+    with db_lock:
+        conn = get_db()
+        with conn:
+            conn.executemany(
+                'DELETE FROM igdb_updates WHERE processed_game_id=?',
+                delete_params,
+            )
+            conn.executemany(
+                'DELETE FROM processed_games WHERE "ID"=?',
+                delete_params,
+            )
+
+    canonical_indices: set[str] = set()
+    for value in raw_source_indices:
+        canonical = _canonical_source_index(value)
+        if canonical is not None:
+            canonical_indices.add(canonical)
+
+    removed_numeric = sorted(
+        {int(candidate) for candidate in canonical_indices if candidate.isdigit()}
+    )
+
+    positions_to_remove: set[int] = set()
+    for value in raw_source_indices:
+        position = get_position_for_source_index(value)
+        if position is None:
+            canonical = _canonical_source_index(value)
+            if canonical is not None and canonical != value:
+                position = get_position_for_source_index(canonical)
+        if position is not None:
+            positions_to_remove.add(position)
+
+    if games_df is not None:
+        if not games_df.empty and positions_to_remove:
+            drop_indices = sorted(positions_to_remove)
+            games_df = games_df.drop(games_df.index[drop_indices]).reset_index(drop=True)
+        if not games_df.empty:
+            if 'Source Index' in games_df.columns:
+                current_values = games_df['Source Index'].tolist()
+            else:
+                current_values = [str(idx) for idx in range(len(games_df))]
+            new_values: list[str] = []
+            for idx, value in enumerate(current_values):
+                canonical = _canonical_source_index(value)
+                if canonical is None:
+                    new_values.append(str(idx))
+                    continue
+                if canonical.isdigit():
+                    numeric_value = int(canonical)
+                    shift = bisect_left(removed_numeric, numeric_value)
+                    new_numeric = numeric_value - shift
+                    stripped = str(value).strip()
+                    if stripped.isdigit():
+                        formatted = str(new_numeric).zfill(len(stripped))
+                    else:
+                        formatted = str(new_numeric)
+                    new_values.append(formatted)
+                else:
+                    new_values.append(canonical)
+            games_df = games_df.copy()
+            games_df['Source Index'] = new_values
+        total_games = len(games_df)
+        try:
+            reset_source_index_cache()
+        except Exception:
+            pass
+    else:
+        total_games = 0
+
+    if removed_numeric:
+        with db_lock:
+            conn = get_db()
+            with conn:
+                cur = conn.execute(
+                    'SELECT "ID", "Source Index" FROM processed_games'
+                )
+                stored_rows = cur.fetchall()
+                for entry in stored_rows:
+                    canonical = _canonical_source_index(entry['Source Index'])
+                    if canonical is None or not canonical.isdigit():
+                        continue
+                    numeric_value = int(canonical)
+                    shift = bisect_left(removed_numeric, numeric_value)
+                    if shift <= 0:
+                        continue
+                    new_numeric = numeric_value - shift
+                    stored_text = str(entry['Source Index'])
+                    stripped = stored_text.strip()
+                    if stripped.isdigit():
+                        new_value = str(new_numeric).zfill(len(stripped))
+                    else:
+                        new_value = str(new_numeric)
+                    conn.execute(
+                        'UPDATE processed_games SET "Source Index"=? WHERE "ID"=?',
+                        (new_value, entry['ID']),
+                    )
+
+    normalize_processed_games()
+
+    try:
+        navigator = GameNavigator(total_games)
+    except Exception:
+        pass
+
+    remaining_total = total_games
+    removed_count = len(delete_params)
+    return removed_count, remaining_total
+
+
 def fetch_cached_updates() -> list[dict[str, Any]]:
     with db_lock:
         conn = get_db()
@@ -4732,10 +4907,35 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
                ORDER BY p."Name" COLLATE NOCASE
             '''
         )
-        rows = cur.fetchall()
+        update_rows = cur.fetchall()
+
+        duplicate_cur = conn.execute(
+            f'''SELECT
+                   p."ID",
+                   p."Source Index",
+                   p."Name",
+                   p."igdb_id",
+                   p."Summary",
+                   p."Cover Path",
+                   p.last_edited_at,
+                   {cover_url_select},
+                   cache.updated_at AS cache_updated_at
+               FROM processed_games p
+               LEFT JOIN {IGDB_CACHE_TABLE} cache ON cache.igdb_id = p."igdb_id"
+            '''
+        )
+        duplicate_rows = duplicate_cur.fetchall()
 
     updates: list[dict[str, Any]] = []
-    for row in rows:
+    existing_ids: set[int] = set()
+    for row in update_rows:
+        has_diff = bool(row['diff'])
+        try:
+            processed_id = int(row['processed_game_id'])
+        except (TypeError, ValueError):
+            processed_id = None
+        if processed_id is not None:
+            existing_ids.add(processed_id)
         updates.append(
             {
                 'processed_game_id': row['processed_game_id'],
@@ -4744,10 +4944,38 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
                 'local_last_edited_at': row['local_last_edited_at'],
                 'refreshed_at': row['refreshed_at'],
                 'name': row['game_name'],
-                'has_diff': bool(row['diff']),
+                'has_diff': has_diff,
                 'cover': load_cover_data(row['cover_path'], row['cover_url']),
+                'update_type': 'mismatch' if has_diff else None,
+                'detail_available': True,
             }
         )
+
+    duplicate_candidates, _, _, _ = _scan_duplicate_candidates(duplicate_rows)
+    for row in duplicate_candidates:
+        try:
+            processed_id = int(row['ID'])
+        except (TypeError, ValueError):
+            continue
+        if processed_id in existing_ids:
+            continue
+        existing_ids.add(processed_id)
+        igdb_updated = _normalize_timestamp(row['cache_updated_at']) if row['cache_updated_at'] else ''
+        updates.append(
+            {
+                'processed_game_id': processed_id,
+                'igdb_id': row['igdb_id'],
+                'igdb_updated_at': igdb_updated,
+                'local_last_edited_at': row['last_edited_at'],
+                'refreshed_at': None,
+                'name': row['Name'],
+                'has_diff': False,
+                'cover': load_cover_data(row['Cover Path'], row['cover_url']),
+                'update_type': 'duplicate',
+                'detail_available': False,
+            }
+        )
+
     return updates
 
 
@@ -5302,59 +5530,29 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
         )
         rows = cur.fetchall()
 
-    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
-    for row in rows:
-        name_value = _normalize_text(row['Name']).casefold()
-        igdb_value = coerce_igdb_id(row['igdb_id'])
-        if not name_value or not igdb_value:
-            continue
-        groups.setdefault((name_value, igdb_value), []).append(row)
-
-    group_values = list(groups.values())
-    total_groups = len(group_values)
-
-    duplicate_groups = 0
-    skipped_groups = 0
-    candidates: list[sqlite3.Row] = []
-    for index, group in enumerate(group_values, start=1):
-        if len(group) <= 1:
-            continue
-        duplicate_groups += 1
-        processed_rows: list[sqlite3.Row] = []
-        unprocessed_rows: list[sqlite3.Row] = []
-        for entry in group:
-            summary_value = entry['Summary']
-            cover_value = entry['Cover Path']
-            if is_processed_game_done(summary_value, cover_value):
-                processed_rows.append(entry)
-            else:
-                unprocessed_rows.append(entry)
-        if not processed_rows or not unprocessed_rows:
-            skipped_groups += 1
-            continue
-        candidates.extend(unprocessed_rows)
+    def _progress_callback(index: int, total_groups: int, duplicate_groups: int, skipped: int) -> None:
         update_progress(
             current=index,
-            total=total_groups or len(groups),
+            total=total_groups or len(rows) or 1,
             message='Evaluating duplicate groups…',
             data={
                 'phase': 'dedupe',
                 'duplicate_groups': duplicate_groups,
-                'skipped': skipped_groups,
+                'skipped': skipped,
             },
         )
 
+    candidates, duplicate_groups, skipped_groups, total_groups = _scan_duplicate_candidates(
+        rows, progress_callback=_progress_callback
+    )
+
     ids_to_delete: set[int] = set()
-    raw_source_indices: set[str] = set()
     for row in candidates:
         try:
             processed_id = int(row['ID'])
         except (TypeError, ValueError):
             continue
         ids_to_delete.add(processed_id)
-        source_value = row['Source Index']
-        if source_value is not None:
-            raw_source_indices.add(str(source_value))
 
     if not ids_to_delete:
         remaining_total = len(games_df) if games_df is not None else total_games
@@ -5369,7 +5567,7 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
         update_progress(
             message=message,
             current=total_groups,
-            total=total_groups or len(groups) or 1,
+            total=total_groups or len(rows) or 1,
             data={
                 'phase': 'dedupe',
                 'removed': 0,
@@ -5387,111 +5585,7 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
             'toast_type': toast_type,
         }
 
-    delete_params = [(game_id,) for game_id in sorted(ids_to_delete)]
-    with db_lock:
-        conn = get_db()
-        with conn:
-            conn.executemany(
-                'DELETE FROM igdb_updates WHERE processed_game_id=?',
-                delete_params,
-            )
-            conn.executemany(
-                'DELETE FROM processed_games WHERE "ID"=?',
-                delete_params,
-            )
-
-    canonical_indices: set[str] = set()
-    for value in raw_source_indices:
-        canonical = _canonical_source_index(value)
-        if canonical is not None:
-            canonical_indices.add(canonical)
-
-    removed_numeric = sorted(
-        {int(candidate) for candidate in canonical_indices if candidate.isdigit()}
-    )
-
-    positions_to_remove: set[int] = set()
-    for value in raw_source_indices:
-        position = get_position_for_source_index(value)
-        if position is None:
-            canonical = _canonical_source_index(value)
-            if canonical is not None and canonical != value:
-                position = get_position_for_source_index(canonical)
-        if position is not None:
-            positions_to_remove.add(position)
-
-    if games_df is not None and not games_df.empty:
-        if positions_to_remove:
-            drop_indices = sorted(positions_to_remove)
-            games_df = games_df.drop(games_df.index[drop_indices]).reset_index(drop=True)
-        if not games_df.empty:
-            if 'Source Index' in games_df.columns:
-                current_values = games_df['Source Index'].tolist()
-            else:
-                current_values = [str(idx) for idx in range(len(games_df))]
-            new_values: list[str] = []
-            for idx, value in enumerate(current_values):
-                canonical = _canonical_source_index(value)
-                if canonical is None:
-                    new_values.append(str(idx))
-                    continue
-                if canonical.isdigit():
-                    numeric_value = int(canonical)
-                    shift = bisect_left(removed_numeric, numeric_value)
-                    new_numeric = numeric_value - shift
-                    stripped = str(value).strip()
-                    if stripped.isdigit():
-                        formatted = str(new_numeric).zfill(len(stripped))
-                    else:
-                        formatted = str(new_numeric)
-                    new_values.append(formatted)
-                else:
-                    new_values.append(canonical)
-            games_df = games_df.copy()
-            games_df['Source Index'] = new_values
-        total_games = len(games_df)
-        try:
-            reset_source_index_cache()
-        except Exception:
-            pass
-
-    if removed_numeric:
-        with db_lock:
-            conn = get_db()
-            with conn:
-                cur = conn.execute(
-                    'SELECT "ID", "Source Index" FROM processed_games'
-                )
-                stored_rows = cur.fetchall()
-                for entry in stored_rows:
-                    canonical = _canonical_source_index(entry['Source Index'])
-                    if canonical is None or not canonical.isdigit():
-                        continue
-                    numeric_value = int(canonical)
-                    shift = bisect_left(removed_numeric, numeric_value)
-                    if shift <= 0:
-                        continue
-                    new_numeric = numeric_value - shift
-                    stored_text = str(entry['Source Index'])
-                    stripped = stored_text.strip()
-                    if stripped.isdigit():
-                        new_value = str(new_numeric).zfill(len(stripped))
-                    else:
-                        new_value = str(new_numeric)
-                    conn.execute(
-                        'UPDATE processed_games SET "Source Index"=? WHERE "ID"=?',
-                        (new_value, entry['ID']),
-                    )
-
-    normalize_processed_games()
-
-    try:
-        navigator = GameNavigator(total_games)
-    except Exception:
-        pass
-
-    remaining_total = total_games
-    removed_count = len(ids_to_delete)
+    removed_count, remaining_total = _remove_processed_games(ids_to_delete)
 
     message = (
         f"Removed {removed_count} duplicate{'s' if removed_count != 1 else ''}."
@@ -5549,6 +5643,56 @@ def api_updates_remove_duplicates():
             'api_updates_job_detail', job_id=job['id']
         )
     return response, status_code
+
+
+@app.route('/api/updates/remove-duplicate/<int:processed_game_id>', methods=['POST'])
+def api_updates_remove_duplicate(processed_game_id: int):
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            'SELECT "ID", "Source Index", "Name", "igdb_id", "Summary", "Cover Path" '
+            'FROM processed_games'
+        )
+        rows = cur.fetchall()
+
+    candidates, duplicate_groups, skipped_groups, _ = _scan_duplicate_candidates(rows)
+    target_row: sqlite3.Row | None = None
+    for entry in candidates:
+        try:
+            entry_id = int(entry['ID'])
+        except (TypeError, ValueError):
+            continue
+        if entry_id == processed_game_id:
+            target_row = entry
+            break
+
+    if target_row is None:
+        return (
+            jsonify({'error': 'Duplicate not found or already processed.'}),
+            404,
+        )
+
+    removed_count, remaining_total = _remove_processed_games({processed_game_id})
+    if removed_count <= 0:
+        return (
+            jsonify({'error': 'Unable to remove duplicate entry.'}),
+            400,
+        )
+
+    name_value = _normalize_text(target_row['Name']) or f'ID {processed_game_id}'
+    message = f'Removed duplicate entry for {name_value}.'
+    return jsonify(
+        {
+            'status': 'ok',
+            'removed': removed_count,
+            'remaining': remaining_total,
+            'duplicate_groups': duplicate_groups,
+            'skipped': skipped_groups,
+            'removed_id': processed_game_id,
+            'message': message,
+            'toast_type': 'success',
+        }
+    )
 
 
 @app.route('/api/updates/jobs', methods=['GET'])

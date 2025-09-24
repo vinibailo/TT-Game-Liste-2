@@ -266,6 +266,23 @@
         return span;
     }
 
+    function createTag(label, modifier) {
+        const span = document.createElement('span');
+        span.className = 'update-tag';
+        if (modifier) {
+            span.classList.add(modifier);
+        }
+        span.textContent = label;
+        return span;
+    }
+
+    function buildDeleteDuplicateUrl(id) {
+        if (config.deleteDuplicateUrlTemplate) {
+            return config.deleteDuplicateUrlTemplate.replace('{id}', encodeURIComponent(id));
+        }
+        return `/api/updates/remove-duplicate/${encodeURIComponent(id)}`;
+    }
+
     function resolveCoverSource(source) {
         return source ? source : placeholderImage;
     }
@@ -309,11 +326,25 @@
             coverImage.alt = '';
             coverImage.src = resolveCoverSource(item.cover);
             coverWrapper.appendChild(coverImage);
+            const infoWrapper = document.createElement('div');
+            infoWrapper.className = 'game-info';
             const nameText = document.createElement('span');
             nameText.className = 'game-name';
             nameText.textContent = item.name || 'Unnamed game';
+            infoWrapper.appendChild(nameText);
+            const tagList = document.createElement('div');
+            tagList.className = 'game-tags';
+            if (item.update_type === 'mismatch') {
+                tagList.appendChild(createTag('Mismatch', 'is-mismatch'));
+            }
+            if (item.update_type === 'duplicate') {
+                tagList.appendChild(createTag('Duplicate', 'is-duplicate'));
+            }
+            if (tagList.childElementCount > 0) {
+                infoWrapper.appendChild(tagList);
+            }
             gameCell.appendChild(coverWrapper);
-            gameCell.appendChild(nameText);
+            gameCell.appendChild(infoWrapper);
             nameCell.appendChild(gameCell);
             row.appendChild(nameCell);
 
@@ -346,18 +377,37 @@
             editLink.appendChild(editLabel);
             actionsCell.appendChild(editLink);
 
-            const viewButton = document.createElement('button');
-            viewButton.type = 'button';
-            viewButton.className = 'icon-button';
-            viewButton.title = 'View changes';
-            viewButton.dataset.updateId = String(item.processed_game_id);
-            viewButton.appendChild(createIcon('difference', 'material-symbols-rounded'));
-            const viewLabel = document.createElement('span');
-            viewLabel.className = 'sr-only';
-            viewLabel.textContent = `View changes for ${item.name || 'game'}`;
-            viewButton.appendChild(viewLabel);
-            viewButton.addEventListener('click', () => openDiffModal(item.processed_game_id));
-            actionsCell.appendChild(viewButton);
+            if (item.detail_available !== false) {
+                const viewButton = document.createElement('button');
+                viewButton.type = 'button';
+                viewButton.className = 'icon-button';
+                viewButton.title = 'View changes';
+                viewButton.dataset.updateId = String(item.processed_game_id);
+                viewButton.appendChild(createIcon('difference', 'material-symbols-rounded'));
+                const viewLabel = document.createElement('span');
+                viewLabel.className = 'sr-only';
+                viewLabel.textContent = `View changes for ${item.name || 'game'}`;
+                viewButton.appendChild(viewLabel);
+                viewButton.addEventListener('click', () => openDiffModal(item.processed_game_id));
+                actionsCell.appendChild(viewButton);
+            }
+
+            if (item.update_type === 'duplicate') {
+                const deleteButton = document.createElement('button');
+                deleteButton.type = 'button';
+                deleteButton.className = 'icon-button icon-button-danger';
+                deleteButton.title = 'Delete duplicate';
+                deleteButton.dataset.duplicateId = String(item.processed_game_id);
+                deleteButton.appendChild(createIcon('delete', 'material-symbols-rounded'));
+                const deleteLabel = document.createElement('span');
+                deleteLabel.className = 'sr-only';
+                deleteLabel.textContent = `Delete duplicate ${item.name || 'game'}`;
+                deleteButton.appendChild(deleteLabel);
+                deleteButton.addEventListener('click', () => {
+                    handleDeleteDuplicate(item, deleteButton);
+                });
+                actionsCell.appendChild(deleteButton);
+            }
 
             row.appendChild(actionsCell);
             fragment.appendChild(row);
@@ -886,6 +936,48 @@
                 updateDedupeProgress(0, 0);
                 setDedupeProgressVisible(false);
             }, 1200);
+        }
+    }
+
+    async function handleDeleteDuplicate(item, button) {
+        if (!item || !item.processed_game_id) {
+            return;
+        }
+        if (!config.deleteDuplicateUrlTemplate) {
+            showToast('Duplicate removal endpoint is not configured.', 'warning');
+            return;
+        }
+        const id = item.processed_game_id;
+        if (button) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+        }
+        try {
+            const response = await fetch(buildDeleteDuplicateUrl(id), { method: 'POST' });
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (err) {
+                payload = null;
+            }
+            if (!response.ok || !payload || payload.error) {
+                throw new Error(payload && payload.error ? payload.error : 'Failed to remove duplicate.');
+            }
+            if (payload.message) {
+                showToast(payload.message, payload.toast_type || 'success');
+            } else {
+                showToast('Removed duplicate entry.', 'success');
+            }
+            state.detailCache.delete(id);
+            await loadUpdates();
+        } catch (error) {
+            console.error(error);
+            showToast(error.message, 'warning');
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.removeAttribute('aria-busy');
+            }
         }
     }
 
