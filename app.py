@@ -55,6 +55,16 @@ SQLITE_TIMEOUT_SECONDS = _coerce_positive_float(
 )
 
 
+def _coerce_truthy_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    text = value.strip().lower()
+    return text in {'1', 'true', 'yes', 'on'}
+
+
+RUN_DB_MIGRATIONS = _coerce_truthy_env(os.environ.get('RUN_DB_MIGRATIONS'))
+
+
 def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     """Apply standard pragmas and timeouts to SQLite connections."""
 
@@ -180,6 +190,15 @@ LOOKUP_SOURCE_KEYS = {
 
 FIX_NAMES_BATCH_LIMIT = 50
 MAX_BACKGROUND_JOBS = 50
+
+
+# Global catalog state populated during startup and refresh jobs.
+games_df: pd.DataFrame = pd.DataFrame()
+_category_values: set[str] = set()
+categories_list: list[str] = []
+platforms_list: list[str] = []
+total_games: int = 0
+navigator = None
 
 
 def _format_lookup_label(value: str) -> str:
@@ -1908,7 +1927,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
         conn.execute('PRAGMA foreign_keys = ON')
 
 
-def _init_db() -> None:
+def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     conn = _create_sqlite_connection(PROCESSED_DB)
     try:
         with conn:
@@ -1946,23 +1965,25 @@ def _init_db() -> None:
                     skip_queue TEXT
                 )'''
             )
-            _migrate_id_column(conn)
-            try:
-                conn.execute('ALTER TABLE processed_games ADD COLUMN "Category" TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
-            except sqlite3.OperationalError:
-                pass
-            try:
-                conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
-            except sqlite3.OperationalError:
-                pass
+            if run_migrations:
+                _migrate_id_column(conn)
+            if run_migrations:
+                try:
+                    conn.execute('ALTER TABLE processed_games ADD COLUMN "Category" TEXT')
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
+                except sqlite3.OperationalError:
+                    pass
             try:
                 conn.execute(
                     '''CREATE TABLE IF NOT EXISTS igdb_updates (
@@ -2026,90 +2047,91 @@ def _init_db() -> None:
                     '''
                 )
 
-            _load_lookup_tables(conn)
-            _recreate_lookup_join_tables(conn)
-            _backfill_lookup_relations(conn)
-            _ensure_lookup_id_columns(conn)
+            if run_migrations:
+                _load_lookup_tables(conn)
+                _recreate_lookup_join_tables(conn)
+                _backfill_lookup_relations(conn)
+                _ensure_lookup_id_columns(conn)
 
-            cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
-            rows = cur.fetchall()
-            for game_id, last_edit in rows:
-                if not last_edit:
-                    conn.execute(
-                        'UPDATE processed_games SET last_edited_at=? WHERE "ID"=?',
-                        (
-                            datetime.now(timezone.utc).isoformat(),
-                            game_id,
-                        ),
-                    )
+                cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
+                rows = cur.fetchall()
+                for game_id, last_edit in rows:
+                    if not last_edit:
+                        conn.execute(
+                            'UPDATE processed_games SET last_edited_at=? WHERE "ID"=?',
+                            (
+                                datetime.now(timezone.utc).isoformat(),
+                                game_id,
+                            ),
+                        )
 
-            cleanup_cursor = conn.execute(
-                '''
-                DELETE FROM igdb_updates
-                WHERE processed_game_id IS NULL
-                   OR NOT EXISTS (
-                        SELECT 1
-                        FROM processed_games
-                        WHERE processed_games."ID" = igdb_updates.processed_game_id
-                    )
-                '''
-            )
-            logger.info(
-                "Startup cleanup removed %d orphan igdb_update rows; database may still"
-                " require manual attention.",
-                cleanup_cursor.rowcount,
-            )
-
-            cur = conn.execute(
-                'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
-            )
-            for raw_game_id, igdb_id_value, last_edit in cur.fetchall():
-                if not igdb_id_value:
-                    continue
-                try:
-                    if isinstance(raw_game_id, numbers.Integral):
-                        game_id = int(raw_game_id)
-                    elif isinstance(raw_game_id, numbers.Real):
-                        float_value = float(raw_game_id)
-                        if not float_value.is_integer():
-                            continue
-                        game_id = int(float_value)
-                    else:
-                        text = str(raw_game_id).strip()
-                        if not text:
-                            continue
-                        game_id = int(text)
-                except (TypeError, ValueError):
-                    continue
-                guard_cursor = conn.execute(
-                    'SELECT 1 FROM processed_games WHERE "ID"=?', (game_id,)
+                cleanup_cursor = conn.execute(
+                    '''
+                    DELETE FROM igdb_updates
+                    WHERE processed_game_id IS NULL
+                       OR NOT EXISTS (
+                            SELECT 1
+                            FROM processed_games
+                            WHERE processed_games."ID" = igdb_updates.processed_game_id
+                        )
+                    '''
                 )
-                if guard_cursor.fetchone() is None:
-                    continue
+                logger.info(
+                    "Startup cleanup removed %d orphan igdb_update rows; database may still"
+                    " require manual attention.",
+                    cleanup_cursor.rowcount,
+                )
 
-                try:
-                    conn.execute(
-                        '''INSERT OR IGNORE INTO igdb_updates (
-                            processed_game_id, igdb_id, local_last_edited_at
-                        ) VALUES (?, ?, ?)''',
-                        (
+                cur = conn.execute(
+                    'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
+                )
+                for raw_game_id, igdb_id_value, last_edit in cur.fetchall():
+                    if not igdb_id_value:
+                        continue
+                    try:
+                        if isinstance(raw_game_id, numbers.Integral):
+                            game_id = int(raw_game_id)
+                        elif isinstance(raw_game_id, numbers.Real):
+                            float_value = float(raw_game_id)
+                            if not float_value.is_integer():
+                                continue
+                            game_id = int(float_value)
+                        else:
+                            text = str(raw_game_id).strip()
+                            if not text:
+                                continue
+                            game_id = int(text)
+                    except (TypeError, ValueError):
+                        continue
+                    guard_cursor = conn.execute(
+                        'SELECT 1 FROM processed_games WHERE "ID"=?', (game_id,)
+                    )
+                    if guard_cursor.fetchone() is None:
+                        continue
+
+                    try:
+                        conn.execute(
+                            '''INSERT OR IGNORE INTO igdb_updates (
+                                processed_game_id, igdb_id, local_last_edited_at
+                            ) VALUES (?, ?, ?)''',
+                            (
+                                game_id,
+                                str(igdb_id_value),
+                                last_edit,
+                            ),
+                        )
+                    except sqlite3.IntegrityError:
+                        logger.warning(
+                            "Failed to reseed igdb_updates for processed_game_id=%s due to"
+                            " integrity error.",
                             game_id,
-                            str(igdb_id_value),
-                            last_edit,
-                        ),
-                    )
-                except sqlite3.IntegrityError:
-                    logger.warning(
-                        "Failed to reseed igdb_updates for processed_game_id=%s due to"
-                        " integrity error.",
-                        game_id,
-                    )
-                    continue
+                        )
+                        continue
     finally:
         conn.close()
 
 
-_init_db()
+_init_db(run_migrations=RUN_DB_MIGRATIONS)
 
 # Expose a module-level connection for tests and utilities
 db = _create_sqlite_connection(PROCESSED_DB)
@@ -2156,7 +2178,7 @@ def open_image_auto_rotate(source: Any) -> Image.Image:
     return img.convert('RGB')
 
 
-def load_games() -> pd.DataFrame:
+def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
     columns = [
         'Source Index',
         'Name',
@@ -2438,13 +2460,16 @@ def load_games() -> pd.DataFrame:
 
         return _finalize_dataframe(df)
 
-    db_frame, has_rows = _load_from_db()
-    if has_rows:
-        return db_frame
+    loaders: list[Callable[[], tuple[pd.DataFrame, bool]]] = []
+    if prefer_cache:
+        loaders = [_load_from_cache, _load_from_db]
+    else:
+        loaders = [_load_from_db, _load_from_cache]
 
-    cache_frame, cache_has_rows = _load_from_cache()
-    if cache_has_rows:
-        return cache_frame
+    for loader in loaders:
+        frame, has_rows = loader()
+        if has_rows:
+            return frame
 
     return _load_from_igdb()
 
@@ -3838,6 +3863,78 @@ class GameNavigator:
             self._save()
 
 
+def _set_games_dataframe(
+    df: pd.DataFrame | None,
+    *,
+    rebuild_metadata: bool = True,
+    rebuild_navigator: bool = True,
+) -> None:
+    global games_df, total_games, categories_list, platforms_list, _category_values, navigator
+
+    if df is None:
+        df = pd.DataFrame()
+
+    games_df = df
+    total_games = len(df)
+
+    if rebuild_metadata:
+        category_values: set[str] = set()
+        if not df.empty and 'Category' in df.columns:
+            for raw_category in df['Category'].dropna():
+                text = str(raw_category).strip()
+                if text:
+                    category_values.add(text)
+        category_values.update(
+            label for label in IGDB_CATEGORY_LABELS.values() if label
+        )
+        _category_values = category_values
+        categories_list = sorted(category_values, key=str.casefold)
+
+        platform_values: set[str] = set()
+        if not df.empty and 'Platforms' in df.columns:
+            for raw_platforms in df['Platforms'].dropna():
+                for entry in str(raw_platforms).split(','):
+                    text = entry.strip()
+                    if text:
+                        platform_values.add(text)
+        platforms_list = sorted(platform_values, key=str.casefold)
+
+    if rebuild_navigator:
+        previous_navigator = navigator
+        try:
+            navigator = GameNavigator(total_games)
+        except Exception:
+            logger.exception('Failed to rebuild navigator state')
+            navigator = previous_navigator
+
+    reset_source_index_cache()
+
+
+def refresh_processed_games_from_cache() -> None:
+    """Reload IGDB cache into ``processed_games`` when requested."""
+
+    igdb_frame = load_games(prefer_cache=True)
+
+    try:
+        if igdb_frame is not None and not igdb_frame.empty:
+            _set_games_dataframe(
+                igdb_frame,
+                rebuild_metadata=False,
+                rebuild_navigator=False,
+            )
+
+        seed_processed_games_from_source()
+        normalize_processed_games()
+        backfill_igdb_ids()
+    finally:
+        updated_frame = load_games()
+        _set_games_dataframe(
+            updated_frame,
+            rebuild_metadata=True,
+            rebuild_navigator=True,
+        )
+
+
 def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
     """Return a list of comma-separated values from the first matching key."""
     for key in keys:
@@ -3937,26 +4034,7 @@ def generate_pt_summary(game_name: str) -> str:
 
 # initial load
 ensure_dirs()
-games_df = load_games()
-_category_values: set[str] = set()
-for raw_category in games_df.get('Category', pd.Series(dtype=str)).dropna():
-    text = str(raw_category).strip()
-    if text:
-        _category_values.add(text)
-_category_values.update(label for label in IGDB_CATEGORY_LABELS.values() if label)
-categories_list = sorted(_category_values, key=str.casefold)
-platforms_list = sorted({
-    p.strip()
-    for ps in games_df.get('Platforms', pd.Series(dtype=str)).dropna()
-    for p in str(ps).split(',')
-    if p.strip()
-})
-total_games = len(games_df)
-with app.app_context():
-    seed_processed_games_from_source()
-    normalize_processed_games()
-    backfill_igdb_ids()
-    navigator = GameNavigator(total_games)
+_set_games_dataframe(load_games(), rebuild_metadata=True, rebuild_navigator=True)
 
 @app.before_request
 def require_login():
@@ -5182,6 +5260,12 @@ def _execute_refresh_job(update_progress: Callable[..., None]) -> dict[str, Any]
         cache_summary = _run_refresh_cache_phase(update_progress)
     except RuntimeError as exc:
         cache_error = str(exc)
+    else:
+        try:
+            refresh_processed_games_from_cache()
+        except Exception as exc:
+            cache_error = str(exc)
+            logger.exception('Failed to refresh processed games from IGDB cache')
 
     diff_summary = _run_refresh_diff_phase(update_progress)
 
