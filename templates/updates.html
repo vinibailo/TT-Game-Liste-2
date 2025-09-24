@@ -74,13 +74,24 @@
                         </div>
                     </div>
                 </div>
-                <button type="button" class="btn btn-red" data-remove-duplicates>
-                    <span class="btn-icon" aria-hidden="true">
-                        <span class="material-symbols-rounded">layers_clear</span>
-                    </span>
-                    <span class="btn-label">Remove Duplicates</span>
-                    <span class="sr-only">Remove unprocessed duplicate IGDB entries</span>
-                </button>
+                <div class="updates-bulk-action">
+                    <button type="button" class="btn btn-red" data-remove-duplicates>
+                        <span class="btn-icon" aria-hidden="true">
+                            <span class="material-symbols-rounded">layers_clear</span>
+                        </span>
+                        <span class="btn-label">Remove Duplicates</span>
+                        <span class="sr-only">Remove unprocessed duplicate IGDB entries</span>
+                    </button>
+                    <div class="progress-indicator updates-progress" data-dedupe-progress hidden>
+                        <div class="progress-metrics">
+                            <span class="progress-count" data-dedupe-count>0/0</span>
+                            <span class="progress-percent" data-dedupe-percent>0%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" data-dedupe-bar></div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
         <section class="updates-summary" aria-live="polite">
@@ -177,8 +188,11 @@
             cacheRefreshUrl: {{ url_for('api_igdb_cache_refresh')|tojson }},
             fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
             removeDuplicatesUrl: {{ url_for('api_updates_remove_duplicates')|tojson }},
+            jobsUrl: {{ url_for('api_updates_job_list')|tojson }},
+            jobDetailUrlTemplate: {{ url_for('api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
             detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
-            cacheBatchSize: {{ igdb_batch_size|tojson }}
+            cacheBatchSize: {{ igdb_batch_size|tojson }},
+            fixBatchSize: {{ FIX_NAMES_BATCH_LIMIT|default(50)|tojson }}
         };
     </script>
     <script src="{{ url_for('static', filename='updates.js') }}" defer></script>

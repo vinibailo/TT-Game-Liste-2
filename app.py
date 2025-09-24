@@ -6,10 +6,11 @@ import io
 import sqlite3
 import numbers
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
-from threading import Lock
+from typing import Any, Callable, Iterable, Mapping, Optional
+from threading import Lock, Thread
 import logging
 from bisect import bisect_left
 
@@ -176,6 +177,9 @@ LOOKUP_SOURCE_KEYS = {
     'Game Modes': ['Game Modes', 'Mode'],
     'Platforms': ['Platforms', 'Platform'],
 }
+
+FIX_NAMES_BATCH_LIMIT = 50
+MAX_BACKGROUND_JOBS = 50
 
 
 def _format_lookup_label(value: str) -> str:
@@ -539,6 +543,224 @@ _source_index_cache_lock = Lock()
 _source_index_by_position: dict[int, str] | None = None
 _position_by_source_index: dict[str, int] | None = None
 _source_index_cache_df_id: int | None = None
+
+
+def _job_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+JOB_STATUS_PENDING = 'pending'
+JOB_STATUS_RUNNING = 'running'
+JOB_STATUS_SUCCESS = 'success'
+JOB_STATUS_ERROR = 'error'
+JOB_ACTIVE_STATUSES = {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
+JOB_TERMINAL_STATUSES = {JOB_STATUS_SUCCESS, JOB_STATUS_ERROR}
+
+
+@dataclass
+class BackgroundJob:
+    id: str
+    job_type: str
+    status: str = JOB_STATUS_PENDING
+    message: str = ''
+    progress_current: int = 0
+    progress_total: int = 0
+    data: dict[str, Any] = field(default_factory=dict)
+    result: dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+    created_at: str = ''
+    updated_at: str = ''
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class BackgroundJobManager:
+    def __init__(self) -> None:
+        self._jobs: dict[str, BackgroundJob] = {}
+        self._lock = Lock()
+
+    def _serialize_job(self, job: BackgroundJob) -> dict[str, Any]:
+        return {
+            'id': job.id,
+            'job_type': job.job_type,
+            'status': job.status,
+            'message': job.message,
+            'progress_current': job.progress_current,
+            'progress_total': job.progress_total,
+            'data': dict(job.data),
+            'result': dict(job.result),
+            'error': job.error,
+            'created_at': job.created_at,
+            'updated_at': job.updated_at,
+            'started_at': job.started_at,
+            'finished_at': job.finished_at,
+        }
+
+    def _find_active_job_locked(self, job_type: str) -> Optional[BackgroundJob]:
+        for job in self._jobs.values():
+            if job.job_type == job_type and job.status in JOB_ACTIVE_STATUSES:
+                return job
+        return None
+
+    def _prune_jobs_locked(self) -> None:
+        if len(self._jobs) <= MAX_BACKGROUND_JOBS:
+            return
+        removable: list[BackgroundJob] = [
+            job
+            for job in self._jobs.values()
+            if job.status in JOB_TERMINAL_STATUSES
+        ]
+        removable.sort(key=lambda j: j.finished_at or j.updated_at)
+        while len(self._jobs) > MAX_BACKGROUND_JOBS and removable:
+            victim = removable.pop(0)
+            self._jobs.pop(victim.id, None)
+
+    def list_jobs(self, job_type: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            jobs = list(self._jobs.values())
+            if job_type:
+                jobs = [job for job in jobs if job.job_type == job_type]
+            jobs.sort(key=lambda job: job.created_at)
+            return [self._serialize_job(job) for job in jobs]
+
+    def get_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return self._serialize_job(job)
+
+    def get_active_job(self, job_type: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            job = self._find_active_job_locked(job_type)
+            if job is None:
+                return None
+            return self._serialize_job(job)
+
+    def start_job(
+        self,
+        job_type: str,
+        runner: Callable[[Callable[..., None]], Optional[dict[str, Any]]],
+        *,
+        description: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        with self._lock:
+            existing = self._find_active_job_locked(job_type)
+            if existing is not None:
+                return self._serialize_job(existing), False
+            job_id = uuid.uuid4().hex
+            timestamp = _job_timestamp()
+            job = BackgroundJob(
+                id=job_id,
+                job_type=job_type,
+                message=description or '',
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            self._jobs[job_id] = job
+            self._prune_jobs_locked()
+
+        thread = Thread(
+            target=self._run_job,
+            args=(job_id, runner),
+            name=f'job-{job_type}-{job_id}',
+            daemon=True,
+        )
+        thread.start()
+        return self.get_job(job_id), True
+
+    def _set_job_running(self, job_id: str) -> None:
+        timestamp = _job_timestamp()
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = JOB_STATUS_RUNNING
+            job.started_at = timestamp
+            job.updated_at = timestamp
+            if not job.message:
+                job.message = 'Running…'
+
+    def _update_job(
+        self,
+        job_id: str,
+        *,
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        message: str | None = None,
+        data: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        timestamp = _job_timestamp()
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            if progress_current is not None:
+                job.progress_current = max(int(progress_current), 0)
+            if progress_total is not None:
+                job.progress_total = max(int(progress_total), 0)
+            if message is not None:
+                job.message = str(message)
+            if data:
+                for key, value in data.items():
+                    job.data[key] = value
+            job.updated_at = timestamp
+
+    def _finalize_job(
+        self,
+        job_id: str,
+        status: str,
+        result: Optional[dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        timestamp = _job_timestamp()
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            job.status = status
+            job.error = error
+            job.result = dict(result or {})
+            job.finished_at = timestamp
+            job.updated_at = timestamp
+
+    def _run_job(
+        self,
+        job_id: str,
+        runner: Callable[[Callable[..., None]], Optional[dict[str, Any]]],
+    ) -> None:
+        def progress_callback(
+            current: int | None = None,
+            total: int | None = None,
+            message: str | None = None,
+            *,
+            data: Optional[Mapping[str, Any]] = None,
+            **extra: Any,
+        ) -> None:
+            merged: dict[str, Any] = {}
+            if data:
+                merged.update(dict(data))
+            if extra:
+                merged.update({k: v for k, v in extra.items() if v is not None})
+            self._update_job(
+                job_id,
+                progress_current=current,
+                progress_total=total,
+                message=message,
+                data=merged or None,
+            )
+
+        self._set_job_running(job_id)
+        try:
+            result = runner(progress_callback)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception('Background job %s failed', job_id)
+            self._finalize_job(job_id, JOB_STATUS_ERROR, error=str(exc))
+            return
+        self._finalize_job(job_id, JOB_STATUS_SUCCESS, result=result)
+
+
+job_manager = BackgroundJobManager()
 
 
 def _canonical_source_index(value: Any) -> str | None:
@@ -3943,7 +4165,11 @@ def api_lookup_options(lookup_type: str):
 
 @app.route('/updates')
 def updates_page():
-    return render_template('updates.html', igdb_batch_size=IGDB_BATCH_SIZE)
+    return render_template(
+        'updates.html',
+        igdb_batch_size=IGDB_BATCH_SIZE,
+        FIX_NAMES_BATCH_LIMIT=FIX_NAMES_BATCH_LIMIT,
+    )
 
 
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
@@ -4525,19 +4751,123 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
     return updates
 
 
-@app.route('/api/updates/refresh', methods=['POST'])
-def api_updates_refresh():
-    processed_rows = _collect_processed_games_with_igdb()
-    if not processed_rows:
-        return jsonify({'status': 'ok', 'updated': 0, 'missing': []})
+def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
+    update_progress(message='Preparing IGDB cache…', data={'phase': 'cache'})
 
-    igdb_payloads = fetch_igdb_metadata(
-        [row.get('igdb_id') for row in processed_rows]
+    try:
+        access_token, client_id = exchange_twitch_credentials()
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    with db_lock:
+        conn = get_db()
+        total = _get_cached_igdb_total(conn)
+
+    if total is None:
+        total = download_igdb_game_count(access_token, client_id)
+        with db_lock:
+            conn = get_db()
+            with conn:
+                _set_cached_igdb_total(conn, total)
+
+    if total is None or total <= 0:
+        with db_lock:
+            conn = get_db()
+            with conn:
+                _set_cached_igdb_total(conn, total)
+        update_progress(
+            current=0,
+            total=total or 0,
+            message='IGDB cache is empty.',
+            data={'phase': 'cache', 'inserted': 0, 'updated': 0, 'unchanged': 0},
+        )
+        return {
+            'total': total or 0,
+            'processed': 0,
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+        }
+
+    limit = IGDB_BATCH_SIZE if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0 else 500
+    limit = min(max(int(limit), 1), 500)
+
+    offset = 0
+    processed = 0
+    inserted_total = 0
+    updated_total = 0
+    unchanged_total = 0
+
+    while offset < total:
+        payloads = download_igdb_games(access_token, client_id, offset, limit)
+        batch_count = len(payloads)
+        with db_lock:
+            conn = get_db()
+            with conn:
+                inserted, updated, unchanged = _upsert_igdb_cache_entries(conn, payloads)
+        inserted_total += inserted
+        updated_total += updated
+        unchanged_total += unchanged
+        offset += batch_count
+        if batch_count == 0:
+            processed = total
+            break
+        processed = min(offset, total)
+        update_progress(
+            current=processed,
+            total=total,
+            message='Refreshing IGDB cache…',
+            data={
+                'phase': 'cache',
+                'inserted': inserted_total,
+                'updated': updated_total,
+                'unchanged': unchanged_total,
+            },
+        )
+
+    update_progress(
+        current=processed,
+        total=total,
+        message='Finished refreshing IGDB cache.',
+        data={
+            'phase': 'cache',
+            'inserted': inserted_total,
+            'updated': updated_total,
+            'unchanged': unchanged_total,
+        },
     )
 
-    updated = 0
+    return {
+        'total': total,
+        'processed': processed,
+        'inserted': inserted_total,
+        'updated': updated_total,
+        'unchanged': unchanged_total,
+    }
+
+
+def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, Any]:
+    processed_rows = _collect_processed_games_with_igdb()
+    total = len(processed_rows)
+    update_progress(
+        total=total,
+        current=0,
+        message='Refreshing update diffs…',
+        data={'phase': 'diffs', 'updated': 0, 'missing_count': 0},
+    )
+
+    if not processed_rows:
+        return {'updated': 0, 'missing': [], 'missing_count': 0, 'total': 0}
+
+    igdb_ids = [row.get('igdb_id') for row in processed_rows]
+    igdb_payloads = fetch_igdb_metadata(igdb_ids)
+    if igdb_payloads is None:
+        igdb_payloads = {}
+
+    updated_count = 0
     missing: list[int] = []
     refreshed_at = now_utc_iso()
+    processed = 0
 
     with db_lock:
         conn = get_db()
@@ -4579,28 +4909,146 @@ def api_updates_refresh():
                     refreshed_at,
                 ),
             )
-            updated += 1
+            updated_count += 1
+            processed += 1
+            if processed % 25 == 0 or processed == total:
+                update_progress(
+                    current=processed,
+                    total=total,
+                    message='Refreshing update diffs…',
+                    data={
+                        'phase': 'diffs',
+                        'updated': updated_count,
+                        'missing_count': len(missing),
+                    },
+                )
         conn.commit()
 
-    return jsonify({'status': 'ok', 'updated': updated, 'missing': missing})
+    update_progress(
+        current=total,
+        total=total,
+        message='Finished refreshing update diffs.',
+        data={'phase': 'diffs', 'updated': updated_count, 'missing_count': len(missing)},
+    )
+
+    return {
+        'updated': updated_count,
+        'missing': missing,
+        'missing_count': len(missing),
+        'total': total,
+        'status_message': (
+            f"Fetched {updated_count} update{'s' if updated_count != 1 else ''}."
+            + (
+                f" {len(missing)} IGDB record{'s' if len(missing) != 1 else ''} missing."
+                if missing
+                else ''
+            )
+        ).strip(),
+    }
 
 
-@app.route('/api/updates/fix-names', methods=['POST'])
-def api_updates_fix_names():
-    payload = request.get_json(silent=True) or {}
+def _execute_refresh_job(update_progress: Callable[..., None]) -> dict[str, Any]:
+    cache_summary = None
+    cache_error: str | None = None
     try:
-        offset = int(payload.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
+        cache_summary = _run_refresh_cache_phase(update_progress)
+    except RuntimeError as exc:
+        cache_error = str(exc)
+
+    diff_summary = _run_refresh_diff_phase(update_progress)
+
+    messages: list[str] = []
+    toast_type = 'success'
+
+    if cache_summary:
+        total = cache_summary.get('total') or 0
+        inserted = cache_summary.get('inserted') or 0
+        updated = cache_summary.get('updated') or 0
+        changed = inserted + updated
+        if total <= 0:
+            messages.append('IGDB cache is empty.')
+        elif changed > 0:
+            messages.append(
+                f"Cached {changed} IGDB record{'s' if changed != 1 else ''}."
+            )
+        else:
+            messages.append('IGDB cache is up to date.')
+    elif cache_error:
+        messages.append(f'IGDB cache refresh skipped: {cache_error}.')
+        toast_type = 'warning'
+
+    if diff_summary:
+        messages.append(diff_summary.get('status_message', 'Updates reloaded.'))
+        if diff_summary.get('missing_count', 0) > 0:
+            toast_type = 'warning'
+
+    if not messages:
+        messages.append('Updates reloaded.')
+
+    update_progress(message='Refresh complete.', data={'phase': 'done'})
+
+    return {
+        'status': 'ok',
+        'cache_summary': cache_summary,
+        'diff_summary': diff_summary,
+        'message': ' '.join(messages).strip(),
+        'toast_type': toast_type,
+        'updated': diff_summary.get('updated', 0) if diff_summary else 0,
+        'missing': diff_summary.get('missing', []) if diff_summary else [],
+        'cache_error': cache_error,
+    }
+
+
+@app.route('/api/updates/refresh', methods=['POST'])
+def api_updates_refresh():
+    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
+    if run_sync:
+        try:
+            result = _execute_refresh_job(lambda **_kwargs: None)
+        except RuntimeError as exc:
+            return jsonify({'error': str(exc)}), 502
+        return jsonify(result)
+
+    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
+        with app.app_context():
+            return _execute_refresh_job(update_progress)
+
+    job, created = job_manager.start_job(
+        'refresh_updates',
+        runner,
+        description='Refreshing IGDB updates…',
+    )
+    status_code = 202 if created else 200
+    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
+    if job:
+        response.headers['Location'] = url_for(
+            'api_updates_job_detail', job_id=job['id']
+        )
+    return response, status_code
+
+
+def _execute_fix_names_job(
+    update_progress: Callable[..., None],
+    *,
+    offset: int = 0,
+    limit: int | None = None,
+    process_all: bool = True,
+) -> dict[str, Any]:
     try:
-        limit = int(payload.get('limit', 50))
+        start_offset = int(offset)
     except (TypeError, ValueError):
-        limit = 50
-    if offset < 0:
-        offset = 0
-    if limit <= 0:
-        limit = 50
-    limit = min(limit, 200)
+        start_offset = 0
+    if start_offset < 0:
+        start_offset = 0
+    limit_value: int | None = None
+    if limit is not None:
+        try:
+            limit_value = int(limit)
+        except (TypeError, ValueError):
+            limit_value = None
+    if limit_value is None or limit_value <= 0:
+        limit_value = FIX_NAMES_BATCH_LIMIT
+    limit_value = max(1, min(int(limit_value), 200))
 
     with db_lock:
         conn = get_db()
@@ -4622,167 +5070,230 @@ def api_updates_fix_names():
     if total < 0:
         total = 0
 
+    update_progress(total=total, current=0, message='Scanning processed games…')
+
     if total == 0:
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': 0,
-                'processed': 0,
-                'updated': 0,
-                'unchanged': 0,
-                'missing': [],
-                'missing_remote': [],
-                'missing_name': [],
-                'invalid': 0,
-                'done': True,
-                'next_offset': 0,
-            }
-        )
+        return {
+            'status': 'ok',
+            'total': 0,
+            'processed': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'missing': [],
+            'missing_remote': [],
+            'missing_name': [],
+            'invalid': 0,
+            'toast_type': 'warning',
+            'message': 'No games with an IGDB ID were found.',
+            'done': True,
+            'next_offset': 0,
+        }
 
-    if offset >= total:
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total,
-                'processed': total,
-                'updated': 0,
-                'unchanged': 0,
-                'missing': [],
-                'missing_remote': [],
-                'missing_name': [],
-                'invalid': 0,
-                'done': True,
-                'next_offset': total,
-            }
-        )
-
-    with db_lock:
-        conn = get_db()
-        cur = conn.execute(
-            '''SELECT "ID", "igdb_id", "Name" FROM processed_games
-               WHERE TRIM(COALESCE("igdb_id", "")) != ""
-               ORDER BY "ID"
-               LIMIT ? OFFSET ?''',
-            (limit, offset),
-        )
-        rows = cur.fetchall()
-
-    batch_count = len(rows)
-    if batch_count == 0:
-        processed = min(offset, total)
-        done = processed >= total
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total,
-                'processed': processed,
-                'updated': 0,
-                'unchanged': 0,
-                'missing': [],
-                'missing_remote': [],
-                'missing_name': [],
-                'invalid': 0,
-                'done': done,
-                'next_offset': processed,
-            }
-        )
-
-    entries: list[dict[str, Any]] = []
-    unique_ids: list[str] = []
-    seen_ids: set[str] = set()
-    invalid_count = 0
-
-    for row in rows:
-        db_id = row['ID']
-        raw_igdb_id = row['igdb_id']
-        igdb_id = coerce_igdb_id(raw_igdb_id)
-        current_name = _normalize_text(row['Name'])
-        entries.append(
-            {
-                'id': db_id,
-                'igdb_id': igdb_id,
-                'current_name': current_name,
-            }
-        )
-        if igdb_id:
-            if igdb_id not in seen_ids:
-                seen_ids.add(igdb_id)
-                unique_ids.append(igdb_id)
-        else:
-            invalid_count += 1
-
-    metadata: dict[str, Mapping[str, Any]] = {}
-    if unique_ids:
-        metadata = fetch_igdb_metadata(unique_ids) or {}
-
-    timestamp = now_utc_iso()
-    updates: list[tuple[str, str, Any]] = []
-    updated_count = 0
-    unchanged_count = 0
+    current_offset = start_offset
+    processed = start_offset
+    updated_total = 0
+    unchanged_total = 0
+    invalid_total = 0
     missing_remote: set[str] = set()
     missing_name: set[str] = set()
 
-    for entry in entries:
-        igdb_id = entry['igdb_id']
-        if not igdb_id:
-            continue
-        payload = metadata.get(igdb_id)
-        if not isinstance(payload, Mapping):
-            missing_remote.add(igdb_id)
-            continue
-        remote_name = _normalize_text(payload.get('name'))
-        if not remote_name:
-            missing_name.add(igdb_id)
-            continue
-        current_name = entry['current_name']
-        if remote_name == current_name:
-            unchanged_count += 1
-            continue
-        db_id = entry['id']
-        try:
-            numeric_id = int(db_id)
-        except (TypeError, ValueError):
-            missing_remote.add(igdb_id)
-            continue
-        updates.append((remote_name, timestamp, numeric_id))
-        updated_count += 1
+    timestamp = now_utc_iso()
 
-    if updates:
+    while current_offset < total:
         with db_lock:
             conn = get_db()
+            cur = conn.execute(
+                '''SELECT "ID", "igdb_id", "Name" FROM processed_games
+                   WHERE TRIM(COALESCE("igdb_id", "")) != ""
+                   ORDER BY "ID"
+                   LIMIT ? OFFSET ?''',
+                (limit_value, current_offset),
+            )
+            rows = cur.fetchall()
+
+        batch_count = len(rows)
+        if batch_count == 0:
+            break
+
+        entries: list[dict[str, Any]] = []
+        unique_ids: list[str] = []
+        seen_ids: set[str] = set()
+
+        for row in rows:
+            db_id = row['ID']
+            raw_igdb_id = row['igdb_id']
+            igdb_id = coerce_igdb_id(raw_igdb_id)
+            current_name = _normalize_text(row['Name'])
+            entries.append(
+                {
+                    'id': db_id,
+                    'igdb_id': igdb_id,
+                    'current_name': current_name,
+                }
+            )
+            if igdb_id:
+                if igdb_id not in seen_ids:
+                    seen_ids.add(igdb_id)
+                    unique_ids.append(igdb_id)
+            else:
+                invalid_total += 1
+
+        metadata: dict[str, Mapping[str, Any]] = {}
+        if unique_ids:
+            metadata = fetch_igdb_metadata(unique_ids) or {}
+
+        updates: list[tuple[str, str, Any]] = []
+
+        for entry in entries:
+            igdb_id = entry['igdb_id']
+            if not igdb_id:
+                continue
+            payload = metadata.get(igdb_id)
+            if not isinstance(payload, Mapping):
+                missing_remote.add(igdb_id)
+                continue
+            remote_name = _normalize_text(payload.get('name'))
+            if not remote_name:
+                missing_name.add(igdb_id)
+                continue
+            current_name = entry['current_name']
+            if remote_name == current_name:
+                unchanged_total += 1
+                continue
+            db_id = entry['id']
+            try:
+                numeric_id = int(db_id)
+            except (TypeError, ValueError):
+                missing_remote.add(igdb_id)
+                continue
+            updates.append((remote_name, timestamp, numeric_id))
+            updated_total += 1
+
+        if updates:
+            with db_lock:
+                conn = get_db()
             conn.executemany(
                 'UPDATE processed_games SET "Name"=?, last_edited_at=? WHERE "ID"=?',
                 updates,
             )
             conn.commit()
 
-    next_offset = offset + batch_count
-    processed = min(next_offset, total)
-    done = processed >= total
+        current_offset += batch_count
+        processed = min(current_offset, total)
+        update_progress(
+            current=processed,
+            total=total,
+            message='Fixing IGDB names…',
+            data={
+                'updated': updated_total,
+                'unchanged': unchanged_total,
+                'invalid': invalid_total,
+                'missing_remote': len(missing_remote),
+                'missing_name': len(missing_name),
+            },
+        )
+
+        if not process_all:
+            break
+
     missing_remote_list = sorted(missing_remote)
     missing_name_list = sorted(missing_name)
     missing_combined = sorted({*missing_remote, *missing_name})
 
-    return jsonify(
-        {
-            'status': 'ok',
-            'total': total,
-            'processed': processed,
-            'updated': updated_count,
-            'unchanged': unchanged_count,
-            'missing': missing_combined,
-            'missing_remote': missing_remote_list,
-            'missing_name': missing_name_list,
-            'invalid': invalid_count,
-            'done': done,
-            'next_offset': min(next_offset, total),
-        }
+    toast_type = 'success'
+    if updated_total > 0:
+        message = f"Updated {updated_total} game name{'s' if updated_total != 1 else ''} from IGDB."
+    else:
+        message = 'No game names required updating.'
+    if processed == 0:
+        message = 'No games with an IGDB ID were found.'
+        toast_type = 'warning'
+    if missing_combined:
+        plural = 's' if len(missing_combined) != 1 else ''
+        message += f" {len(missing_combined)} IGDB record{plural} missing."
+        toast_type = 'warning'
+
+    update_progress(
+        current=processed,
+        total=total,
+        message='Finished fixing IGDB names.',
+        data={
+            'updated': updated_total,
+            'unchanged': unchanged_total,
+            'invalid': invalid_total,
+            'missing_remote': len(missing_remote),
+            'missing_name': len(missing_name),
+        },
     )
 
+    processed_value = min(processed, total)
 
-@app.route('/api/updates/remove-duplicates', methods=['POST'])
-def api_updates_remove_duplicates():
+    return {
+        'status': 'ok',
+        'total': total,
+        'processed': processed_value,
+        'updated': updated_total,
+        'unchanged': unchanged_total,
+        'missing': missing_combined,
+        'missing_remote': missing_remote_list,
+        'missing_name': missing_name_list,
+        'invalid': invalid_total,
+        'toast_type': toast_type,
+        'message': message.strip(),
+        'done': processed_value >= total,
+        'next_offset': processed_value,
+    }
+
+
+@app.route('/api/updates/fix-names', methods=['POST'])
+def api_updates_fix_names():
+    payload = request.get_json(silent=True) or {}
+    try:
+        offset = int(payload.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(payload.get('limit', FIX_NAMES_BATCH_LIMIT))
+    except (TypeError, ValueError):
+        limit = FIX_NAMES_BATCH_LIMIT
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        limit = FIX_NAMES_BATCH_LIMIT
+
+    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
+    if run_sync:
+        result = _execute_fix_names_job(
+            lambda **_kwargs: None,
+            offset=offset,
+            limit=limit,
+            process_all=False,
+        )
+        return jsonify(result)
+
+    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
+        with app.app_context():
+            return _execute_fix_names_job(update_progress)
+
+    job, created = job_manager.start_job(
+        'fix_names',
+        runner,
+        description='Fixing IGDB names…',
+    )
+    status_code = 202 if created else 200
+    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
+    if job:
+        response.headers['Location'] = url_for(
+            'api_updates_job_detail', job_id=job['id']
+        )
+    return response, status_code
+
+
+def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
     global games_df, total_games, navigator
+
+    update_progress(message='Scanning for duplicates…', data={'phase': 'dedupe'}, current=0, total=0)
+
     with db_lock:
         conn = get_db()
         cur = conn.execute(
@@ -4799,10 +5310,13 @@ def api_updates_remove_duplicates():
             continue
         groups.setdefault((name_value, igdb_value), []).append(row)
 
+    group_values = list(groups.values())
+    total_groups = len(group_values)
+
     duplicate_groups = 0
     skipped_groups = 0
     candidates: list[sqlite3.Row] = []
-    for group in groups.values():
+    for index, group in enumerate(group_values, start=1):
         if len(group) <= 1:
             continue
         duplicate_groups += 1
@@ -4819,6 +5333,16 @@ def api_updates_remove_duplicates():
             skipped_groups += 1
             continue
         candidates.extend(unprocessed_rows)
+        update_progress(
+            current=index,
+            total=total_groups or len(groups),
+            message='Evaluating duplicate groups…',
+            data={
+                'phase': 'dedupe',
+                'duplicate_groups': duplicate_groups,
+                'skipped': skipped_groups,
+            },
+        )
 
     ids_to_delete: set[int] = set()
     raw_source_indices: set[str] = set()
@@ -4834,15 +5358,34 @@ def api_updates_remove_duplicates():
 
     if not ids_to_delete:
         remaining_total = len(games_df) if games_df is not None else total_games
-        return jsonify(
-            {
-                'status': 'ok',
+        message = (
+            'No removable duplicates found.'
+            if duplicate_groups
+            else 'No duplicates detected.'
+        )
+        toast_type = 'info'
+        if skipped_groups and not duplicate_groups:
+            toast_type = 'warning'
+        update_progress(
+            message=message,
+            current=total_groups,
+            total=total_groups or len(groups) or 1,
+            data={
+                'phase': 'dedupe',
                 'removed': 0,
                 'duplicate_groups': duplicate_groups,
                 'skipped': skipped_groups,
-                'remaining': remaining_total,
-            }
+            },
         )
+        return {
+            'status': 'ok',
+            'removed': 0,
+            'duplicate_groups': duplicate_groups,
+            'skipped': skipped_groups,
+            'remaining': remaining_total,
+            'message': message,
+            'toast_type': toast_type,
+        }
 
     delete_params = [(game_id,) for game_id in sorted(ids_to_delete)]
     with db_lock:
@@ -4947,15 +5490,83 @@ def api_updates_remove_duplicates():
     except Exception:
         pass
 
-    return jsonify(
-        {
-            'status': 'ok',
-            'removed': len(ids_to_delete),
+    remaining_total = total_games
+    removed_count = len(ids_to_delete)
+
+    message = (
+        f"Removed {removed_count} duplicate{'s' if removed_count != 1 else ''}."
+        if removed_count > 0
+        else 'No removable duplicates found.'
+    )
+    toast_type = 'success' if removed_count > 0 else 'info'
+    if skipped_groups and removed_count == 0:
+        toast_type = 'warning'
+        message += f" Skipped {skipped_groups} duplicate group{'s' if skipped_groups != 1 else ''}."
+
+    update_progress(
+        message='Removed duplicate entries.',
+        current=total_groups or len(groups) or 1,
+        total=total_groups or len(groups) or 1,
+        data={
+            'phase': 'dedupe',
+            'removed': removed_count,
             'duplicate_groups': duplicate_groups,
             'skipped': skipped_groups,
-            'remaining': total_games,
-        }
+        },
     )
+
+    return {
+        'status': 'ok',
+        'removed': removed_count,
+        'duplicate_groups': duplicate_groups,
+        'skipped': skipped_groups,
+        'remaining': remaining_total,
+        'message': message.strip(),
+        'toast_type': toast_type,
+    }
+
+
+@app.route('/api/updates/remove-duplicates', methods=['POST'])
+def api_updates_remove_duplicates():
+    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
+    if run_sync:
+        result = _execute_remove_duplicates_job(lambda **_kwargs: None)
+        return jsonify(result)
+
+    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
+        with app.app_context():
+            return _execute_remove_duplicates_job(update_progress)
+
+    job, created = job_manager.start_job(
+        'remove_duplicates',
+        runner,
+        description='Removing duplicates…',
+    )
+    status_code = 202 if created else 200
+    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
+    if job:
+        response.headers['Location'] = url_for(
+            'api_updates_job_detail', job_id=job['id']
+        )
+    return response, status_code
+
+
+@app.route('/api/updates/jobs', methods=['GET'])
+def api_updates_job_list():
+    job_type = request.args.get('type')
+    active_only = request.args.get('active')
+    jobs = job_manager.list_jobs(job_type=job_type)
+    if active_only and str(active_only).lower() in {'1', 'true', 'yes'}:
+        jobs = [job for job in jobs if job['status'] in JOB_ACTIVE_STATUSES]
+    return jsonify({'jobs': jobs})
+
+
+@app.route('/api/updates/jobs/<job_id>', methods=['GET'])
+def api_updates_job_detail(job_id: str):
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return jsonify({'error': 'job not found'}), 404
+    return jsonify({'job': job})
 
 
 @app.route('/api/updates', methods=['GET'])
