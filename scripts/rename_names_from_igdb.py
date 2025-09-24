@@ -11,15 +11,254 @@ from typing import Any, Callable, Iterable, Mapping
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from typing import Any, Callable, Iterable, Mapping
+try:
+    from app import (
+        coerce_igdb_id,
+        db_lock,
+        exchange_twitch_credentials,
+        fetch_igdb_metadata,
+        get_db,
+    )
+except ModuleNotFoundError:
+    import json
+    import logging
+    import numbers
+    import os
+    from math import isnan
+    from threading import Lock
+    from urllib.error import HTTPError
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
 
-from app import (
-    coerce_igdb_id,
-    db_lock,
-    exchange_twitch_credentials,
-    fetch_igdb_metadata,
-    get_db,
-)
+    logger = logging.getLogger(__name__)
+
+    DEFAULT_IGDB_USER_AGENT = "TT-Game-Liste/1.0 (support@example.com)"
+    IGDB_USER_AGENT = os.environ.get("IGDB_USER_AGENT") or DEFAULT_IGDB_USER_AGENT
+    IGDB_BATCH_SIZE = 500
+
+    def _coerce_positive_float(value: str | None, default: float) -> float:
+        try:
+            numeric = float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+        return numeric if numeric > 0 else default
+
+    SQLITE_TIMEOUT_SECONDS = _coerce_positive_float(os.environ.get("SQLITE_TIMEOUT"), 120.0)
+    PROCESSED_DB_NAME = os.environ.get("PROCESSED_DB", "processed_games.db")
+
+    db_lock = Lock()
+
+    def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+        busy_timeout_ms = int(max(SQLITE_TIMEOUT_SECONDS, 0) * 1000)
+        if busy_timeout_ms > 0:
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            except sqlite3.OperationalError:
+                pass
+        return conn
+
+    def get_db() -> sqlite3.Connection:
+        db_path = PROJECT_ROOT / PROCESSED_DB_NAME
+        conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
+        conn.row_factory = sqlite3.Row
+        return _configure_sqlite_connection(conn)
+
+    def _is_nan(value: Any) -> bool:
+        try:
+            return isnan(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    def coerce_igdb_id(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() == "nan":
+                return ""
+            if text.endswith(".0") and text[:-2].isdigit():
+                return text[:-2]
+            return text
+        if isinstance(value, numbers.Integral):
+            return str(int(value))
+        if isinstance(value, numbers.Real):
+            if _is_nan(value):
+                return ""
+            numeric = float(value)
+            if numeric.is_integer():
+                return str(int(numeric))
+            return str(value)
+        text = str(value).strip()
+        if not text or text.lower() == "nan":
+            return ""
+        return text
+
+    def exchange_twitch_credentials() -> tuple[str, str]:
+        client_id = os.environ.get("TWITCH_CLIENT_ID")
+        client_secret = os.environ.get("TWITCH_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            raise RuntimeError("missing twitch client credentials")
+
+        payload = urlencode(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "client_credentials",
+            }
+        ).encode("utf-8")
+
+        request = Request(
+            "https://id.twitch.tv/oauth2/token",
+            data=payload,
+            method="POST",
+        )
+        request.add_header("Content-Type", "application/x-www-form-urlencoded")
+
+        try:
+            with urlopen(request) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - network failures surfaced
+            raise RuntimeError(f"failed to obtain twitch token: {exc}") from exc
+
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError("missing access token in twitch response")
+        return token, client_id
+
+    def _parse_iterable(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        if isinstance(value, numbers.Number):
+            if _is_nan(value):
+                return []
+            return [str(value)]
+        items: list[str] = []
+        try:
+            iterator = iter(value)
+        except TypeError:
+            text = str(value).strip()
+            return [text] if text else []
+        for element in iterator:
+            if isinstance(element, Mapping):
+                name_value = element.get("name")
+                if isinstance(name_value, str):
+                    stripped = name_value.strip()
+                    if stripped:
+                        items.append(stripped)
+                        continue
+                items.append(str(element).strip())
+            else:
+                candidate = str(element).strip()
+                if candidate:
+                    items.append(candidate)
+        return items
+
+    def fetch_igdb_metadata(
+        access_token: str, client_id: str, igdb_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        if not igdb_ids:
+            return {}
+
+        numeric_ids: list[int] = []
+        for value in igdb_ids:
+            try:
+                numeric_ids.append(int(str(value).strip()))
+            except (TypeError, ValueError):
+                logger.warning("Skipping invalid IGDB id %s", value)
+        if not numeric_ids:
+            return {}
+
+        results: dict[str, dict[str, Any]] = {}
+        batch_size = IGDB_BATCH_SIZE if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0 else 500
+        for start in range(0, len(numeric_ids), batch_size):
+            chunk = numeric_ids[start : start + batch_size]
+            if not chunk:
+                continue
+            query = (
+                "fields "
+                "id,name,summary,updated_at,first_release_date,"
+                "genres.name,platforms.name,game_modes.name,category,"
+                "involved_companies.company.name,"
+                "involved_companies.developer,"
+                "involved_companies.publisher; "
+                f"where id = ({', '.join(str(v) for v in chunk)}); "
+                f"limit {len(chunk)};"
+            )
+            request = Request(
+                "https://api.igdb.com/v4/games",
+                data=query.encode("utf-8"),
+                method="POST",
+            )
+            request.add_header("Client-ID", client_id)
+            request.add_header("Authorization", f"Bearer {access_token}")
+            request.add_header("Accept", "application/json")
+            request.add_header("User-Agent", IGDB_USER_AGENT)
+
+            try:
+                with urlopen(request) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                error_message = ""
+                try:
+                    error_body = exc.read()
+                except Exception:  # pragma: no cover - best effort to capture error body
+                    error_body = b""
+                if error_body:
+                    try:
+                        error_message = error_body.decode("utf-8", errors="replace").strip()
+                    except Exception:  # pragma: no cover - unexpected decoding failures
+                        error_message = ""
+                if not error_message and getattr(exc, "reason", None):
+                    error_message = str(exc.reason)
+                message = f"IGDB request failed: {exc.code}"
+                if error_message:
+                    message = f"{message} {error_message}"
+                raise RuntimeError(message) from exc
+            except Exception as exc:  # pragma: no cover - network failures surfaced
+                logger.warning("Failed to query IGDB: %s", exc)
+                return {}
+
+            for item in payload or []:
+                if not isinstance(item, dict):
+                    continue
+                igdb_id = item.get("id")
+                if igdb_id is None:
+                    continue
+                parsed_item = dict(item)
+                involved_companies = item.get("involved_companies")
+                developer_names: list[str] = []
+                publisher_names: list[str] = []
+                if isinstance(involved_companies, list):
+                    for company in involved_companies:
+                        if not isinstance(company, Mapping):
+                            continue
+                        company_obj = company.get("company")
+                        company_name: str | None = None
+                        if isinstance(company_obj, Mapping):
+                            name_value = company_obj.get("name")
+                            if isinstance(name_value, str):
+                                stripped = name_value.strip()
+                                if stripped:
+                                    company_name = stripped
+                        elif isinstance(company_obj, str):
+                            stripped = company_obj.strip()
+                            if stripped:
+                                company_name = stripped
+                        if not company_name:
+                            continue
+                        if company.get("developer"):
+                            developer_names.append(company_name)
+                        if company.get("publisher"):
+                            publisher_names.append(company_name)
+                parsed_item["developers"] = developer_names
+                parsed_item["publishers"] = publisher_names
+                parsed_item["genres"] = _parse_iterable(item.get("genres"))
+                parsed_item["platforms"] = _parse_iterable(item.get("platforms"))
+                parsed_item["game_modes"] = _parse_iterable(item.get("game_modes"))
+                results[str(igdb_id)] = parsed_item
+        return results
 
 
 def _normalize_text(value: Any) -> str:
