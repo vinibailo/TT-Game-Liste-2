@@ -150,6 +150,10 @@ LOOKUP_RELATIONS_BY_KEY = {
     relation['response_key']: relation for relation in LOOKUP_RELATIONS
 }
 
+LOOKUP_RELATIONS_BY_TABLE = {
+    relation['lookup_table']: relation for relation in LOOKUP_RELATIONS
+}
+
 LOOKUP_TABLES_BY_NAME = {
     table_config['table']: table_config for table_config in LOOKUP_TABLES
 }
@@ -1325,6 +1329,96 @@ def _persist_lookup_relations(
             if isinstance(raw_ids, (list, tuple)):
                 ids = [value for value in raw_ids if value is not None]
         _replace_lookup_relations(conn, join_table, join_column, processed_game_id, ids)
+
+
+def _lookup_entries_to_selection(
+    entries: Mapping[str, list[dict[str, Any]]]
+) -> dict[str, dict[str, list[int]]]:
+    payload: dict[str, dict[str, list[int]]] = {}
+    for relation in LOOKUP_RELATIONS:
+        response_key = relation['response_key']
+        relation_entries = entries.get(response_key, [])
+        ids: list[int] = []
+        for entry in relation_entries:
+            if not isinstance(entry, Mapping):
+                continue
+            entry_id = entry.get('id')
+            if entry_id is None:
+                continue
+            try:
+                ids.append(int(entry_id))
+            except (TypeError, ValueError):
+                continue
+        payload[response_key] = {'ids': ids}
+    return payload
+
+
+def _apply_lookup_entries_to_processed_game(
+    conn: sqlite3.Connection,
+    processed_game_id: int,
+    entries: Mapping[str, list[dict[str, Any]]],
+) -> None:
+    columns = get_processed_games_columns(conn)
+    set_fragments: list[str] = []
+    params: list[Any] = []
+    for relation in LOOKUP_RELATIONS:
+        response_key = relation['response_key']
+        processed_column = relation['processed_column']
+        id_column = relation.get('id_column')
+        relation_entries = entries.get(response_key, [])
+        if processed_column in columns:
+            names: list[str] = []
+            for entry in relation_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                normalized = _normalize_lookup_name(entry.get('name'))
+                if normalized:
+                    names.append(normalized)
+            set_fragments.append(f'{_quote_identifier(processed_column)} = ?')
+            params.append(_lookup_display_text(names))
+        if id_column and id_column in columns:
+            ids: list[int] = []
+            for entry in relation_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                entry_id = entry.get('id')
+                if entry_id is None:
+                    continue
+                try:
+                    ids.append(int(entry_id))
+                except (TypeError, ValueError):
+                    continue
+            set_fragments.append(f'{_quote_identifier(id_column)} = ?')
+            params.append(_encode_lookup_id_list(ids))
+    if not set_fragments:
+        return
+    params.append(processed_game_id)
+    conn.execute(
+        f'UPDATE processed_games SET {", ".join(set_fragments)} WHERE "ID" = ?',
+        params,
+    )
+
+
+def _remove_lookup_id_from_entries(
+    entries: Mapping[str, list[dict[str, Any]]],
+    relation: Mapping[str, Any],
+    lookup_id: int,
+) -> None:
+    response_key = relation['response_key']
+    relation_entries = list(entries.get(response_key, []) or [])
+    filtered: list[dict[str, Any]] = []
+    for entry in relation_entries:
+        if not isinstance(entry, Mapping):
+            continue
+        entry_id = entry.get('id')
+        try:
+            coerced = int(entry_id) if entry_id is not None else None
+        except (TypeError, ValueError):
+            coerced = None
+        if coerced == lookup_id:
+            continue
+        filtered.append(entry)
+    entries[response_key] = filtered
 
 
 def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
@@ -3051,34 +3145,156 @@ def lookups_page():
     )
 
 
-@app.route('/api/lookups/<lookup_type>')
+@app.route('/api/lookups/<lookup_type>', methods=['GET', 'POST', 'PUT', 'DELETE'])
 def api_lookup_options(lookup_type: str):
     normalized = lookup_type.strip().lower().replace('-', '_').replace(' ', '_')
     table_name = LOOKUP_ENDPOINT_MAP.get(normalized)
     if not table_name or table_name not in LOOKUP_TABLES_BY_NAME:
         return jsonify({'error': 'unknown lookup type'}), 404
-    with db_lock:
-        conn = get_db()
-        cur = conn.execute(
-            f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE'
-        )
-        rows = cur.fetchall()
-    items: list[dict[str, Any]] = []
-    seen_ids: set[int] = set()
-    for row in rows:
-        raw_id = _row_value(row, 'id', 0)
-        try:
-            coerced_id = int(raw_id)
-        except (TypeError, ValueError):
-            coerced_id = None
-        if coerced_id is None or coerced_id in seen_ids:
-            continue
-        name = _normalize_lookup_name(_row_value(row, 'name', 1))
+
+    if request.method == 'GET':
+        with db_lock:
+            conn = get_db()
+            cur = conn.execute(
+                f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE'
+            )
+            rows = cur.fetchall()
+        items: list[dict[str, Any]] = []
+        seen_ids: set[int] = set()
+        for row in rows:
+            raw_id = _row_value(row, 'id', 0)
+            try:
+                coerced_id = int(raw_id)
+            except (TypeError, ValueError):
+                coerced_id = None
+            if coerced_id is None or coerced_id in seen_ids:
+                continue
+            name = _normalize_lookup_name(_row_value(row, 'name', 1))
+            if not name:
+                continue
+            seen_ids.add(coerced_id)
+            items.append({'id': coerced_id, 'name': name})
+        return jsonify({'items': items, 'type': table_name})
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, Mapping):
+        return jsonify({'error': 'invalid payload'}), 400
+
+    if request.method == 'POST':
+        name = _normalize_lookup_name(payload.get('name'))
         if not name:
-            continue
-        seen_ids.add(coerced_id)
-        items.append({'id': coerced_id, 'name': name})
-    return jsonify({'items': items, 'type': table_name})
+            return jsonify({'error': 'invalid name'}), 400
+        with db_lock:
+            conn = get_db()
+            existing = conn.execute(
+                f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE',
+                (name,),
+            ).fetchone()
+            lookup_id = _get_or_create_lookup_id(conn, table_name, name)
+            final_name = _lookup_name_for_id(conn, table_name, lookup_id) or name
+            status_code = 201 if existing is None else 200
+            if existing is None:
+                conn.commit()
+        return (
+            jsonify({'item': {'id': lookup_id, 'name': final_name}, 'type': table_name}),
+            status_code,
+        )
+
+    lookup_id_raw = payload.get('id')
+    try:
+        lookup_id = int(lookup_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid lookup id'}), 400
+
+    relation = LOOKUP_RELATIONS_BY_TABLE.get(table_name)
+
+    if request.method == 'PUT':
+        new_name = _normalize_lookup_name(payload.get('name'))
+        if not new_name:
+            return jsonify({'error': 'invalid name'}), 400
+        with db_lock:
+            conn = get_db()
+            row = conn.execute(
+                f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
+            ).fetchone()
+            if row is None:
+                return jsonify({'error': 'lookup not found'}), 404
+            existing_name = _normalize_lookup_name(_row_value(row, 'name', 1))
+            if existing_name != new_name:
+                conflict = conn.execute(
+                    f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE AND id != ?',
+                    (new_name, lookup_id),
+                ).fetchone()
+                if conflict is not None:
+                    return jsonify({'error': 'name conflict'}), 409
+                conn.execute(
+                    f'UPDATE {table_name} SET name = ? WHERE id = ?',
+                    (new_name, lookup_id),
+                )
+            affected_game_ids: list[int] = []
+            if relation:
+                join_table = relation['join_table']
+                join_column = relation['join_column']
+                cur_games = conn.execute(
+                    f'SELECT DISTINCT processed_game_id FROM {join_table} '
+                    f'WHERE {join_column} = ?',
+                    (lookup_id,),
+                )
+                for game_row in cur_games.fetchall():
+                    try:
+                        game_id = int(_row_value(game_row, 'processed_game_id', 0))
+                    except (TypeError, ValueError):
+                        continue
+                    affected_game_ids.append(game_id)
+            for game_id in affected_game_ids:
+                entries_map = {
+                    key: list(value)
+                    for key, value in _fetch_lookup_entries_for_game(conn, game_id).items()
+                }
+                selections = _lookup_entries_to_selection(entries_map)
+                _persist_lookup_relations(conn, game_id, selections)
+                _apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
+            updated_name = _lookup_name_for_id(conn, table_name, lookup_id) or new_name
+            conn.commit()
+        return jsonify({'item': {'id': lookup_id, 'name': updated_name}, 'type': table_name})
+
+    if request.method == 'DELETE':
+        with db_lock:
+            conn = get_db()
+            row = conn.execute(
+                f'SELECT id FROM {table_name} WHERE id = ?', (lookup_id,)
+            ).fetchone()
+            if row is None:
+                return jsonify({'error': 'lookup not found'}), 404
+            if relation:
+                join_table = relation['join_table']
+                join_column = relation['join_column']
+                cur_games = conn.execute(
+                    f'SELECT DISTINCT processed_game_id FROM {join_table} '
+                    f'WHERE {join_column} = ?',
+                    (lookup_id,),
+                )
+                entries_by_game: dict[int, dict[str, list[dict[str, Any]]]] = {}
+                for game_row in cur_games.fetchall():
+                    try:
+                        game_id = int(_row_value(game_row, 'processed_game_id', 0))
+                    except (TypeError, ValueError):
+                        continue
+                    entries_map = {
+                        key: list(value)
+                        for key, value in _fetch_lookup_entries_for_game(conn, game_id).items()
+                    }
+                    _remove_lookup_id_from_entries(entries_map, relation, lookup_id)
+                    entries_by_game[game_id] = entries_map
+                for game_id, entries_map in entries_by_game.items():
+                    selections = _lookup_entries_to_selection(entries_map)
+                    _persist_lookup_relations(conn, game_id, selections)
+                    _apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
+            conn.execute(f'DELETE FROM {table_name} WHERE id = ?', (lookup_id,))
+            conn.commit()
+        return jsonify({'status': 'deleted', 'type': table_name, 'id': lookup_id})
+
+    return jsonify({'error': 'unsupported method'}), 405
 
 
 @app.route('/updates')
