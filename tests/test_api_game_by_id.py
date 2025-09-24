@@ -118,3 +118,117 @@ def test_game_by_id_invalid_input(tmp_path):
     assert response.status_code == 400
     assert response.get_json()['error'] == 'invalid id'
 
+
+def _setup_igdb_prefill_app(app_module, igdb_id='123'):
+    app_module.games_df = pd.DataFrame(
+        [
+            {
+                "Source Index": "0",
+                "Name": "",
+                "Summary": "",
+                "First Launch Date": "",
+                "Developers": "",
+                "Publishers": "",
+                "Genres": "",
+                "Game Modes": "",
+                "Category": "",
+                "Platforms": "",
+                "Large Cover Image (URL)": "",
+                "IGDB ID": igdb_id,
+                "igdb_id": igdb_id,
+            }
+        ]
+    )
+    app_module.reset_source_index_cache()
+    app_module.total_games = len(app_module.games_df)
+    app_module.navigator.total = app_module.total_games
+    app_module.navigator.current_index = 0
+    app_module.navigator.seq_index = 1
+    with app_module.db_lock:
+        with app_module.db:
+            app_module.db.execute('DELETE FROM processed_games')
+            app_module.db.execute('DELETE FROM navigator_state')
+            app_module.db.execute(
+                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary", "Cover Path") '
+                'VALUES (?, ?, ?, ?, ?)',
+                (1, '0', '', '', None),
+            )
+
+
+def _fake_prefill_metadata(image_id='abc123'):
+    return {
+        'id': 123,
+        'name': 'IGDB Prefill',
+        'summary': 'Prefilled summary',
+        'first_release_date': 1_609_459_200,
+        'category': 0,
+        'developers': ['IGDB Studio'],
+        'publishers': ['IGDB Publisher'],
+        'genres': [{'name': 'Action'}],
+        'platforms': [{'name': 'PC'}, {'name': 'Switch'}],
+        'game_modes': [{'name': 'Single-player'}],
+        'cover': {'image_id': image_id},
+    }
+
+
+def test_build_game_payload_prefills_from_igdb(tmp_path):
+    app_module = load_app(tmp_path)
+    _setup_igdb_prefill_app(app_module)
+
+    app_module.exchange_twitch_credentials = lambda: ("token", "client")
+    app_module.fetch_igdb_metadata = lambda *_args, **_kwargs: {'123': _fake_prefill_metadata()}
+    captured_urls: list[str] = []
+
+    def fake_cover_data_from_url(url: str) -> str:
+        captured_urls.append(url)
+        return f'cover::{url}'
+
+    app_module.cover_data_from_url = fake_cover_data_from_url
+
+    payload = app_module.build_game_payload(0, 1, 1)
+    game = payload['game']
+
+    assert game['Name'] == 'IGDB Prefill'
+    assert game['Summary'] == 'Prefilled summary'
+    assert game['FirstLaunchDate'] == '2021-01-01'
+    assert game['Developers'] == 'IGDB Studio'
+    assert game['Publishers'] == 'IGDB Publisher'
+    assert game['Platforms'] == ['PC', 'Switch']
+    assert game['Genres'] == ['Ação e Aventura']
+    assert game['GameModes'] == ['Single-player']
+    assert game['IGDBID'] == '123'
+    assert payload['cover'] == 'cover::https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
+    assert captured_urls[-1] == 'https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
+
+
+def test_api_game_raw_prefills_from_igdb(tmp_path):
+    app_module = load_app(tmp_path)
+    _setup_igdb_prefill_app(app_module)
+
+    app_module.exchange_twitch_credentials = lambda: ("token", "client")
+    app_module.fetch_igdb_metadata = lambda *_args, **_kwargs: {'123': _fake_prefill_metadata('xyz789')}
+    captured_urls: list[str] = []
+
+    def fake_cover_data_from_url(url: str) -> str:
+        captured_urls.append(url)
+        return f'cover::{url}'
+
+    app_module.cover_data_from_url = fake_cover_data_from_url
+
+    client = app_module.app.test_client()
+    authenticate(client)
+    response = client.get('/api/game/0/raw')
+
+    assert response.status_code == 200
+    data = response.get_json()
+    game = data['game']
+
+    assert game['Name'] == 'IGDB Prefill'
+    assert game['Summary'] == 'Prefilled summary'
+    assert game['Platforms'] == ['PC', 'Switch']
+    assert game['Genres'] == ['Ação e Aventura']
+    assert game['GameModes'] == ['Single-player']
+    assert game['IGDBID'] == '123'
+    assert data['cover'] == 'cover::https://images.igdb.com/igdb/image/upload/t_original/xyz789.jpg'
+    assert captured_urls[-1] == 'https://images.igdb.com/igdb/image/upload/t_original/xyz789.jpg'
+
