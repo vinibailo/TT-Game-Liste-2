@@ -435,6 +435,107 @@ client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 db_lock = Lock()
 _processed_games_columns_cache: set[str] | None = None
 
+_source_index_cache_lock = Lock()
+_source_index_by_position: dict[int, str] | None = None
+_position_by_source_index: dict[str, int] | None = None
+_source_index_cache_df_id: int | None = None
+
+
+def _canonical_source_index(value: Any) -> str | None:
+    """Normalize ``Source Index`` values to a consistent string representation."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return str(int(text))
+    except (TypeError, ValueError):
+        return text
+
+
+def reset_source_index_cache() -> None:
+    """Clear cached mappings between navigator positions and ``Source Index`` values."""
+
+    global _source_index_by_position, _position_by_source_index, _source_index_cache_df_id
+    with _source_index_cache_lock:
+        _source_index_by_position = None
+        _position_by_source_index = None
+        _source_index_cache_df_id = None
+
+
+def _ensure_source_index_cache() -> tuple[dict[int, str], dict[str, int]]:
+    """Build and return cached lookup tables for ``Source Index`` values."""
+
+    global _source_index_by_position, _position_by_source_index, _source_index_cache_df_id
+
+    df = globals().get('games_df')
+    if df is None:
+        raise RuntimeError('games_df is not loaded')
+
+    with _source_index_cache_lock:
+        df_id = id(df)
+        if (
+            _source_index_by_position is None
+            or _position_by_source_index is None
+            or _source_index_cache_df_id != df_id
+            or len(_source_index_by_position) != len(df)
+        ):
+            mapping: dict[int, str] = {}
+            reverse: dict[str, int] = {}
+            if len(df) > 0:
+                source_values: list[Any] | None = None
+                if 'Source Index' in df.columns:
+                    source_values = df['Source Index'].tolist()
+                for position in range(len(df)):
+                    raw_value: Any
+                    if source_values is not None and position < len(source_values):
+                        raw_value = source_values[position]
+                    else:
+                        raw_value = position
+                    canonical = _canonical_source_index(raw_value)
+                    if canonical is None:
+                        canonical = str(position)
+                    mapping[position] = canonical
+                    reverse.setdefault(canonical, position)
+            _source_index_by_position = mapping
+            _position_by_source_index = reverse
+            _source_index_cache_df_id = df_id
+
+        return _source_index_by_position, _position_by_source_index
+
+
+def get_source_index_for_position(position: int) -> str:
+    """Return the normalized ``Source Index`` string for a DataFrame position."""
+
+    if position < 0:
+        raise IndexError('invalid index')
+    mapping, _ = _ensure_source_index_cache()
+    try:
+        return mapping[position]
+    except KeyError as exc:
+        raise IndexError('invalid index') from exc
+
+
+def get_position_for_source_index(value: Any) -> int | None:
+    """Resolve a ``Source Index`` value back to its DataFrame position."""
+
+    canonical = _canonical_source_index(value)
+    if canonical is None:
+        return None
+    mapping, reverse = _ensure_source_index_cache()
+    position = reverse.get(canonical)
+    if position is not None:
+        return position
+    try:
+        fallback = int(canonical)
+    except (TypeError, ValueError):
+        return None
+    if fallback < 0:
+        return None
+    return fallback
+
 
 def get_db():
     if not has_app_context():
@@ -1849,13 +1950,7 @@ def seed_processed_games_from_source() -> None:
         return text
 
     def _coerce_source_index(value: Any) -> str | None:
-        if value is None:
-            return None
-        try:
-            return str(int(str(value).strip()))
-        except (TypeError, ValueError):
-            text = str(value).strip()
-            return text or None
+        return _canonical_source_index(value)
 
     with db_lock:
         conn = get_db()
@@ -1945,14 +2040,11 @@ def backfill_igdb_ids() -> None:
                 if igdb_id_value:
                     continue
                 src_index = row['Source Index']
-                try:
-                    idx = int(str(src_index))
-                except (TypeError, ValueError):
-                    continue
-                if idx < 0 or idx >= len(games_df):
+                position = get_position_for_source_index(src_index)
+                if position is None or position < 0 or position >= len(games_df):
                     continue
                 candidate = extract_igdb_id(
-                    games_df.iloc[idx], allow_generic_id=True
+                    games_df.iloc[position], allow_generic_id=True
                 )
                 if candidate:
                     conn.execute(
@@ -2255,12 +2347,8 @@ class GameNavigator:
         processed: set[int] = set()
         max_seq = 0
         for row in rows:
-            raw_index = row['Source Index']
-            try:
-                index_value = int(str(raw_index).strip())
-            except (TypeError, ValueError):
-                index_value = None
-            if index_value is not None and 0 <= index_value < self.total:
+            position = get_position_for_source_index(row['Source Index'])
+            if position is not None and 0 <= position < self.total:
                 processed_flag = False
                 last_edited = row['last_edited_at']
                 if last_edited:
@@ -2275,7 +2363,7 @@ class GameNavigator:
                     elif isinstance(name_value, str) and not name_value.strip():
                         processed_flag = True
                 if processed_flag:
-                    processed.add(index_value)
+                    processed.add(position)
             try:
                 row_id = int(row['ID'])
             except (TypeError, ValueError):
@@ -2632,13 +2720,16 @@ def updates_page():
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
     try:
         row = games_df.iloc[index]
+        source_index = get_source_index_for_position(index)
     except Exception:
         raise IndexError('invalid index')
     processed_row = None
     processed_lookup_entries: dict[str, list[dict[str, Any]]] = {}
     with db_lock:
         conn = get_db()
-        cur = conn.execute('SELECT * FROM processed_games WHERE "Source Index"=?', (str(index),))
+        cur = conn.execute(
+            'SELECT * FROM processed_games WHERE "Source Index"=?', (source_index,)
+        )
         processed_row = cur.fetchone()
         if processed_row is not None:
             processed_lookup_entries = _fetch_lookup_entries_for_game(
@@ -2808,16 +2899,33 @@ def api_save():
     if expected_id is None:
         return jsonify({'error': 'missing id'}), 400
     expected_id = int(expected_id)
+    total_rows = len(games_df)
+    if 0 <= index < total_rows:
+        try:
+            source_index = get_source_index_for_position(index)
+        except IndexError:
+            source_index = str(index)
+    else:
+        source_index = str(index)
     try:
         with navigator.lock:
             if index != navigator.current_index:
                 expected_index = navigator.current_index
                 expected_seq_id = navigator.seq_index
+                if 0 <= expected_index < total_rows:
+                    try:
+                        expected_source_index = get_source_index_for_position(
+                            expected_index
+                        )
+                    except IndexError:
+                        expected_source_index = str(expected_index)
+                else:
+                    expected_source_index = str(expected_index)
                 with db_lock:
                     conn = get_db()
                     cur = conn.execute(
                         'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
-                        (str(expected_index),),
+                        (expected_source_index,),
                     )
                     row = cur.fetchone()
                     if row is not None:
@@ -2839,7 +2947,7 @@ def api_save():
                 conn = get_db()
                 cur = conn.execute(
                     'SELECT "ID", "igdb_id", last_edited_at FROM processed_games WHERE "Source Index"=?',
-                    (str(index),),
+                    (source_index,),
                 )
                 existing = cur.fetchone()
                 if existing:
@@ -2912,7 +3020,7 @@ def api_save():
             last_edit_ts = now_utc_iso()
             row = {
                 "ID": seq_id,
-                "Source Index": str(index),
+                "Source Index": source_index,
                 "Name": fields.get('Name', ''),
                 "Summary": fields.get('Summary', ''),
                 "First Launch Date": fields.get('FirstLaunchDate', ''),
@@ -3260,9 +3368,8 @@ def api_game_by_id():
     if row is None:
         return jsonify({'error': 'id not found'}), 404
 
-    try:
-        index = int(str(row['Source Index']))
-    except (TypeError, ValueError):
+    index = get_position_for_source_index(row['Source Index'])
+    if index is None:
         app.logger.error(
             "Invalid source index for ID %s: %s", game_id, row['Source Index']
         )
