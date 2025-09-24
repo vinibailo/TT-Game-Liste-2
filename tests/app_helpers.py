@@ -34,6 +34,8 @@ def load_app(tmp_path: Path) -> object:
                 os.environ[key] = value
 
     module.games_df = module.games_df.copy()
+    if hasattr(module, "reset_source_index_cache"):
+        module.reset_source_index_cache()
     module.total_games = len(module.games_df)
     if hasattr(module, "navigator"):
         module.navigator.total = module.total_games
