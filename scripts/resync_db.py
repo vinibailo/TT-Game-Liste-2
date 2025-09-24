@@ -10,6 +10,7 @@ from app import (
     db_lock,
     extract_igdb_id,
     coerce_igdb_id,
+    has_summary_text,
 )
 
 
@@ -50,7 +51,7 @@ def main() -> None:
         with conn:
             for src_index, igdb_id in sources:
                 cur = conn.execute(
-                    'SELECT "igdb_id" FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "igdb_id", "Summary" FROM processed_games WHERE "Source Index"=?',
                     (src_index,),
                 )
                 row = cur.fetchone()
@@ -62,6 +63,13 @@ def main() -> None:
                     continue
 
                 if not igdb_id:
+                    continue
+
+                try:
+                    summary_value = row['Summary']
+                except (KeyError, IndexError, TypeError):
+                    summary_value = None
+                if has_summary_text(summary_value):
                     continue
 
                 existing_id = _normalize_existing_id(row)

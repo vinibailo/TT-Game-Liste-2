@@ -171,6 +171,27 @@ LOOKUP_SOURCE_KEYS = {
     'Platforms': ['Platforms', 'Platform'],
 }
 
+
+def has_summary_text(value: Any) -> bool:
+    """Return ``True`` when ``value`` contains non-empty summary text."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            if pd.isna(value):
+                return False
+        except Exception:
+            pass
+        text = str(value).strip()
+    if not text:
+        return False
+    if text.lower() == 'nan':
+        return False
+    return True
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
@@ -1985,9 +2006,9 @@ def seed_processed_games_from_source() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "Source Index", "Name" FROM processed_games'
+                'SELECT "Source Index", "Name", "Summary" FROM processed_games'
             )
-            existing: dict[str, tuple[str, str]] = {}
+            existing: dict[str, tuple[str, str, bool]] = {}
             for row in cur.fetchall():
                 stored_source = row['Source Index']
                 if stored_source is None:
@@ -1998,7 +2019,15 @@ def seed_processed_games_from_source() -> None:
                     canonical = stored_text if stored_text else None
                 if canonical is None:
                     continue
-                existing[canonical] = (stored_text, _normalize_name(row['Name']))
+                try:
+                    summary_value = row['Summary']
+                except (KeyError, IndexError, TypeError):
+                    summary_value = None
+                existing[canonical] = (
+                    stored_text,
+                    _normalize_name(row['Name']),
+                    has_summary_text(summary_value),
+                )
 
             source_values = (
                 games_df['Source Index'].tolist()
@@ -2033,10 +2062,12 @@ def seed_processed_games_from_source() -> None:
                         'INSERT OR IGNORE INTO processed_games ("Source Index", "Name") VALUES (?, ?)',
                         (src_index, stored_name),
                     )
-                    existing[src_index] = (src_index, igdb_name)
+                    existing[src_index] = (src_index, igdb_name, False)
                     continue
 
-                stored_source, existing_name = existing[src_index]
+                stored_source, existing_name, has_summary = existing[src_index]
+                if has_summary:
+                    continue
                 if stored_source != src_index:
                     conn.execute(
                         'UPDATE processed_games SET "Source Index"=? WHERE "Source Index"=?',
@@ -2049,7 +2080,7 @@ def seed_processed_games_from_source() -> None:
                         (igdb_name, src_index),
                     )
                     existing_name = igdb_name
-                existing[src_index] = (stored_source, existing_name)
+                existing[src_index] = (stored_source, existing_name, has_summary)
 
 
 def backfill_igdb_ids() -> None:
@@ -2061,12 +2092,18 @@ def backfill_igdb_ids() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "Source Index", "igdb_id" FROM processed_games'
+                'SELECT "Source Index", "igdb_id", "Summary" FROM processed_games'
             )
             rows = cur.fetchall()
             for row in rows:
                 igdb_id_value = row['igdb_id']
                 if igdb_id_value:
+                    continue
+                try:
+                    summary_value = row['Summary']
+                except (KeyError, IndexError, TypeError):
+                    summary_value = None
+                if has_summary_text(summary_value):
                     continue
                 src_index = row['Source Index']
                 position = get_position_for_source_index(src_index)

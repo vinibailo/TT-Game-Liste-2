@@ -37,3 +37,33 @@ def test_seed_processed_games_respects_existing_keys(tmp_path):
     assert [row['Source Index'] for row in rows] == ['A-123', 'B-456']
     assert rows[0]['Name'] == 'Alpha Updated'
     assert rows[1]['Name'] == 'Beta'
+
+
+def test_seed_processed_games_skips_rows_with_summary(tmp_path):
+    app_module = load_app(tmp_path)
+
+    with app_module.db_lock:
+        with app_module.db:
+            app_module.db.execute('DELETE FROM processed_games')
+            app_module.db.execute(
+                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary") VALUES (?, ?, ?, ?)',
+                (5, ' 00123 ', 'Stored Name', 'Manual summary'),
+            )
+
+    app_module.games_df = pd.DataFrame([
+        {'Source Index': '00123', 'Name': 'Updated From IGDB'},
+    ])
+    app_module.total_games = len(app_module.games_df)
+    if hasattr(app_module, 'reset_source_index_cache'):
+        app_module.reset_source_index_cache()
+
+    app_module.seed_processed_games_from_source()
+
+    with app_module.db_lock:
+        row = app_module.db.execute(
+            'SELECT "Source Index", "Name" FROM processed_games WHERE "ID"=?',
+            (5,),
+        ).fetchone()
+
+    assert row['Source Index'] == ' 00123 '
+    assert row['Name'] == 'Stored Name'
