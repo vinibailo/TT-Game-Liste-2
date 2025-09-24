@@ -197,6 +197,54 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['igdb_id'] == '100'
     assert entry['name'] == 'Local Game'
     assert entry['has_diff'] is True
+    assert entry['update_type'] == 'mismatch'
+    assert entry['detail_available'] is True
+
+
+def test_updates_list_includes_duplicates(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    app_module.games_df = pd.DataFrame(
+        [
+            {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
+            {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
+            {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
+        ]
+    )
+    app_module.total_games = len(app_module.games_df)
+    if hasattr(app_module, 'reset_source_index_cache'):
+        app_module.reset_source_index_cache()
+    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{'Source Index': '0', 'Name': 'Unique Game', 'igdb_id': '10', 'Summary': 'Done', 'Cover Path': 'cover.jpg'},
+    )
+    insert_processed_game(
+        app_module,
+        ID=2,
+        **{'Source Index': '1', 'Name': 'Duplicated Game', 'igdb_id': '20', 'Summary': 'Done', 'Cover Path': 'cover2.jpg'},
+    )
+    insert_processed_game(
+        app_module,
+        ID=3,
+        **{'Source Index': '2', 'Name': 'Duplicated Game', 'igdb_id': '20', 'Summary': '', 'Cover Path': ''},
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    listing = client.get('/api/updates')
+    assert listing.status_code == 200
+    data = listing.get_json()
+    assert len(data['updates']) == 1
+    duplicate_entry = data['updates'][0]
+    assert duplicate_entry['processed_game_id'] == 3
+    assert duplicate_entry['update_type'] == 'duplicate'
+    assert duplicate_entry['detail_available'] is False
+    assert duplicate_entry['has_diff'] is False
 
 
 def test_cache_refresh_creates_entries(tmp_path):
@@ -698,6 +746,76 @@ def test_remove_duplicates_removes_unprocessed_entry(tmp_path):
     assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
     assert app_module.total_games == 3
     assert app_module.navigator.total == 3
+
+
+def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    app_module.games_df = pd.DataFrame(
+        [
+            {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
+            {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
+            {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
+            {'Source Index': '3', 'Name': 'Tail Game', 'id': 30},
+        ]
+    )
+    app_module.total_games = len(app_module.games_df)
+    if hasattr(app_module, 'reset_source_index_cache'):
+        app_module.reset_source_index_cache()
+    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{'Source Index': '0', 'Name': 'Unique Game', 'igdb_id': '10', 'Summary': '', 'Cover Path': ''},
+    )
+    insert_processed_game(
+        app_module,
+        ID=2,
+        **{
+            'Source Index': '1',
+            'Name': 'Duplicated Game',
+            'igdb_id': '20',
+            'Summary': 'Done',
+            'Cover Path': f"{app_module.PROCESSED_DIR}/2.jpg",
+        },
+    )
+    insert_processed_game(
+        app_module,
+        ID=3,
+        **{'Source Index': '2', 'Name': 'Duplicated Game', 'igdb_id': '20', 'Summary': '', 'Cover Path': ''},
+    )
+    insert_processed_game(
+        app_module,
+        ID=4,
+        **{'Source Index': '3', 'Name': 'Tail Game', 'igdb_id': '30', 'Summary': '', 'Cover Path': ''},
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    response = client.post('/api/updates/remove-duplicate/3')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['removed'] == 1
+    assert payload['removed_id'] == 3
+    assert payload['remaining'] == 3
+    assert payload['toast_type'] == 'success'
+
+    with app_module.db_lock:
+        rows = app_module.db.execute(
+            'SELECT "ID", "Source Index", "Name" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+        ).fetchall()
+
+    assert len(rows) == 3
+    assert [row['Source Index'] for row in rows] == ['0', '1', '2']
+    names = [row['Name'] for row in rows]
+    assert names.count('Duplicated Game') == 1
+    assert 'Tail Game' in names
+    assert len(app_module.games_df) == 3
+    assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
 
 
 def test_remove_duplicates_skips_without_processed_entry(tmp_path):

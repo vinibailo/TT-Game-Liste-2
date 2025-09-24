@@ -188,6 +188,7 @@
             cacheRefreshUrl: {{ url_for('api_igdb_cache_refresh')|tojson }},
             fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
             removeDuplicatesUrl: {{ url_for('api_updates_remove_duplicates')|tojson }},
+            deleteDuplicateUrlTemplate: {{ url_for('api_updates_remove_duplicate', processed_game_id=0)|replace('0', '{id}')|tojson }},
             jobsUrl: {{ url_for('api_updates_job_list')|tojson }},
             jobDetailUrlTemplate: {{ url_for('api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
             detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
