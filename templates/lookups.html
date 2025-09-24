@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lookup Vocabularies</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body class="page-lookups">
+    <div id="toast" role="status" aria-live="polite"></div>
+    <header class="app-topbar" aria-label="Primary navigation">
+        <div class="topbar-content">
+            <a class="topbar-brand" href="{{ url_for('index') }}">Game Editor</a>
+            <nav class="topbar-nav" aria-label="Global">
+                <a class="topbar-link" href="{{ url_for('index') }}">Editor</a>
+                <a class="topbar-link" href="{{ url_for('updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link is-active" href="{{ url_for('lookups_page') }}">Lookups</a>
+                <a class="topbar-link" href="{{ url_for('logout') }}">Logout</a>
+            </nav>
+        </div>
+    </header>
+    <main class="lookups-page">
+        <header class="lookups-header">
+            <div class="lookups-title">
+                <h1>Lookup Vocabularies</h1>
+                <p>Manage the lists of developers, publishers, genres, platforms and other shared vocabularies used throughout the catalog.</p>
+            </div>
+            <div class="lookups-controls">
+                <label class="lookup-select" for="lookup-type">
+                    <span class="lookup-select-label">Vocabulary</span>
+                    <select id="lookup-type" data-type-select>
+                        {% for lookup in lookup_tables %}
+                            <option value="{{ lookup.type }}" data-singular-label="{{ lookup.singular_label }}" {% if lookup.type == default_lookup %}selected{% endif %}>{{ lookup.label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="lookups-search" for="lookup-search">
+                    <span class="sr-only">Search entries</span>
+                    <span class="material-symbols-rounded" aria-hidden="true">search</span>
+                    <input
+                        type="search"
+                        id="lookup-search"
+                        placeholder="Search entries"
+                        autocomplete="off"
+                        data-search
+                    />
+                </label>
+                <button type="button" class="btn btn-green" data-new-entry>
+                    <span class="btn-icon" aria-hidden="true">
+                        <span class="material-symbols-rounded">add</span>
+                    </span>
+                    <span class="btn-label">New Entry</span>
+                </button>
+            </div>
+        </header>
+        <section class="lookups-summary" aria-live="polite">
+            <span class="lookups-summary-label">Active vocabulary:</span>
+            <strong data-active-label>{{ default_label }}</strong>
+            <span class="lookups-summary-count" data-entry-count>0 entries</span>
+        </section>
+        <section class="lookups-card">
+            <header class="lookups-card-header">
+                <h2 id="lookup-table-title">Entries</h2>
+            </header>
+            <div class="table-scroll" role="region" aria-live="polite" aria-labelledby="lookup-table-title">
+                <table class="lookups-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Name</th>
+                            <th scope="col" class="actions-column">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody data-lookup-rows></tbody>
+                </table>
+            </div>
+            <div class="table-empty" data-empty-state hidden>
+                <span class="material-symbols-rounded" aria-hidden="true">inventory_2</span>
+                <p>No entries found. Try creating a new item or adjusting your search.</p>
+            </div>
+            <div class="table-loading" data-loading-state hidden>
+                <span class="material-symbols-rounded" aria-hidden="true">hourglass_empty</span>
+                <p>Loading entries…</p>
+            </div>
+        </section>
+    </main>
+
+    <div class="modal-backdrop hidden" data-entry-modal hidden>
+        <div class="modal-dialog modal-small" role="dialog" aria-modal="true" aria-labelledby="entry-modal-title">
+            <header class="modal-header">
+                <div class="modal-titles">
+                    <h2 id="entry-modal-title">New entry</h2>
+                    <p class="modal-subtitle" data-entry-modal-subtitle></p>
+                </div>
+                <button type="button" class="icon-button" data-close-entry-modal aria-label="Close dialog">
+                    <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                </button>
+            </header>
+            <form class="modal-body lookup-form" data-entry-form>
+                <label for="lookup-name">
+                    <span>Name</span>
+                    <input type="text" id="lookup-name" name="name" required data-entry-name autocomplete="off" />
+                </label>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-outline" data-cancel-entry>Cancel</button>
+                    <button type="submit" class="btn btn-green" data-entry-submit>Save entry</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-backdrop hidden" data-confirm-modal hidden>
+        <div class="modal-dialog modal-small" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+            <header class="modal-header">
+                <div class="modal-titles">
+                    <h2 id="delete-modal-title">Delete entry</h2>
+                    <p class="modal-subtitle" data-delete-modal-subtitle></p>
+                </div>
+                <button type="button" class="icon-button" data-close-confirm-modal aria-label="Close dialog">
+                    <span class="material-symbols-rounded" aria-hidden="true">close</span>
+                </button>
+            </header>
+            <div class="modal-body lookup-confirm" data-confirm-body>
+                <p>Are you sure you want to delete <strong data-confirm-name></strong>? This action cannot be undone.</p>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-outline" data-cancel-delete>Cancel</button>
+                    <button type="button" class="btn btn-red" data-confirm-delete>Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.lookupsConfig = {
+            tables: {{ lookup_tables | tojson }},
+            defaultType: {{ default_lookup | tojson }},
+        };
+    </script>
+    <script src="{{ url_for('static', filename='lookups.js') }}" defer></script>
+</body>
+</html>
