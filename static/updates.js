@@ -11,17 +11,21 @@
         fixingNames: false,
         deduping: false,
         refreshing: false,
+        jobs: new Map(),
+        jobPollers: new Map(),
+        activeJobIds: new Map(),
+        completedJobs: new Set(),
     };
 
+    const JOB_TYPES = Object.freeze({
+        refresh: 'refresh_updates',
+        fix: 'fix_names',
+        dedupe: 'remove_duplicates',
+    });
+    const JOB_ACTIVE_STATUSES = new Set(['pending', 'running']);
+    const JOB_POLL_INTERVAL = 2000;
+
     const placeholderImage = '/no-image.jpg';
-    const fixBatchLimit = Math.min(
-        Math.max(Number(config.fixBatchSize) || 50, 1),
-        200,
-    );
-    const refreshBatchLimit = Math.min(
-        Math.max(Number(config.cacheBatchSize) || 500, 1),
-        500,
-    );
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -38,6 +42,10 @@
         fixPercent: document.querySelector('[data-fix-percent]'),
         fixBar: document.querySelector('[data-fix-bar]'),
         dedupeButton: document.querySelector('[data-remove-duplicates]'),
+        dedupeProgress: document.querySelector('[data-dedupe-progress]'),
+        dedupeCount: document.querySelector('[data-dedupe-count]'),
+        dedupePercent: document.querySelector('[data-dedupe-percent]'),
+        dedupeBar: document.querySelector('[data-dedupe-bar]'),
         refreshProgress: document.querySelector('[data-refresh-progress]'),
         refreshCount: document.querySelector('[data-refresh-count]'),
         refreshPercent: document.querySelector('[data-refresh-percent]'),
@@ -63,6 +71,7 @@
     let lastFocusedElement = null;
     let fixHideTimer = null;
     let refreshHideTimer = null;
+    let dedupeHideTimer = null;
 
     function showToast(message, type = 'success') {
         if (!toast) {
@@ -77,6 +86,42 @@
         toastTimer = setTimeout(() => {
             toast.classList.remove('show');
         }, 3200);
+    }
+
+    async function fetchJson(url, options = {}) {
+        const requestOptions = { ...options };
+        requestOptions.headers = {
+            Accept: 'application/json',
+            ...(options.headers || {}),
+        };
+        const response = await fetch(url, requestOptions);
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (err) {
+            payload = null;
+        }
+        if (!response.ok || !payload || payload.error) {
+            const errorMessage = payload && payload.error
+                ? payload.error
+                : 'Request failed.';
+            throw new Error(errorMessage);
+        }
+        return payload;
+    }
+
+    function getJobDetailUrl(jobId) {
+        if (!jobId) {
+            return null;
+        }
+        if (config.jobDetailUrlTemplate) {
+            return config.jobDetailUrlTemplate.replace('{id}', encodeURIComponent(jobId));
+        }
+        return `/api/updates/jobs/${encodeURIComponent(jobId)}`;
+    }
+
+    function isJobActive(status) {
+        return status && JOB_ACTIVE_STATUSES.has(status);
     }
 
     function parseDate(value) {
@@ -430,6 +475,7 @@
         const label = button.querySelector('.btn-label');
         if (loading) {
             button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
             if (label) {
                 if (!button.dataset.originalLabel) {
                     button.dataset.originalLabel = label.textContent || '';
@@ -438,9 +484,48 @@
             }
         } else {
             button.disabled = false;
+            button.removeAttribute('aria-busy');
             if (label && button.dataset.originalLabel) {
                 label.textContent = button.dataset.originalLabel;
             }
+        }
+    }
+
+    function setDedupeProgressVisible(visible) {
+        const container = elements.dedupeProgress;
+        if (!container) {
+            return;
+        }
+        container.hidden = !visible;
+    }
+
+    function updateDedupeProgress(processed, total) {
+        const countLabel = elements.dedupeCount;
+        const percentLabel = elements.dedupePercent;
+        const bar = elements.dedupeBar;
+        const totalValue = Number.isFinite(Number(total)) ? Math.max(Number(total) || 0, 0) : 0;
+        const processedValue = Number.isFinite(Number(processed))
+            ? Math.max(Number(processed) || 0, 0)
+            : 0;
+        const boundedProcessed = totalValue > 0
+            ? Math.min(processedValue, totalValue)
+            : processedValue;
+        if (countLabel) {
+            countLabel.textContent = totalValue > 0
+                ? `${boundedProcessed}/${totalValue}`
+                : `${boundedProcessed}`;
+        }
+        const percentValue = totalValue > 0
+            ? Math.min(100, (boundedProcessed / totalValue) * 100)
+            : 0;
+        const percentText = Number.isFinite(percentValue)
+            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
+            : '0';
+        if (percentLabel) {
+            percentLabel.textContent = `${percentText}%`;
+        }
+        if (bar) {
+            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
         }
     }
 
@@ -524,6 +609,201 @@
         }
     }
 
+    function clearJobPoller(jobId) {
+        const timer = state.jobPollers.get(jobId);
+        if (timer) {
+            window.clearTimeout(timer);
+            state.jobPollers.delete(jobId);
+        }
+    }
+
+    async function fetchJobDetail(jobId) {
+        const url = getJobDetailUrl(jobId);
+        if (!url) {
+            throw new Error('Job tracking endpoint is not configured.');
+        }
+        const payload = await fetchJson(url);
+        if (!payload || !payload.job) {
+            throw new Error('Failed to retrieve job details.');
+        }
+        return payload.job;
+    }
+
+    async function startJob(url) {
+        const payload = await fetchJson(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        if (!payload || !payload.job) {
+            throw new Error('Job response was empty.');
+        }
+        return payload.job;
+    }
+
+    function updateJobUi(job) {
+        if (!job || !job.id) {
+            return;
+        }
+        state.jobs.set(job.id, job);
+        const type = job.job_type;
+        const active = isJobActive(job.status);
+        if (type) {
+            if (active) {
+                state.activeJobIds.set(type, job.id);
+            } else if (state.activeJobIds.get(type) === job.id) {
+                state.activeJobIds.delete(type);
+            }
+        }
+
+        switch (type) {
+            case JOB_TYPES.fix: {
+                state.fixingNames = active;
+                setFixButtonLoading(active);
+                if (active) {
+                    clearTimeout(fixHideTimer);
+                    setFixProgressVisible(true);
+                }
+                updateFixProgress(job.progress_current || 0, job.progress_total || 0);
+                break;
+            }
+            case JOB_TYPES.refresh: {
+                state.refreshing = active;
+                setRefreshButtonLoading(active);
+                if (active) {
+                    clearTimeout(refreshHideTimer);
+                    setRefreshProgressVisible(true);
+                }
+                updateRefreshProgress(job.progress_current || 0, job.progress_total || 0);
+                if (elements.statusLabel && job.message) {
+                    elements.statusLabel.textContent = job.message;
+                }
+                break;
+            }
+            case JOB_TYPES.dedupe: {
+                state.deduping = active;
+                setDedupeButtonLoading(active);
+                if (active) {
+                    clearTimeout(dedupeHideTimer);
+                    setDedupeProgressVisible(true);
+                }
+                updateDedupeProgress(job.progress_current || 0, job.progress_total || 0);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    function handleJobCompletion(job) {
+        if (!job || !job.id || state.completedJobs.has(job.id)) {
+            return;
+        }
+        state.completedJobs.add(job.id);
+        clearJobPoller(job.id);
+        const type = job.job_type;
+        const status = job.status;
+        const result = job.result || {};
+        if (type === JOB_TYPES.fix) {
+            state.fixingNames = false;
+            setFixButtonLoading(false);
+            clearTimeout(fixHideTimer);
+            fixHideTimer = window.setTimeout(() => {
+                updateFixProgress(0, 0);
+                setFixProgressVisible(false);
+            }, 1200);
+            if (status === 'success') {
+                state.detailCache.clear();
+                loadUpdates();
+            }
+        } else if (type === JOB_TYPES.refresh) {
+            state.refreshing = false;
+            setRefreshButtonLoading(false);
+            clearTimeout(refreshHideTimer);
+            refreshHideTimer = window.setTimeout(() => {
+                updateRefreshProgress(0, 0);
+                setRefreshProgressVisible(false);
+            }, 1200);
+            if (status === 'success') {
+                state.detailCache.clear();
+                loadUpdates();
+            }
+        } else if (type === JOB_TYPES.dedupe) {
+            state.deduping = false;
+            setDedupeButtonLoading(false);
+            clearTimeout(dedupeHideTimer);
+            dedupeHideTimer = window.setTimeout(() => {
+                updateDedupeProgress(0, 0);
+                setDedupeProgressVisible(false);
+            }, 1200);
+            if (status === 'success' && Number(result.removed) > 0) {
+                state.detailCache.clear();
+                loadUpdates();
+            }
+        }
+
+        if (status === 'error') {
+            showToast(job.error || 'Background task failed.', 'warning');
+        } else if (result && result.message) {
+            showToast(result.message, result.toast_type || 'success');
+        }
+    }
+
+    async function monitorJob(job) {
+        if (!job || !job.id) {
+            return;
+        }
+        updateJobUi(job);
+        if (!isJobActive(job.status)) {
+            handleJobCompletion(job);
+            return;
+        }
+        clearJobPoller(job.id);
+        const poll = async () => {
+            try {
+                const latest = await fetchJobDetail(job.id);
+                updateJobUi(latest);
+                if (isJobActive(latest.status)) {
+                    const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
+                    state.jobPollers.set(job.id, timer);
+                } else {
+                    state.jobPollers.delete(job.id);
+                    handleJobCompletion(latest);
+                }
+            } catch (error) {
+                console.error('Failed to poll job status', error);
+                state.jobPollers.delete(job.id);
+                showToast(error.message, 'warning');
+            }
+        };
+        const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
+        state.jobPollers.set(job.id, timer);
+    }
+
+    async function loadExistingJobs() {
+        if (!config.jobsUrl) {
+            return;
+        }
+        try {
+            const payload = await fetchJson(config.jobsUrl);
+            const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+            jobs.forEach((job) => {
+                if (!job || !job.id) {
+                    return;
+                }
+                if (isJobActive(job.status)) {
+                    state.completedJobs.delete(job.id);
+                    monitorJob(job);
+                } else {
+                    state.completedJobs.add(job.id);
+                    updateJobUi(job);
+                }
+            });
+        } catch (error) {
+            console.error('Failed to load background jobs', error);
+        }
+    }
+
     function buildDetailUrl(id) {
         if (config.detailUrlTemplate) {
             return config.detailUrlTemplate.replace('{id}', encodeURIComponent(id));
@@ -563,107 +843,20 @@
         setFixButtonLoading(true);
         setFixProgressVisible(true);
         updateFixProgress(0, 0);
-        const missingSet = new Set();
-        let offset = 0;
-        let total = 0;
-        let processed = 0;
-        let totalUpdated = 0;
-        let lastOffset = -1;
         try {
-            while (true) {
-                const body = { offset };
-                if (Number.isFinite(fixBatchLimit) && fixBatchLimit > 0) {
-                    body.limit = fixBatchLimit;
-                }
-                const response = await fetch(config.fixNamesUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                });
-                let payload = null;
-                try {
-                    payload = await response.json();
-                } catch (err) {
-                    payload = null;
-                }
-                if (!response.ok || !payload || payload.error) {
-                    const errorMessage = payload && payload.error
-                        ? payload.error
-                        : 'Failed to update game names.';
-                    throw new Error(errorMessage);
-                }
-                const totalCandidate = Number(payload.total);
-                if (Number.isFinite(totalCandidate) && totalCandidate >= 0) {
-                    total = Math.max(Math.round(totalCandidate), 0);
-                }
-                const processedCandidate = Number(payload.processed);
-                if (Number.isFinite(processedCandidate) && processedCandidate >= 0) {
-                    processed = Math.max(Math.round(processedCandidate), 0);
-                }
-                const updatedCandidate = Number(payload.updated);
-                if (Number.isFinite(updatedCandidate) && updatedCandidate > 0) {
-                    totalUpdated += Math.max(Math.round(updatedCandidate), 0);
-                }
-                const missing = Array.isArray(payload.missing) ? payload.missing : [];
-                missing.forEach((item) => {
-                    if (item === null || item === undefined) {
-                        return;
-                    }
-                    const value = String(item).trim();
-                    if (value) {
-                        missingSet.add(value);
-                    }
-                });
-                updateFixProgress(processed, total);
-                const done = Boolean(payload.done);
-                if (done) {
-                    break;
-                }
-                const nextOffsetCandidate = Number(
-                    payload.next_offset !== undefined ? payload.next_offset : payload.processed,
-                );
-                if (Number.isFinite(nextOffsetCandidate) && nextOffsetCandidate >= 0) {
-                    offset = Math.round(nextOffsetCandidate);
-                } else {
-                    offset = processed;
-                }
-                if (offset === lastOffset) {
-                    offset += fixBatchLimit;
-                }
-                lastOffset = offset;
-            }
-            const missingCount = missingSet.size;
-            let toastType = 'success';
-            let message = '';
-            if (total === 0) {
-                message = 'No games with an IGDB ID were found.';
-                toastType = 'warning';
-            } else if (totalUpdated > 0) {
-                message = `Updated ${totalUpdated} game name${totalUpdated === 1 ? '' : 's'} from IGDB.`;
-            } else {
-                message = 'No game names required updating.';
-            }
-            if (missingCount > 0) {
-                const plural = missingCount === 1 ? '' : 's';
-                message += ` ${missingCount} IGDB record${plural} missing.`;
-                toastType = 'warning';
-            }
-            if (total > 0) {
-                state.detailCache.clear();
-                await loadUpdates();
-            }
-            showToast(message, toastType);
+            const job = await startJob(config.fixNamesUrl);
+            monitorJob(job);
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
-        } finally {
             state.fixingNames = false;
             setFixButtonLoading(false);
-            clearTimeout(fixHideTimer);
-            fixHideTimer = setTimeout(() => {
+            fixHideTimer = window.setTimeout(() => {
                 updateFixProgress(0, 0);
                 setFixProgressVisible(false);
             }, 1200);
+        } finally {
+            // Loading state will be reset when the job completes or fails.
         }
     }
 
@@ -677,51 +870,22 @@
         }
         state.deduping = true;
         setDedupeButtonLoading(true);
+        clearTimeout(dedupeHideTimer);
+        setDedupeProgressVisible(true);
+        updateDedupeProgress(0, 0);
         try {
-            const response = await fetch(config.removeDuplicatesUrl, { method: 'POST' });
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (err) {
-                payload = null;
-            }
-            if (!response.ok || !payload || payload.error) {
-                const errorMessage = payload && payload.error
-                    ? payload.error
-                    : 'Failed to remove duplicates.';
-                throw new Error(errorMessage);
-            }
-            const removed = Number(payload.removed) || 0;
-            const groups = Number(payload.duplicate_groups) || 0;
-            const skipped = Number(payload.skipped) || 0;
-            let message = '';
-            let toastType = removed > 0 ? 'success' : 'info';
-            if (removed > 0) {
-                const plural = removed === 1 ? '' : 's';
-                message = `Removed ${removed} duplicate${plural}.`;
-            } else if (groups > 0) {
-                message = 'No removable duplicates found.';
-            } else {
-                message = 'No duplicates detected.';
-            }
-            if (skipped > 0) {
-                const plural = skipped === 1 ? '' : 's';
-                message += ` Skipped ${skipped} duplicate group${plural}.`;
-                if (removed === 0) {
-                    toastType = 'warning';
-                }
-            }
-            if (removed > 0) {
-                state.detailCache.clear();
-                await loadUpdates();
-            }
-            showToast(message.trim(), toastType);
+            const job = await startJob(config.removeDuplicatesUrl);
+            monitorJob(job);
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
-        } finally {
+            state.deduping = false;
             state.deduping = false;
             setDedupeButtonLoading(false);
+            dedupeHideTimer = window.setTimeout(() => {
+                updateDedupeProgress(0, 0);
+                setDedupeProgressVisible(false);
+            }, 1200);
         }
     }
 
@@ -875,178 +1039,33 @@
         }
     }
 
-    async function refreshDiffs() {
-        if (!config.refreshUrl) {
-            return null;
-        }
-        const response = await fetch(config.refreshUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-        });
-        let payload = null;
-        try {
-            payload = await response.json();
-        } catch (err) {
-            payload = null;
-        }
-        if (!response.ok || !payload || payload.error) {
-            const errorMessage = payload && payload.error ? payload.error : 'Failed to refresh updates.';
-            throw new Error(errorMessage);
-        }
-        const updated = Number(payload.updated) || 0;
-        const missingCount = Array.isArray(payload.missing) ? payload.missing.length : 0;
-        let statusMessage = `Fetched ${updated} update${updated === 1 ? '' : 's'}.`;
-        if (missingCount) {
-            statusMessage += ` ${missingCount} IGDB record${missingCount === 1 ? '' : 's'} missing.`;
-        }
-        if (elements.statusLabel) {
-            elements.statusLabel.textContent = statusMessage;
-        }
-        return { updated, missingCount, statusMessage };
-    }
-
-    async function refreshIgdbCache() {
-        if (!config.cacheRefreshUrl) {
-            return null;
-        }
-        let offset = 0;
-        let total = 0;
-        let processed = 0;
-        let insertedTotal = 0;
-        let updatedTotal = 0;
-        let unchangedTotal = 0;
-        let lastOffset = -1;
-
-        while (true) {
-            const body = { offset };
-            if (Number.isFinite(refreshBatchLimit) && refreshBatchLimit > 0) {
-                body.limit = refreshBatchLimit;
-            }
-            const response = await fetch(config.cacheRefreshUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (err) {
-                payload = null;
-            }
-            if (!response.ok || !payload || payload.error) {
-                const errorMessage = payload && payload.error
-                    ? payload.error
-                    : 'Failed to refresh IGDB cache.';
-                throw new Error(errorMessage);
-            }
-            const totalCandidate = Number(payload.total);
-            if (Number.isFinite(totalCandidate) && totalCandidate >= 0) {
-                total = Math.max(Math.round(totalCandidate), 0);
-            }
-            const processedCandidate = Number(payload.processed);
-            if (Number.isFinite(processedCandidate) && processedCandidate >= 0) {
-                processed = Math.max(Math.round(processedCandidate), 0);
-            }
-            const insertedCandidate = Number(payload.inserted);
-            if (Number.isFinite(insertedCandidate) && insertedCandidate > 0) {
-                insertedTotal += Math.max(Math.round(insertedCandidate), 0);
-            }
-            const updatedCandidate = Number(payload.updated);
-            if (Number.isFinite(updatedCandidate) && updatedCandidate > 0) {
-                updatedTotal += Math.max(Math.round(updatedCandidate), 0);
-            }
-            const unchangedCandidate = Number(payload.unchanged);
-            if (Number.isFinite(unchangedCandidate) && unchangedCandidate > 0) {
-                unchangedTotal += Math.max(Math.round(unchangedCandidate), 0);
-            }
-            updateRefreshProgress(processed, total);
-            const done = Boolean(payload.done);
-            if (done) {
-                break;
-            }
-            let nextOffset = Number(
-                payload.next_offset !== undefined ? payload.next_offset : payload.processed,
-            );
-            if (!Number.isFinite(nextOffset) || nextOffset < 0) {
-                nextOffset = processed;
-            } else {
-                nextOffset = Math.round(nextOffset);
-            }
-            if (nextOffset === lastOffset) {
-                nextOffset += refreshBatchLimit;
-            }
-            lastOffset = nextOffset;
-            offset = nextOffset;
-        }
-
-        return {
-            total,
-            processed,
-            inserted: insertedTotal,
-            updated: updatedTotal,
-            unchanged: unchangedTotal,
-        };
-    }
-
     async function handleRefresh() {
         if (state.refreshing) {
             return;
         }
+        if (!config.refreshUrl) {
+            showToast('Refresh endpoint is not configured.', 'warning');
+            return;
+        }
         state.refreshing = true;
         clearTimeout(refreshHideTimer);
-        if (config.cacheRefreshUrl) {
-            setRefreshProgressVisible(true);
-            updateRefreshProgress(0, 0);
-        }
+        setRefreshProgressVisible(true);
+        updateRefreshProgress(0, 0);
         setRefreshButtonLoading(true);
         try {
-            let cacheSummary = null;
-            if (config.cacheRefreshUrl) {
-                cacheSummary = await refreshIgdbCache();
-            }
-            const diffSummary = await refreshDiffs();
-            state.detailCache.clear();
-            await loadUpdates();
-
-            const messages = [];
-            let toastType = 'success';
-            if (cacheSummary) {
-                if (!cacheSummary.total) {
-                    messages.push('IGDB cache is empty.');
-                } else {
-                    const changed = (cacheSummary.inserted || 0) + (cacheSummary.updated || 0);
-                    if (changed > 0) {
-                        messages.push(`Cached ${changed} IGDB record${changed === 1 ? '' : 's'}.`);
-                    } else {
-                        messages.push('IGDB cache is up to date.');
-                    }
-                }
-            }
-            if (diffSummary) {
-                messages.push(diffSummary.statusMessage);
-                if (diffSummary.missingCount > 0) {
-                    toastType = 'warning';
-                }
-            }
-            if (!messages.length && !config.refreshUrl) {
-                messages.push('Updates reloaded.');
-            }
-            if (messages.length) {
-                showToast(messages.join(' '), toastType);
-            }
+            const job = await startJob(config.refreshUrl);
+            monitorJob(job);
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
-        } finally {
             state.refreshing = false;
             setRefreshButtonLoading(false);
-            if (config.cacheRefreshUrl) {
-                clearTimeout(refreshHideTimer);
-                refreshHideTimer = setTimeout(() => {
-                    updateRefreshProgress(0, 0);
-                    setRefreshProgressVisible(false);
-                }, 1200);
-            }
+            refreshHideTimer = window.setTimeout(() => {
+                updateRefreshProgress(0, 0);
+                setRefreshProgressVisible(false);
+            }, 1200);
+        } finally {
+            // Button state resets when job completes.
         }
     }
 
@@ -1118,5 +1137,6 @@
     }
 
     bindEvents();
+    loadExistingJobs();
     loadUpdates();
 })();

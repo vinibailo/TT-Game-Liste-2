@@ -40,4 +40,8 @@ def load_app(tmp_path: Path) -> object:
     if hasattr(module, "navigator"):
         module.navigator.total = module.total_games
 
+    if hasattr(module, "app"):
+        module.app.config['TESTING'] = True
+        module.app.testing = True
+
     return module
