@@ -1876,16 +1876,32 @@ def seed_processed_games_from_source() -> None:
                     continue
                 existing[canonical] = (stored_text, _normalize_name(row['Name']))
 
-            name_series = games_df['Name'] if 'Name' in games_df.columns else pd.Series(dtype=str)
-            for idx in games_df.index:
-                src_index = _coerce_source_index(idx)
+            source_values = (
+                games_df['Source Index'].tolist()
+                if 'Source Index' in games_df.columns
+                else None
+            )
+            name_values = (
+                games_df['Name'].tolist()
+                if 'Name' in games_df.columns
+                else None
+            )
+            row_count = len(games_df.index)
+            for position in range(row_count):
+                raw_source = (
+                    source_values[position]
+                    if source_values is not None and position < len(source_values)
+                    else position
+                )
+                src_index = _coerce_source_index(raw_source)
                 if src_index is None:
                     continue
-                igdb_name = _normalize_name(
-                    name_series.at[idx]
-                    if idx in name_series.index
-                    else games_df.iloc[idx].get('Name')
-                )
+
+                if name_values is not None and position < len(name_values):
+                    name_value = name_values[position]
+                else:
+                    name_value = games_df.iloc[position].get('Name') if position < row_count else None
+                igdb_name = _normalize_name(name_value)
                 stored_name: str | None = igdb_name if igdb_name else None
 
                 if src_index not in existing:
@@ -1893,14 +1909,23 @@ def seed_processed_games_from_source() -> None:
                         'INSERT OR IGNORE INTO processed_games ("Source Index", "Name") VALUES (?, ?)',
                         (src_index, stored_name),
                     )
+                    existing[src_index] = (src_index, igdb_name)
                     continue
 
                 stored_source, existing_name = existing[src_index]
+                if stored_source != src_index:
+                    conn.execute(
+                        'UPDATE processed_games SET "Source Index"=? WHERE "Source Index"=?',
+                        (src_index, stored_source),
+                    )
+                    stored_source = src_index
                 if igdb_name and existing_name != igdb_name:
                     conn.execute(
                         'UPDATE processed_games SET "Name"=? WHERE "Source Index"=?',
-                        (igdb_name, stored_source),
+                        (igdb_name, src_index),
                     )
+                    existing_name = igdb_name
+                existing[src_index] = (stored_source, existing_name)
 
 
 def backfill_igdb_ids() -> None:
