@@ -43,6 +43,24 @@
                     </span>
                     <span class="btn-label">Update</span>
                 </button>
+                <div class="updates-bulk-action">
+                    <button type="button" class="btn btn-green" data-fix-names>
+                        <span class="btn-icon" aria-hidden="true">
+                            <span class="material-symbols-rounded">spellcheck</span>
+                        </span>
+                        <span class="btn-label">Fix IGDB Names</span>
+                        <span class="sr-only">Fix processed game names using IGDB data</span>
+                    </button>
+                    <div class="progress-indicator updates-progress" data-fix-progress hidden>
+                        <div class="progress-metrics">
+                            <span class="progress-count" data-fix-count>0/0</span>
+                            <span class="progress-percent" data-fix-percent>0%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" data-fix-bar></div>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
         <section class="updates-summary" aria-live="polite">
@@ -136,6 +154,7 @@
             editBaseUrl: {{ url_for('index')|tojson }},
             updatesUrl: {{ url_for('api_updates_list')|tojson }},
             refreshUrl: {{ url_for('api_updates_refresh')|tojson }},
+            fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
             detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }}
         };
     </script>

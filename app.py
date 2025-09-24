@@ -3516,6 +3516,211 @@ def api_updates_refresh():
     return jsonify({'status': 'ok', 'updated': updated, 'missing': missing})
 
 
+@app.route('/api/updates/fix-names', methods=['POST'])
+def api_updates_fix_names():
+    payload = request.get_json(silent=True) or {}
+    try:
+        offset = int(payload.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(payload.get('limit', 50))
+    except (TypeError, ValueError):
+        limit = 50
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        limit = 50
+    limit = min(limit, 200)
+
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            'SELECT COUNT(*) AS total FROM processed_games '
+            'WHERE TRIM(COALESCE("igdb_id", "")) != ""'
+        )
+        total_row = cur.fetchone()
+
+    total = 0
+    if total_row is not None:
+        try:
+            total = int(total_row['total'])
+        except (KeyError, TypeError, ValueError):
+            try:
+                total = int(total_row[0])
+            except (IndexError, TypeError, ValueError):
+                total = 0
+    if total < 0:
+        total = 0
+
+    if total == 0:
+        return jsonify(
+            {
+                'status': 'ok',
+                'total': 0,
+                'processed': 0,
+                'updated': 0,
+                'unchanged': 0,
+                'missing': [],
+                'missing_remote': [],
+                'missing_name': [],
+                'invalid': 0,
+                'done': True,
+                'next_offset': 0,
+            }
+        )
+
+    if offset >= total:
+        return jsonify(
+            {
+                'status': 'ok',
+                'total': total,
+                'processed': total,
+                'updated': 0,
+                'unchanged': 0,
+                'missing': [],
+                'missing_remote': [],
+                'missing_name': [],
+                'invalid': 0,
+                'done': True,
+                'next_offset': total,
+            }
+        )
+
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            '''SELECT "ID", "igdb_id", "Name" FROM processed_games
+               WHERE TRIM(COALESCE("igdb_id", "")) != ""
+               ORDER BY "ID"
+               LIMIT ? OFFSET ?''',
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+
+    batch_count = len(rows)
+    if batch_count == 0:
+        processed = min(offset, total)
+        done = processed >= total
+        return jsonify(
+            {
+                'status': 'ok',
+                'total': total,
+                'processed': processed,
+                'updated': 0,
+                'unchanged': 0,
+                'missing': [],
+                'missing_remote': [],
+                'missing_name': [],
+                'invalid': 0,
+                'done': done,
+                'next_offset': processed,
+            }
+        )
+
+    entries: list[dict[str, Any]] = []
+    unique_ids: list[str] = []
+    seen_ids: set[str] = set()
+    invalid_count = 0
+
+    for row in rows:
+        db_id = row['ID']
+        raw_igdb_id = row['igdb_id']
+        igdb_id = coerce_igdb_id(raw_igdb_id)
+        current_name = _normalize_text(row['Name'])
+        entries.append(
+            {
+                'id': db_id,
+                'igdb_id': igdb_id,
+                'current_name': current_name,
+            }
+        )
+        if igdb_id:
+            if igdb_id not in seen_ids:
+                seen_ids.add(igdb_id)
+                unique_ids.append(igdb_id)
+        else:
+            invalid_count += 1
+
+    metadata: dict[str, Mapping[str, Any]] = {}
+    if unique_ids:
+        try:
+            access_token, client_id = exchange_twitch_credentials()
+        except RuntimeError as exc:
+            return jsonify({'error': str(exc)}), 500
+        try:
+            metadata = fetch_igdb_metadata(access_token, client_id, unique_ids) or {}
+        except RuntimeError as exc:
+            return jsonify({'error': str(exc)}), 502
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning('Failed to fetch IGDB metadata: %s', exc)
+            metadata = {}
+
+    timestamp = now_utc_iso()
+    updates: list[tuple[str, str, Any]] = []
+    updated_count = 0
+    unchanged_count = 0
+    missing_remote: set[str] = set()
+    missing_name: set[str] = set()
+
+    for entry in entries:
+        igdb_id = entry['igdb_id']
+        if not igdb_id:
+            continue
+        payload = metadata.get(igdb_id)
+        if not isinstance(payload, Mapping):
+            missing_remote.add(igdb_id)
+            continue
+        remote_name = _normalize_text(payload.get('name'))
+        if not remote_name:
+            missing_name.add(igdb_id)
+            continue
+        current_name = entry['current_name']
+        if remote_name == current_name:
+            unchanged_count += 1
+            continue
+        db_id = entry['id']
+        try:
+            numeric_id = int(db_id)
+        except (TypeError, ValueError):
+            missing_remote.add(igdb_id)
+            continue
+        updates.append((remote_name, timestamp, numeric_id))
+        updated_count += 1
+
+    if updates:
+        with db_lock:
+            conn = get_db()
+            conn.executemany(
+                'UPDATE processed_games SET "Name"=?, last_edited_at=? WHERE "ID"=?',
+                updates,
+            )
+            conn.commit()
+
+    next_offset = offset + batch_count
+    processed = min(next_offset, total)
+    done = processed >= total
+    missing_remote_list = sorted(missing_remote)
+    missing_name_list = sorted(missing_name)
+    missing_combined = sorted({*missing_remote, *missing_name})
+
+    return jsonify(
+        {
+            'status': 'ok',
+            'total': total,
+            'processed': processed,
+            'updated': updated_count,
+            'unchanged': unchanged_count,
+            'missing': missing_combined,
+            'missing_remote': missing_remote_list,
+            'missing_name': missing_name_list,
+            'invalid': invalid_count,
+            'done': done,
+            'next_offset': min(next_offset, total),
+        }
+    )
+
+
 @app.route('/api/updates', methods=['GET'])
 def api_updates_list():
     return jsonify({'updates': fetch_cached_updates()})

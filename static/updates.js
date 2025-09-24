@@ -8,9 +8,14 @@
         searchTerm: '',
         detailCache: new Map(),
         updateMap: new Map(),
+        fixingNames: false,
     };
 
     const placeholderImage = '/no-image.jpg';
+    const fixBatchLimit = Math.min(
+        Math.max(Number(config.fixBatchSize) || 50, 1),
+        200,
+    );
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -21,6 +26,11 @@
         countLabel: document.querySelector('[data-count]'),
         statusLabel: document.querySelector('[data-refresh-status]'),
         sortButtons: Array.from(document.querySelectorAll('.sort-button[data-sort]')),
+        fixButton: document.querySelector('[data-fix-names]'),
+        fixProgress: document.querySelector('[data-fix-progress]'),
+        fixCount: document.querySelector('[data-fix-count]'),
+        fixPercent: document.querySelector('[data-fix-percent]'),
+        fixBar: document.querySelector('[data-fix-bar]'),
     };
 
     const modal = {
@@ -40,6 +50,7 @@
     const toast = document.getElementById('toast');
     let toastTimer = null;
     let lastFocusedElement = null;
+    let fixHideTimer = null;
 
     function showToast(message, type = 'success') {
         if (!toast) {
@@ -372,6 +383,73 @@
         }
     }
 
+    function setFixButtonLoading(loading) {
+        const button = elements.fixButton;
+        if (!button) {
+            return;
+        }
+        const label = button.querySelector('.btn-label');
+        if (loading) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            if (label) {
+                if (!button.dataset.originalLabel) {
+                    button.dataset.originalLabel = label.textContent || '';
+                }
+                label.textContent = 'Fixing…';
+            }
+        } else {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            if (label) {
+                const original = button.dataset.originalLabel;
+                if (original) {
+                    label.textContent = original;
+                }
+            }
+        }
+    }
+
+    function setFixProgressVisible(visible) {
+        const container = elements.fixProgress;
+        if (!container) {
+            return;
+        }
+        container.hidden = !visible;
+    }
+
+    function updateFixProgress(processed, total) {
+        const countLabel = elements.fixCount;
+        const percentLabel = elements.fixPercent;
+        const bar = elements.fixBar;
+        const totalNumber = Number(total);
+        const processedNumber = Number(processed);
+        const totalValue = Number.isFinite(totalNumber)
+            ? Math.max(Math.round(totalNumber), 0)
+            : 0;
+        const processedValue = Number.isFinite(processedNumber)
+            ? Math.max(Math.round(processedNumber), 0)
+            : 0;
+        const boundedProcessed = totalValue > 0
+            ? Math.min(processedValue, totalValue)
+            : processedValue;
+        if (countLabel) {
+            countLabel.textContent = `${boundedProcessed}/${totalValue}`;
+        }
+        const percentValue = totalValue > 0
+            ? Math.min(100, (boundedProcessed / totalValue) * 100)
+            : 0;
+        const percentText = Number.isFinite(percentValue)
+            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
+            : '0';
+        if (percentLabel) {
+            percentLabel.textContent = `${percentText}%`;
+        }
+        if (bar) {
+            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
+        }
+    }
+
     function buildDetailUrl(id) {
         if (config.detailUrlTemplate) {
             return config.detailUrlTemplate.replace('{id}', encodeURIComponent(id));
@@ -396,6 +474,123 @@
         }
         state.detailCache.set(id, payload);
         return payload;
+    }
+
+    async function handleFixNames() {
+        if (state.fixingNames) {
+            return;
+        }
+        if (!config.fixNamesUrl) {
+            showToast('Name fixing endpoint is not configured.', 'warning');
+            return;
+        }
+        state.fixingNames = true;
+        clearTimeout(fixHideTimer);
+        setFixButtonLoading(true);
+        setFixProgressVisible(true);
+        updateFixProgress(0, 0);
+        const missingSet = new Set();
+        let offset = 0;
+        let total = 0;
+        let processed = 0;
+        let totalUpdated = 0;
+        let lastOffset = -1;
+        try {
+            while (true) {
+                const body = { offset };
+                if (Number.isFinite(fixBatchLimit) && fixBatchLimit > 0) {
+                    body.limit = fixBatchLimit;
+                }
+                const response = await fetch(config.fixNamesUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                let payload = null;
+                try {
+                    payload = await response.json();
+                } catch (err) {
+                    payload = null;
+                }
+                if (!response.ok || !payload || payload.error) {
+                    const errorMessage = payload && payload.error
+                        ? payload.error
+                        : 'Failed to update game names.';
+                    throw new Error(errorMessage);
+                }
+                const totalCandidate = Number(payload.total);
+                if (Number.isFinite(totalCandidate) && totalCandidate >= 0) {
+                    total = Math.max(Math.round(totalCandidate), 0);
+                }
+                const processedCandidate = Number(payload.processed);
+                if (Number.isFinite(processedCandidate) && processedCandidate >= 0) {
+                    processed = Math.max(Math.round(processedCandidate), 0);
+                }
+                const updatedCandidate = Number(payload.updated);
+                if (Number.isFinite(updatedCandidate) && updatedCandidate > 0) {
+                    totalUpdated += Math.max(Math.round(updatedCandidate), 0);
+                }
+                const missing = Array.isArray(payload.missing) ? payload.missing : [];
+                missing.forEach((item) => {
+                    if (item === null || item === undefined) {
+                        return;
+                    }
+                    const value = String(item).trim();
+                    if (value) {
+                        missingSet.add(value);
+                    }
+                });
+                updateFixProgress(processed, total);
+                const done = Boolean(payload.done);
+                if (done) {
+                    break;
+                }
+                const nextOffsetCandidate = Number(
+                    payload.next_offset !== undefined ? payload.next_offset : payload.processed,
+                );
+                if (Number.isFinite(nextOffsetCandidate) && nextOffsetCandidate >= 0) {
+                    offset = Math.round(nextOffsetCandidate);
+                } else {
+                    offset = processed;
+                }
+                if (offset === lastOffset) {
+                    offset += fixBatchLimit;
+                }
+                lastOffset = offset;
+            }
+            const missingCount = missingSet.size;
+            let toastType = 'success';
+            let message = '';
+            if (total === 0) {
+                message = 'No games with an IGDB ID were found.';
+                toastType = 'warning';
+            } else if (totalUpdated > 0) {
+                message = `Updated ${totalUpdated} game name${totalUpdated === 1 ? '' : 's'} from IGDB.`;
+            } else {
+                message = 'No game names required updating.';
+            }
+            if (missingCount > 0) {
+                const plural = missingCount === 1 ? '' : 's';
+                message += ` ${missingCount} IGDB record${plural} missing.`;
+                toastType = 'warning';
+            }
+            if (total > 0) {
+                state.detailCache.clear();
+                await loadUpdates();
+            }
+            showToast(message, toastType);
+        } catch (error) {
+            console.error(error);
+            showToast(error.message, 'warning');
+        } finally {
+            state.fixingNames = false;
+            setFixButtonLoading(false);
+            clearTimeout(fixHideTimer);
+            fixHideTimer = setTimeout(() => {
+                updateFixProgress(0, 0);
+                setFixProgressVisible(false);
+            }, 1200);
+        }
     }
 
     function showModalShell() {
@@ -630,6 +825,9 @@
         }
         if (elements.refreshButton) {
             elements.refreshButton.addEventListener('click', handleRefresh);
+        }
+        if (elements.fixButton) {
+            elements.fixButton.addEventListener('click', handleFixNames);
         }
         if (modal.closeButton) {
             modal.closeButton.addEventListener('click', closeModal);
