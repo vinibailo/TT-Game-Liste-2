@@ -9,8 +9,9 @@ def populate_db(app_module, count):
         with app_module.db:
             for i in range(count):
                 app_module.db.execute(
-                    'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-                    (i, str(i)),
+                    'INSERT INTO processed_games ("ID", "Source Index", "Summary", "Cover Path") '
+                    'VALUES (?, ?, ?, ?)',
+                    (i, str(i), f'Summary {i}', f'{app_module.PROCESSED_DIR}/{i}.jpg'),
                 )
 
 

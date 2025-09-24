@@ -1,4 +1,8 @@
+import base64
+import io
+
 import pandas as pd
+from PIL import Image
 
 from tests.app_helpers import load_app
 
@@ -6,6 +10,13 @@ from tests.app_helpers import load_app
 def authenticate(client):
     with client.session_transaction() as sess:
         sess['authenticated'] = True
+
+
+def generate_image_data_url() -> str:
+    img = Image.new('RGB', (10, 10), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
 
 
 def test_non_zero_source_index_flow(tmp_path):
@@ -42,10 +53,17 @@ def test_non_zero_source_index_flow(tmp_path):
             app.db.execute(
                 '''
                 INSERT INTO processed_games (
-                    "ID", "Source Index", "Name", "Summary", last_edited_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    "ID", "Source Index", "Name", "Summary", "Cover Path", last_edited_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ''',
-                (5, '200', 'Stored Name', 'Stored summary', '2024-01-01T00:00:00Z'),
+                (
+                    5,
+                    '200',
+                    'Stored Name',
+                    'Stored summary',
+                    f"{app.PROCESSED_DIR}/5.jpg",
+                    '2024-01-01T00:00:00Z',
+                ),
             )
     app.navigator = app.GameNavigator(app.total_games)
 
@@ -90,7 +108,8 @@ def test_non_zero_source_index_flow(tmp_path):
         json={
             'index': 2,
             'id': str(new_id),
-            'fields': {'Name': 'Third Processed'},
+            'fields': {'Name': 'Third Processed', 'Summary': 'Third summary'},
+            'image': generate_image_data_url(),
         },
     )
     assert response.status_code == 200
