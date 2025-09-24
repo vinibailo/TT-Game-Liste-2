@@ -10,12 +10,17 @@
         updateMap: new Map(),
         fixingNames: false,
         deduping: false,
+        refreshing: false,
     };
 
     const placeholderImage = '/no-image.jpg';
     const fixBatchLimit = Math.min(
         Math.max(Number(config.fixBatchSize) || 50, 1),
         200,
+    );
+    const refreshBatchLimit = Math.min(
+        Math.max(Number(config.cacheBatchSize) || 500, 1),
+        500,
     );
 
     const elements = {
@@ -33,6 +38,10 @@
         fixPercent: document.querySelector('[data-fix-percent]'),
         fixBar: document.querySelector('[data-fix-bar]'),
         dedupeButton: document.querySelector('[data-remove-duplicates]'),
+        refreshProgress: document.querySelector('[data-refresh-progress]'),
+        refreshCount: document.querySelector('[data-refresh-count]'),
+        refreshPercent: document.querySelector('[data-refresh-percent]'),
+        refreshBar: document.querySelector('[data-refresh-bar]'),
     };
 
     const modal = {
@@ -53,6 +62,7 @@
     let toastTimer = null;
     let lastFocusedElement = null;
     let fixHideTimer = null;
+    let refreshHideTimer = null;
 
     function showToast(message, type = 'success') {
         if (!toast) {
@@ -474,6 +484,46 @@
         }
     }
 
+    function setRefreshProgressVisible(visible) {
+        const container = elements.refreshProgress;
+        if (!container) {
+            return;
+        }
+        container.hidden = !visible;
+    }
+
+    function updateRefreshProgress(processed, total) {
+        const countLabel = elements.refreshCount;
+        const percentLabel = elements.refreshPercent;
+        const bar = elements.refreshBar;
+        const totalNumber = Number(total);
+        const processedNumber = Number(processed);
+        const totalValue = Number.isFinite(totalNumber) ? Math.max(Math.round(totalNumber), 0) : 0;
+        const processedValue = Number.isFinite(processedNumber)
+            ? Math.max(Math.round(processedNumber), 0)
+            : 0;
+        const boundedProcessed = totalValue > 0
+            ? Math.min(processedValue, totalValue)
+            : processedValue;
+        if (countLabel) {
+            countLabel.textContent = totalValue > 0
+                ? `${boundedProcessed}/${totalValue}`
+                : `${boundedProcessed}`;
+        }
+        const percentValue = totalValue > 0
+            ? Math.min(100, (boundedProcessed / totalValue) * 100)
+            : 0;
+        const percentText = Number.isFinite(percentValue)
+            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
+            : '0';
+        if (percentLabel) {
+            percentLabel.textContent = `${percentText}%`;
+        }
+        if (bar) {
+            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
+        }
+    }
+
     function buildDetailUrl(id) {
         if (config.detailUrlTemplate) {
             return config.detailUrlTemplate.replace('{id}', encodeURIComponent(id));
@@ -825,16 +875,57 @@
         }
     }
 
-    async function handleRefresh() {
+    async function refreshDiffs() {
         if (!config.refreshUrl) {
-            await loadUpdates();
-            return;
+            return null;
         }
-        setRefreshButtonLoading(true);
+        const response = await fetch(config.refreshUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        let payload = null;
         try {
-            const response = await fetch(config.refreshUrl, {
+            payload = await response.json();
+        } catch (err) {
+            payload = null;
+        }
+        if (!response.ok || !payload || payload.error) {
+            const errorMessage = payload && payload.error ? payload.error : 'Failed to refresh updates.';
+            throw new Error(errorMessage);
+        }
+        const updated = Number(payload.updated) || 0;
+        const missingCount = Array.isArray(payload.missing) ? payload.missing.length : 0;
+        let statusMessage = `Fetched ${updated} update${updated === 1 ? '' : 's'}.`;
+        if (missingCount) {
+            statusMessage += ` ${missingCount} IGDB record${missingCount === 1 ? '' : 's'} missing.`;
+        }
+        if (elements.statusLabel) {
+            elements.statusLabel.textContent = statusMessage;
+        }
+        return { updated, missingCount, statusMessage };
+    }
+
+    async function refreshIgdbCache() {
+        if (!config.cacheRefreshUrl) {
+            return null;
+        }
+        let offset = 0;
+        let total = 0;
+        let processed = 0;
+        let insertedTotal = 0;
+        let updatedTotal = 0;
+        let unchangedTotal = 0;
+        let lastOffset = -1;
+
+        while (true) {
+            const body = { offset };
+            if (Number.isFinite(refreshBatchLimit) && refreshBatchLimit > 0) {
+                body.limit = refreshBatchLimit;
+            }
+            const response = await fetch(config.cacheRefreshUrl, {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
             });
             let payload = null;
             try {
@@ -843,26 +934,119 @@
                 payload = null;
             }
             if (!response.ok || !payload || payload.error) {
-                const errorMessage = payload && payload.error ? payload.error : 'Failed to refresh updates.';
+                const errorMessage = payload && payload.error
+                    ? payload.error
+                    : 'Failed to refresh IGDB cache.';
                 throw new Error(errorMessage);
             }
+            const totalCandidate = Number(payload.total);
+            if (Number.isFinite(totalCandidate) && totalCandidate >= 0) {
+                total = Math.max(Math.round(totalCandidate), 0);
+            }
+            const processedCandidate = Number(payload.processed);
+            if (Number.isFinite(processedCandidate) && processedCandidate >= 0) {
+                processed = Math.max(Math.round(processedCandidate), 0);
+            }
+            const insertedCandidate = Number(payload.inserted);
+            if (Number.isFinite(insertedCandidate) && insertedCandidate > 0) {
+                insertedTotal += Math.max(Math.round(insertedCandidate), 0);
+            }
+            const updatedCandidate = Number(payload.updated);
+            if (Number.isFinite(updatedCandidate) && updatedCandidate > 0) {
+                updatedTotal += Math.max(Math.round(updatedCandidate), 0);
+            }
+            const unchangedCandidate = Number(payload.unchanged);
+            if (Number.isFinite(unchangedCandidate) && unchangedCandidate > 0) {
+                unchangedTotal += Math.max(Math.round(unchangedCandidate), 0);
+            }
+            updateRefreshProgress(processed, total);
+            const done = Boolean(payload.done);
+            if (done) {
+                break;
+            }
+            let nextOffset = Number(
+                payload.next_offset !== undefined ? payload.next_offset : payload.processed,
+            );
+            if (!Number.isFinite(nextOffset) || nextOffset < 0) {
+                nextOffset = processed;
+            } else {
+                nextOffset = Math.round(nextOffset);
+            }
+            if (nextOffset === lastOffset) {
+                nextOffset += refreshBatchLimit;
+            }
+            lastOffset = nextOffset;
+            offset = nextOffset;
+        }
+
+        return {
+            total,
+            processed,
+            inserted: insertedTotal,
+            updated: updatedTotal,
+            unchanged: unchangedTotal,
+        };
+    }
+
+    async function handleRefresh() {
+        if (state.refreshing) {
+            return;
+        }
+        state.refreshing = true;
+        clearTimeout(refreshHideTimer);
+        if (config.cacheRefreshUrl) {
+            setRefreshProgressVisible(true);
+            updateRefreshProgress(0, 0);
+        }
+        setRefreshButtonLoading(true);
+        try {
+            let cacheSummary = null;
+            if (config.cacheRefreshUrl) {
+                cacheSummary = await refreshIgdbCache();
+            }
+            const diffSummary = await refreshDiffs();
             state.detailCache.clear();
-            const updated = Number(payload.updated) || 0;
-            const missingCount = Array.isArray(payload.missing) ? payload.missing.length : 0;
-            let statusMessage = `Fetched ${updated} update${updated === 1 ? '' : 's'}.`;
-            if (missingCount) {
-                statusMessage += ` ${missingCount} IGDB record${missingCount === 1 ? '' : 's'} missing.`;
-            }
-            if (elements.statusLabel) {
-                elements.statusLabel.textContent = statusMessage;
-            }
-            showToast(statusMessage, 'success');
             await loadUpdates();
+
+            const messages = [];
+            let toastType = 'success';
+            if (cacheSummary) {
+                if (!cacheSummary.total) {
+                    messages.push('IGDB cache is empty.');
+                } else {
+                    const changed = (cacheSummary.inserted || 0) + (cacheSummary.updated || 0);
+                    if (changed > 0) {
+                        messages.push(`Cached ${changed} IGDB record${changed === 1 ? '' : 's'}.`);
+                    } else {
+                        messages.push('IGDB cache is up to date.');
+                    }
+                }
+            }
+            if (diffSummary) {
+                messages.push(diffSummary.statusMessage);
+                if (diffSummary.missingCount > 0) {
+                    toastType = 'warning';
+                }
+            }
+            if (!messages.length && !config.refreshUrl) {
+                messages.push('Updates reloaded.');
+            }
+            if (messages.length) {
+                showToast(messages.join(' '), toastType);
+            }
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
         } finally {
+            state.refreshing = false;
             setRefreshButtonLoading(false);
+            if (config.cacheRefreshUrl) {
+                clearTimeout(refreshHideTimer);
+                refreshHideTimer = setTimeout(() => {
+                    updateRefreshProgress(0, 0);
+                    setRefreshProgressVisible(false);
+                }, 1200);
+            }
         }
     }
 

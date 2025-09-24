@@ -259,6 +259,10 @@ IGDB_CATEGORY_LABELS = {
 }
 
 
+IGDB_CACHE_TABLE = 'igdb_games'
+IGDB_CACHE_STATE_TABLE = 'igdb_cache_state'
+
+
 def _igdb_page_size() -> int:
     try:
         size = int(IGDB_BATCH_SIZE)
@@ -1753,6 +1757,43 @@ def _init_db() -> None:
             except sqlite3.OperationalError:
                 pass
 
+            try:
+                conn.execute(
+                    f'''
+                    CREATE TABLE IF NOT EXISTS {IGDB_CACHE_TABLE} (
+                        igdb_id INTEGER PRIMARY KEY,
+                        name TEXT,
+                        summary TEXT,
+                        updated_at INTEGER,
+                        first_release_date INTEGER,
+                        category INTEGER,
+                        cover_image_id TEXT,
+                        rating_count INTEGER,
+                        developers TEXT,
+                        publishers TEXT,
+                        genres TEXT,
+                        platforms TEXT,
+                        game_modes TEXT,
+                        cached_at TEXT
+                    )
+                    '''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    f'''
+                    CREATE TABLE IF NOT EXISTS {IGDB_CACHE_STATE_TABLE} (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        total_count INTEGER,
+                        last_synced_at TEXT
+                    )
+                    '''
+                )
+            except sqlite3.OperationalError:
+                pass
+
             for table_config in LOOKUP_TABLES:
                 conn.execute(
                     f'''
@@ -1985,6 +2026,68 @@ def load_games() -> pd.DataFrame:
 
         return _finalize_dataframe(df), True
 
+    def _load_from_cache() -> tuple[pd.DataFrame, bool]:
+        with db_lock:
+            conn = get_db()
+            try:
+                cur = conn.execute(
+                    f'''SELECT igdb_id, name, summary, first_release_date,
+                               category, developers, publishers, genres,
+                               platforms, game_modes, cover_image_id, rating_count
+                        FROM {IGDB_CACHE_TABLE}
+                        ORDER BY igdb_id'''
+                )
+                rows = cur.fetchall()
+            except sqlite3.OperationalError:
+                return pd.DataFrame(columns=columns), False
+
+        if not rows:
+            return pd.DataFrame(columns=columns), False
+
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            igdb_id_value = row['igdb_id']
+            normalized_id = coerce_igdb_id(igdb_id_value)
+            cover_value = (
+                {'image_id': row['cover_image_id']} if row['cover_image_id'] else None
+            )
+            try:
+                rating_value = int(row['rating_count']) if row['rating_count'] is not None else 0
+            except (TypeError, ValueError):
+                rating_value = 0
+            developers = _deserialize_cache_list(row['developers'])
+            publishers = _deserialize_cache_list(row['publishers'])
+            genres = _deserialize_cache_list(row['genres'])
+            game_modes = _deserialize_cache_list(row['game_modes'])
+            platforms = _deserialize_cache_list(row['platforms'])
+            records.append(
+                {
+                    'Name': row['name'] or '',
+                    'Summary': row['summary'] or '',
+                    'First Launch Date': _format_first_release_date(
+                        row['first_release_date']
+                    ),
+                    'Category': _igdb_category_display(row['category']),
+                    'Developers': ', '.join(developers),
+                    'Publishers': ', '.join(publishers),
+                    'Genres': ', '.join(genres),
+                    'Game Modes': ', '.join(game_modes),
+                    'Platforms': ', '.join(platforms),
+                    'Large Cover Image (URL)': _cover_url_from_cover(
+                        cover_value, size='t_original'
+                    ),
+                    'Rating Count': rating_value,
+                    'IGDB ID': normalized_id or '',
+                    'igdb_id': normalized_id or '',
+                }
+            )
+
+        df = pd.DataFrame(records)
+        if df.empty:
+            return pd.DataFrame(columns=columns), False
+
+        return _finalize_dataframe(df), True
+
     def _load_from_igdb() -> pd.DataFrame:
         try:
             access_token, client_id = exchange_twitch_credentials()
@@ -2116,6 +2219,10 @@ def load_games() -> pd.DataFrame:
     db_frame, has_rows = _load_from_db()
     if has_rows:
         return db_frame
+
+    cache_frame, cache_has_rows = _load_from_cache()
+    if cache_has_rows:
+        return cache_frame
 
     return _load_from_igdb()
 
@@ -2403,23 +2510,214 @@ def exchange_twitch_credentials() -> tuple[str, str]:
     return token, client_id
 
 
-def fetch_igdb_metadata(
-    access_token: str, client_id: str, igdb_ids: list[str]
-) -> dict[str, dict[str, Any]]:
-    if not igdb_ids:
-        return {}
+def _normalize_igdb_payload(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping):
+        return None
 
+    raw_id = item.get('id')
+    try:
+        igdb_id = int(str(raw_id).strip())
+    except (TypeError, ValueError):
+        logger.warning('Skipping IGDB entry with invalid id %s', raw_id)
+        return None
+
+    name_value = item.get('name')
+    name = name_value.strip() if isinstance(name_value, str) else ''
+
+    summary_value = item.get('summary')
+    summary = summary_value.strip() if isinstance(summary_value, str) else ''
+
+    cover_obj = item.get('cover')
+    cover: dict[str, Any] | None = None
+    if isinstance(cover_obj, Mapping):
+        image_id_value = cover_obj.get('image_id') or cover_obj.get('imageId')
+        if image_id_value:
+            cover = {'image_id': str(image_id_value)}
+    elif isinstance(cover_obj, str):
+        image_id = cover_obj.strip()
+        if image_id:
+            cover = {'image_id': image_id}
+
+    rating_count = _coerce_rating_count(
+        item.get('total_rating_count'), item.get('rating_count')
+    )
+
+    involved_companies = item.get('involved_companies')
+    developer_names: list[str] = []
+    publisher_names: list[str] = []
+    if isinstance(involved_companies, list):
+        seen_dev: set[str] = set()
+        seen_pub: set[str] = set()
+        for company in involved_companies:
+            if not isinstance(company, Mapping):
+                continue
+            company_obj = company.get('company')
+            company_name: str | None = None
+            if isinstance(company_obj, Mapping):
+                name_candidate = company_obj.get('name')
+                if isinstance(name_candidate, str):
+                    company_name = name_candidate.strip()
+            elif isinstance(company_obj, str):
+                company_name = company_obj.strip()
+            if not company_name:
+                name_candidate = company.get('name')
+                if isinstance(name_candidate, str):
+                    company_name = name_candidate.strip()
+            if not company_name:
+                continue
+            fingerprint = company_name.casefold()
+            if company.get('developer') and fingerprint not in seen_dev:
+                seen_dev.add(fingerprint)
+                developer_names.append(company_name)
+            if company.get('publisher') and fingerprint not in seen_pub:
+                seen_pub.add(fingerprint)
+                publisher_names.append(company_name)
+
+    if not developer_names:
+        developer_names = _parse_company_names(item.get('developers'))
+    if not publisher_names:
+        publisher_names = _parse_company_names(item.get('publishers'))
+
+    genres = _parse_iterable(item.get('genres'))
+    platforms = _parse_iterable(item.get('platforms'))
+    game_modes = _parse_iterable(item.get('game_modes'))
+
+    return {
+        'id': igdb_id,
+        'name': name,
+        'summary': summary,
+        'updated_at': item.get('updated_at'),
+        'first_release_date': item.get('first_release_date'),
+        'category': item.get('category'),
+        'cover': cover,
+        'rating_count': rating_count,
+        'developers': developer_names,
+        'publishers': publisher_names,
+        'genres': genres,
+        'platforms': platforms,
+        'game_modes': game_modes,
+    }
+
+
+def _serialize_cache_list(values: Iterable[Any]) -> str:
+    items: list[str] = []
+    for value in values or []:
+        text = str(value).strip()
+        if text:
+            items.append(text)
+    return json.dumps(items, ensure_ascii=False)
+
+
+def _deserialize_cache_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    try:
+        data = json.loads(raw)
+    except Exception:
+        text = str(raw).strip()
+        return [text] if text else []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def fetch_igdb_metadata(
+    igdb_ids: Iterable[str], conn: sqlite3.Connection | None = None
+) -> dict[str, dict[str, Any]]:
     numeric_ids: list[int] = []
+    id_map: dict[int, str] = {}
     for value in igdb_ids:
+        normalized = coerce_igdb_id(value)
+        if not normalized:
+            continue
         try:
-            numeric_ids.append(int(str(value).strip()))
+            numeric = int(normalized)
         except (TypeError, ValueError):
             logger.warning('Skipping invalid IGDB id %s', value)
+            continue
+        if numeric in id_map:
+            continue
+        id_map[numeric] = normalized
+        numeric_ids.append(numeric)
+
+    if not numeric_ids:
+        return {}
+
+    if conn is None:
+        conn = get_db()
+
+    results: dict[str, dict[str, Any]] = {}
+    batch_size = 500
+    for start in range(0, len(numeric_ids), batch_size):
+        chunk = numeric_ids[start : start + batch_size]
+        if not chunk:
+            continue
+        placeholders = ','.join('?' for _ in chunk)
+        query = (
+            f'SELECT igdb_id, name, summary, updated_at, first_release_date, '
+            f'category, cover_image_id, rating_count, developers, publishers, '
+            f'genres, platforms, game_modes '
+            f'FROM {IGDB_CACHE_TABLE} '
+            f'WHERE igdb_id IN ({placeholders})'
+        )
+        try:
+            cur = conn.execute(query, tuple(chunk))
+        except sqlite3.OperationalError as exc:
+            logger.warning('Failed to query IGDB cache: %s', exc)
+            return {}
+        for row in cur.fetchall():
+            igdb_id = row['igdb_id']
+            normalized = id_map.get(igdb_id)
+            key = normalized if normalized is not None else str(igdb_id)
+            cover_id = row['cover_image_id']
+            results[str(key)] = {
+                'id': igdb_id,
+                'name': row['name'],
+                'summary': row['summary'],
+                'updated_at': row['updated_at'],
+                'first_release_date': row['first_release_date'],
+                'category': row['category'],
+                'cover': {'image_id': cover_id} if cover_id else None,
+                'rating_count': row['rating_count'],
+                'developers': _deserialize_cache_list(row['developers']),
+                'publishers': _deserialize_cache_list(row['publishers']),
+                'genres': _deserialize_cache_list(row['genres']),
+                'platforms': _deserialize_cache_list(row['platforms']),
+                'game_modes': _deserialize_cache_list(row['game_modes']),
+            }
+    return results
+
+
+def download_igdb_metadata(
+    access_token: str, client_id: str, igdb_ids: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    numeric_ids: list[int] = []
+    seen: set[int] = set()
+    for value in igdb_ids:
+        normalized = coerce_igdb_id(value)
+        if not normalized:
+            continue
+        try:
+            numeric = int(normalized)
+        except (TypeError, ValueError):
+            logger.warning('Skipping invalid IGDB id %s', value)
+            continue
+        if numeric in seen:
+            continue
+        seen.add(numeric)
+        numeric_ids.append(numeric)
+
     if not numeric_ids:
         return {}
 
     results: dict[str, dict[str, Any]] = {}
-    batch_size = IGDB_BATCH_SIZE if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0 else 500
+    batch_size = (
+        IGDB_BATCH_SIZE
+        if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0
+        else 500
+    )
     for start in range(0, len(numeric_ids), batch_size):
         chunk = numeric_ids[start : start + batch_size]
         if not chunk:
@@ -2431,7 +2729,7 @@ def fetch_igdb_metadata(
             'involved_companies.company.name,'
             'involved_companies.developer,'
             'involved_companies.publisher,'
-            'cover.image_id; '
+            'cover.image_id,total_rating_count,rating_count; '
             f"where id = ({', '.join(str(v) for v in chunk)}); "
             f'limit {len(chunk)};'
         )
@@ -2470,40 +2768,395 @@ def fetch_igdb_metadata(
             return {}
 
         for item in payload or []:
-            if not isinstance(item, dict):
+            normalized_item = _normalize_igdb_payload(item)
+            if not normalized_item:
                 continue
-            igdb_id = item.get('id')
-            if igdb_id is None:
-                continue
-            parsed_item = dict(item)
-            involved_companies = item.get('involved_companies')
-            developer_names: list[str] = []
-            publisher_names: list[str] = []
-            if isinstance(involved_companies, list):
-                for company in involved_companies:
-                    if not isinstance(company, Mapping):
-                        continue
-                    company_obj = company.get('company')
-                    company_name: str | None = None
-                    if isinstance(company_obj, Mapping):
-                        name_value = company_obj.get('name')
-                        if isinstance(name_value, str):
-                            company_name = name_value.strip()
-                    elif isinstance(company_obj, str):
-                        company_name = company_obj.strip()
-                    if not company_name:
-                        continue
-                    if company.get('developer'):
-                        developer_names.append(company_name)
-                    if company.get('publisher'):
-                        publisher_names.append(company_name)
-            parsed_item['developers'] = developer_names
-            parsed_item['publishers'] = publisher_names
-            parsed_item['genres'] = _parse_iterable(item.get('genres'))
-            parsed_item['platforms'] = _parse_iterable(item.get('platforms'))
-            parsed_item['game_modes'] = _parse_iterable(item.get('game_modes'))
-            results[str(igdb_id)] = parsed_item
+            results[str(normalized_item['id'])] = normalized_item
     return results
+
+
+def download_igdb_game_count(access_token: str, client_id: str) -> int:
+    request = Request(
+        'https://api.igdb.com/v4/games/count',
+        data='where id != null;'.encode('utf-8'),
+        method='POST',
+    )
+    request.add_header('Client-ID', client_id)
+    request.add_header('Authorization', f'Bearer {access_token}')
+    request.add_header('Accept', 'application/json')
+    request.add_header('User-Agent', IGDB_USER_AGENT)
+
+    try:
+        with urlopen(request) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except HTTPError as exc:
+        message = f'IGDB count request failed: {exc.code}'
+        try:
+            error_body = exc.read()
+        except Exception:  # pragma: no cover - defensive guard
+            error_body = b''
+        if error_body:
+            try:
+                decoded = error_body.decode('utf-8', errors='replace').strip()
+            except Exception:
+                decoded = ''
+            if decoded:
+                message = f'{message} {decoded}'
+        raise RuntimeError(message) from exc
+    except Exception as exc:  # pragma: no cover - network failures surfaced
+        raise RuntimeError(f'failed to query IGDB count: {exc}') from exc
+
+    if isinstance(payload, Mapping):
+        count_value = payload.get('count')
+    elif isinstance(payload, list) and payload:
+        first = payload[0]
+        count_value = first.get('count') if isinstance(first, Mapping) else None
+    else:
+        count_value = None
+
+    try:
+        return int(count_value)
+    except (TypeError, ValueError):
+        raise RuntimeError('invalid count payload from IGDB')
+
+
+def download_igdb_games(
+    access_token: str, client_id: str, offset: int, limit: int
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    query = (
+        'fields '
+        'id,name,summary,updated_at,first_release_date,'
+        'genres.name,platforms.name,game_modes.name,category,'
+        'involved_companies.company.name,'
+        'involved_companies.developer,'
+        'involved_companies.publisher,'
+        'cover.image_id,total_rating_count,rating_count; '
+        f'limit {limit}; '
+        f'offset {offset}; '
+        'sort id asc;'
+    )
+    request = Request(
+        'https://api.igdb.com/v4/games',
+        data=query.encode('utf-8'),
+        method='POST',
+    )
+    request.add_header('Client-ID', client_id)
+    request.add_header('Authorization', f'Bearer {access_token}')
+    request.add_header('Accept', 'application/json')
+    request.add_header('User-Agent', IGDB_USER_AGENT)
+
+    try:
+        with urlopen(request) as response:
+            payload = json.loads(response.read().decode('utf-8'))
+    except HTTPError as exc:
+        error_message = ''
+        try:
+            error_body = exc.read()
+        except Exception:  # pragma: no cover - best effort to capture error body
+            error_body = b''
+        if error_body:
+            try:
+                error_message = error_body.decode('utf-8', errors='replace').strip()
+            except Exception:  # pragma: no cover - unexpected decoding failures
+                error_message = ''
+        if not error_message and exc.reason:
+            error_message = str(exc.reason)
+        message = f"IGDB request failed: {exc.code}"
+        if error_message:
+            message = f"{message} {error_message}"
+        raise RuntimeError(message) from exc
+    except Exception as exc:  # pragma: no cover - network failures surfaced
+        raise RuntimeError(f'failed to query IGDB games: {exc}') from exc
+
+    results: list[dict[str, Any]] = []
+    for item in payload or []:
+        normalized_item = _normalize_igdb_payload(item)
+        if normalized_item is not None:
+            results.append(normalized_item)
+    return results
+
+
+def _build_cache_row_from_payload(
+    payload: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    normalized = payload
+    if 'id' not in normalized:
+        normalized = _normalize_igdb_payload(payload)
+        if normalized is None:
+            return None
+
+    igdb_id = normalized.get('id')
+    if igdb_id is None:
+        return None
+    try:
+        numeric_id = int(igdb_id)
+    except (TypeError, ValueError):
+        return None
+
+    def _clean_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = value.strip() if isinstance(value, str) else str(value).strip()
+        return text or None
+
+    cover = normalized.get('cover')
+    cover_image_id: str | None = None
+    if isinstance(cover, Mapping):
+        cover_value = cover.get('image_id') or cover.get('imageId')
+        if cover_value is not None:
+            cover_image_id = str(cover_value).strip() or None
+    elif isinstance(cover, str):
+        cover_image_id = cover.strip() or None
+
+    rating_value = normalized.get('rating_count')
+    if isinstance(rating_value, numbers.Number):
+        rating_count = int(rating_value)
+    else:
+        try:
+            rating_count = int(str(rating_value).strip())
+        except (TypeError, ValueError):
+            rating_count = None
+
+    developers_json = _serialize_cache_list(normalized.get('developers') or [])
+    publishers_json = _serialize_cache_list(normalized.get('publishers') or [])
+    genres_json = _serialize_cache_list(normalized.get('genres') or [])
+    platforms_json = _serialize_cache_list(normalized.get('platforms') or [])
+    game_modes_json = _serialize_cache_list(normalized.get('game_modes') or [])
+
+    return {
+        'igdb_id': numeric_id,
+        'name': _clean_text(normalized.get('name')),
+        'summary': _clean_text(normalized.get('summary')),
+        'updated_at': normalized.get('updated_at'),
+        'first_release_date': normalized.get('first_release_date'),
+        'category': normalized.get('category'),
+        'cover_image_id': cover_image_id,
+        'rating_count': rating_count,
+        'developers_json': developers_json,
+        'publishers_json': publishers_json,
+        'genres_json': genres_json,
+        'platforms_json': platforms_json,
+        'game_modes_json': game_modes_json,
+    }
+
+
+def _upsert_igdb_cache_entries(
+    conn: sqlite3.Connection, payloads: Iterable[Mapping[str, Any]]
+) -> tuple[int, int, int]:
+    inserted = updated = unchanged = 0
+    for payload in payloads:
+        row = _build_cache_row_from_payload(payload)
+        if row is None:
+            continue
+        igdb_id = row['igdb_id']
+        existing = conn.execute(
+            f'''SELECT name, summary, updated_at, first_release_date, category,
+                       cover_image_id, rating_count, developers, publishers, genres,
+                       platforms, game_modes
+                FROM {IGDB_CACHE_TABLE}
+                WHERE igdb_id = ?''',
+            (igdb_id,),
+        ).fetchone()
+        cached_at = now_utc_iso()
+        params = (
+            row['name'],
+            row['summary'],
+            row['updated_at'],
+            row['first_release_date'],
+            row['category'],
+            row['cover_image_id'],
+            row['rating_count'],
+            row['developers_json'],
+            row['publishers_json'],
+            row['genres_json'],
+            row['platforms_json'],
+            row['game_modes_json'],
+        )
+        if existing is None:
+            conn.execute(
+                f'''INSERT INTO {IGDB_CACHE_TABLE} (
+                        igdb_id, name, summary, updated_at, first_release_date,
+                        category, cover_image_id, rating_count, developers,
+                        publishers, genres, platforms, game_modes, cached_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    igdb_id,
+                    *params,
+                    cached_at,
+                ),
+            )
+            inserted += 1
+            continue
+
+        existing_values = (
+            existing['name'],
+            existing['summary'],
+            existing['updated_at'],
+            existing['first_release_date'],
+            existing['category'],
+            existing['cover_image_id'],
+            existing['rating_count'],
+            existing['developers'],
+            existing['publishers'],
+            existing['genres'],
+            existing['platforms'],
+            existing['game_modes'],
+        )
+        if existing_values == params:
+            unchanged += 1
+            continue
+
+        conn.execute(
+            f'''UPDATE {IGDB_CACHE_TABLE}
+                   SET name=?, summary=?, updated_at=?, first_release_date=?,
+                       category=?, cover_image_id=?, rating_count=?,
+                       developers=?, publishers=?, genres=?, platforms=?,
+                       game_modes=?, cached_at=?
+                 WHERE igdb_id=?''',
+            (*params, cached_at, igdb_id),
+        )
+        updated += 1
+    return inserted, updated, unchanged
+
+
+def _get_cached_igdb_total(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute(
+        f'SELECT total_count FROM {IGDB_CACHE_STATE_TABLE} WHERE id = 1'
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row['total_count']) if row['total_count'] is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_cached_igdb_total(
+    conn: sqlite3.Connection, total: int | None, synced_at: str | None = None
+) -> None:
+    timestamp = synced_at or now_utc_iso()
+    conn.execute(
+        f'''INSERT INTO {IGDB_CACHE_STATE_TABLE} (id, total_count, last_synced_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                total_count=excluded.total_count,
+                last_synced_at=excluded.last_synced_at''',
+        (total, timestamp),
+    )
+
+
+@app.route('/api/igdb/cache', methods=['POST'])
+def api_igdb_cache_refresh():
+    payload = request.get_json(silent=True) or {}
+    try:
+        offset = int(payload.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(payload.get('limit', IGDB_BATCH_SIZE))
+    except (TypeError, ValueError):
+        limit = IGDB_BATCH_SIZE
+
+    if offset < 0:
+        offset = 0
+    if not isinstance(limit, int) or limit <= 0:
+        limit = IGDB_BATCH_SIZE
+    if not isinstance(limit, int) or limit <= 0:
+        limit = 500
+    limit = min(limit, 500)
+
+    try:
+        access_token, client_id = exchange_twitch_credentials()
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    with db_lock:
+        conn = get_db()
+        total = _get_cached_igdb_total(conn)
+
+    if total is None or offset == 0:
+        try:
+            total = download_igdb_game_count(access_token, client_id)
+        except RuntimeError as exc:
+            return jsonify({'error': str(exc)}), 502
+        with db_lock:
+            conn = get_db()
+            with conn:
+                _set_cached_igdb_total(conn, total)
+
+    if total is None or total <= 0:
+        with db_lock:
+            conn = get_db()
+            with conn:
+                _set_cached_igdb_total(conn, total)
+        return jsonify(
+            {
+                'status': 'ok',
+                'total': total or 0,
+                'processed': 0,
+                'inserted': 0,
+                'updated': 0,
+                'unchanged': 0,
+                'done': True,
+                'next_offset': 0,
+                'batch_count': 0,
+            }
+        )
+
+    if offset >= total:
+        return jsonify(
+            {
+                'status': 'ok',
+                'total': total,
+                'processed': total,
+                'inserted': 0,
+                'updated': 0,
+                'unchanged': 0,
+                'done': True,
+                'next_offset': total,
+                'batch_count': 0,
+            }
+        )
+
+    try:
+        payloads = download_igdb_games(access_token, client_id, offset, limit)
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 502
+
+    batch_count = len(payloads)
+    with db_lock:
+        conn = get_db()
+        with conn:
+            inserted, updated, unchanged = _upsert_igdb_cache_entries(conn, payloads)
+
+    with _igdb_prefill_lock:
+        if batch_count:
+            _igdb_prefill_cache.clear()
+
+    processed = offset + batch_count
+    if total is not None:
+        processed = min(processed, total)
+    if processed < 0:
+        processed = 0
+    done = processed >= total or batch_count == 0
+    next_offset = offset + batch_count if batch_count else processed
+
+    return jsonify(
+        {
+            'status': 'ok',
+            'total': total,
+            'processed': processed,
+            'inserted': inserted,
+            'updated': updated,
+            'unchanged': unchanged,
+            'done': done,
+            'next_offset': next_offset,
+            'batch_count': batch_count,
+        }
+    )
 
 
 _igdb_prefill_cache: dict[str, dict[str, Any]] = {}
@@ -2608,17 +3261,7 @@ def get_igdb_prefill_for_id(igdb_id: str | None) -> dict[str, Any] | None:
     if cached is not None:
         return dict(cached)
 
-    try:
-        access_token, client_id = exchange_twitch_credentials()
-    except Exception as exc:  # pragma: no cover - relies on environment
-        logger.warning('Unable to obtain Twitch credentials for IGDB prefill: %s', exc)
-        return None
-
-    try:
-        metadata_map = fetch_igdb_metadata(access_token, client_id, [normalized])
-    except Exception as exc:  # pragma: no cover - defensive guard for runtime fetch
-        logger.warning('Failed to fetch IGDB metadata for %s: %s', normalized, exc)
-        return None
+    metadata_map = fetch_igdb_metadata([normalized])
 
     if not metadata_map:
         return None
@@ -3300,7 +3943,7 @@ def api_lookup_options(lookup_type: str):
 
 @app.route('/updates')
 def updates_page():
-    return render_template('updates.html')
+    return render_template('updates.html', igdb_batch_size=IGDB_BATCH_SIZE)
 
 
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
@@ -3888,19 +4531,9 @@ def api_updates_refresh():
     if not processed_rows:
         return jsonify({'status': 'ok', 'updated': 0, 'missing': []})
 
-    try:
-        access_token, client_id = exchange_twitch_credentials()
-    except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 400
-
-    try:
-        igdb_payloads = fetch_igdb_metadata(
-            access_token,
-            client_id,
-            [row.get('igdb_id') for row in processed_rows],
-        )
-    except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 502
+    igdb_payloads = fetch_igdb_metadata(
+        [row.get('igdb_id') for row in processed_rows]
+    )
 
     updated = 0
     missing: list[int] = []
@@ -3910,9 +4543,12 @@ def api_updates_refresh():
         conn = get_db()
         for row in processed_rows:
             igdb_id_value = row.get('igdb_id')
-            if not igdb_id_value:
+            normalized_id = coerce_igdb_id(igdb_id_value)
+            if not normalized_id:
                 continue
-            payload = igdb_payloads.get(str(igdb_id_value))
+            payload = igdb_payloads.get(normalized_id)
+            if not payload and normalized_id.isdigit():
+                payload = igdb_payloads.get(str(int(normalized_id)))
             if not payload:
                 try:
                     missing.append(int(row.get('ID', 0)))
@@ -4077,17 +4713,7 @@ def api_updates_fix_names():
 
     metadata: dict[str, Mapping[str, Any]] = {}
     if unique_ids:
-        try:
-            access_token, client_id = exchange_twitch_credentials()
-        except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 500
-        try:
-            metadata = fetch_igdb_metadata(access_token, client_id, unique_ids) or {}
-        except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 502
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logger.warning('Failed to fetch IGDB metadata: %s', exc)
-            metadata = {}
+        metadata = fetch_igdb_metadata(unique_ids) or {}
 
     timestamp = now_utc_iso()
     updates: list[tuple[str, str, Any]] = []

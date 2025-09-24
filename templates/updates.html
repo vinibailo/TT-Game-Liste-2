@@ -39,12 +39,23 @@
                         data-search
                     />
                 </label>
-                <button type="button" class="btn btn-blue" data-refresh>
-                    <span class="btn-icon" aria-hidden="true">
-                        <span class="material-symbols-rounded">refresh</span>
-                    </span>
-                    <span class="btn-label">Update</span>
-                </button>
+                <div class="updates-bulk-action">
+                    <button type="button" class="btn btn-blue" data-refresh>
+                        <span class="btn-icon" aria-hidden="true">
+                            <span class="material-symbols-rounded">refresh</span>
+                        </span>
+                        <span class="btn-label">Update</span>
+                    </button>
+                    <div class="progress-indicator updates-progress" data-refresh-progress hidden>
+                        <div class="progress-metrics">
+                            <span class="progress-count" data-refresh-count>0/0</span>
+                            <span class="progress-percent" data-refresh-percent>0%</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" data-refresh-bar></div>
+                        </div>
+                    </div>
+                </div>
                 <div class="updates-bulk-action">
                     <button type="button" class="btn btn-green" data-fix-names>
                         <span class="btn-icon" aria-hidden="true">
@@ -163,9 +174,11 @@
             editBaseUrl: {{ url_for('index')|tojson }},
             updatesUrl: {{ url_for('api_updates_list')|tojson }},
             refreshUrl: {{ url_for('api_updates_refresh')|tojson }},
+            cacheRefreshUrl: {{ url_for('api_igdb_cache_refresh')|tojson }},
             fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
             removeDuplicatesUrl: {{ url_for('api_updates_remove_duplicates')|tojson }},
-            detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }}
+            detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
+            cacheBatchSize: {{ igdb_batch_size|tojson }}
         };
     </script>
     <script src="{{ url_for('static', filename='updates.js') }}" defer></script>
