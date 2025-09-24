@@ -192,6 +192,33 @@ def has_summary_text(value: Any) -> bool:
         return False
     return True
 
+
+def has_cover_path_value(value: Any) -> bool:
+    """Return ``True`` when ``value`` contains a usable cover path."""
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            if pd.isna(value):
+                return False
+        except Exception:
+            pass
+        text = str(value).strip()
+    if not text:
+        return False
+    if text.lower() == 'nan':
+        return False
+    return True
+
+
+def is_processed_game_done(summary_value: Any, cover_path_value: Any) -> bool:
+    """Return ``True`` when a processed row has the required summary and cover."""
+
+    return has_summary_text(summary_value) and has_cover_path_value(cover_path_value)
+
 app = Flask(__name__)
 app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
 APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
@@ -2102,7 +2129,7 @@ def seed_processed_games_from_source() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "Source Index", "Name", "Summary" FROM processed_games'
+                'SELECT "Source Index", "Name", "Summary", "Cover Path" FROM processed_games'
             )
             existing: dict[str, tuple[str, str, bool]] = {}
             for row in cur.fetchall():
@@ -2119,10 +2146,14 @@ def seed_processed_games_from_source() -> None:
                     summary_value = row['Summary']
                 except (KeyError, IndexError, TypeError):
                     summary_value = None
+                try:
+                    cover_value = row['Cover Path']
+                except (KeyError, IndexError, TypeError):
+                    cover_value = None
                 existing[canonical] = (
                     stored_text,
                     _normalize_name(row['Name']),
-                    has_summary_text(summary_value),
+                    is_processed_game_done(summary_value, cover_value),
                 )
 
             source_values = (
@@ -2161,8 +2192,8 @@ def seed_processed_games_from_source() -> None:
                     existing[src_index] = (src_index, igdb_name, False)
                     continue
 
-                stored_source, existing_name, has_summary = existing[src_index]
-                if has_summary:
+                stored_source, existing_name, is_done = existing[src_index]
+                if is_done:
                     continue
                 if stored_source != src_index:
                     conn.execute(
@@ -2176,7 +2207,7 @@ def seed_processed_games_from_source() -> None:
                         (igdb_name, src_index),
                     )
                     existing_name = igdb_name
-                existing[src_index] = (stored_source, existing_name, has_summary)
+                existing[src_index] = (stored_source, existing_name, is_done)
 
 
 def backfill_igdb_ids() -> None:
@@ -2188,7 +2219,8 @@ def backfill_igdb_ids() -> None:
         conn = get_db()
         with conn:
             cur = conn.execute(
-                'SELECT "Source Index", "igdb_id", "Summary" FROM processed_games'
+                'SELECT "Source Index", "igdb_id", "Summary", "Cover Path" '
+                'FROM processed_games'
             )
             rows = cur.fetchall()
             for row in rows:
@@ -2199,7 +2231,11 @@ def backfill_igdb_ids() -> None:
                     summary_value = row['Summary']
                 except (KeyError, IndexError, TypeError):
                     summary_value = None
-                if has_summary_text(summary_value):
+                try:
+                    cover_value = row['Cover Path']
+                except (KeyError, IndexError, TypeError):
+                    cover_value = None
+                if is_processed_game_done(summary_value, cover_value):
                     continue
                 src_index = row['Source Index']
                 position = get_position_for_source_index(src_index)
@@ -2503,7 +2539,7 @@ class GameNavigator:
             cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
             cur = conn.execute(
-                'SELECT "Source Index", "ID", last_edited_at, "Name" FROM processed_games'
+                'SELECT "Source Index", "ID", "Summary", "Cover Path" FROM processed_games'
             )
             rows = cur.fetchall()
         processed: set[int] = set()
@@ -2511,20 +2547,15 @@ class GameNavigator:
         for row in rows:
             position = get_position_for_source_index(row['Source Index'])
             if position is not None and 0 <= position < self.total:
-                processed_flag = False
-                last_edited = row['last_edited_at']
-                if last_edited:
-                    processed_flag = True
-                else:
-                    try:
-                        name_value = row['Name']
-                    except (KeyError, IndexError):
-                        name_value = None
-                    if name_value is None:
-                        processed_flag = True
-                    elif isinstance(name_value, str) and not name_value.strip():
-                        processed_flag = True
-                if processed_flag:
+                try:
+                    summary_value = row['Summary']
+                except (KeyError, IndexError, TypeError):
+                    summary_value = None
+                try:
+                    cover_value = row['Cover Path']
+                except (KeyError, IndexError, TypeError):
+                    cover_value = None
+                if is_processed_game_done(summary_value, cover_value):
                     processed.add(position)
             try:
                 row_id = int(row['ID'])
@@ -2571,20 +2602,21 @@ class GameNavigator:
             cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
             state_row = cur.fetchone()
             cur = conn.execute(
-                "SELECT COUNT(*) AS processed_count FROM processed_games "
-                "WHERE COALESCE(TRIM(last_edited_at), '') != '' "
-                "   OR COALESCE(TRIM(\"Name\"), '') = ''"
+                'SELECT "Summary", "Cover Path" FROM processed_games'
             )
-            processed_row = cur.fetchone()
+            rows = cur.fetchall()
         processed_total = 0
-        if processed_row is not None:
+        for row in rows:
             try:
-                processed_total = int(processed_row['processed_count'])
-            except (KeyError, TypeError, ValueError):
-                try:
-                    processed_total = int(processed_row[0])
-                except Exception:
-                    processed_total = 0
+                summary_value = row['Summary']
+            except (KeyError, IndexError, TypeError):
+                summary_value = None
+            try:
+                cover_value = row['Cover Path']
+            except (KeyError, IndexError, TypeError):
+                cover_value = None
+            if is_processed_game_done(summary_value, cover_value):
+                processed_total += 1
         self.processed_total = max(processed_total, 0)
         if state_row is not None:
             try:
@@ -3103,12 +3135,16 @@ def api_save():
                     ),
                     409,
                 )
-            existing_last_edit = None
             was_processed_before = False
+            existing_summary = None
+            existing_cover_path = None
+            existing_width = None
+            existing_height = None
             with db_lock:
                 conn = get_db()
                 cur = conn.execute(
-                    'SELECT "ID", "igdb_id", last_edited_at FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
+                    'FROM processed_games WHERE "Source Index"=?',
                     (source_index,),
                 )
                 existing = cur.fetchone()
@@ -3128,12 +3164,24 @@ def api_save():
                     seq_id = existing_id
                     new_record = False
                     try:
-                        existing_last_edit = existing['last_edited_at']
-                    except (KeyError, IndexError):
-                        existing_last_edit = None
-                    if existing_last_edit is not None:
-                        text = str(existing_last_edit).strip()
-                        was_processed_before = bool(text)
+                        existing_summary = existing['Summary']
+                    except (KeyError, IndexError, TypeError):
+                        existing_summary = None
+                    try:
+                        existing_cover_path = existing['Cover Path']
+                    except (KeyError, IndexError, TypeError):
+                        existing_cover_path = None
+                    try:
+                        existing_width = existing['Width']
+                    except (KeyError, IndexError, TypeError):
+                        existing_width = None
+                    try:
+                        existing_height = existing['Height']
+                    except (KeyError, IndexError, TypeError):
+                        existing_height = None
+                    was_processed_before = is_processed_game_done(
+                        existing_summary, existing_cover_path
+                    )
                 else:
                     seq_id = navigator.seq_index
                     if expected_id != seq_id:
@@ -3162,6 +3210,16 @@ def api_save():
                 cover_path = os.path.join(PROCESSED_DIR, f"{seq_id}.jpg")
                 img.save(cover_path, format='JPEG', quality=90)
                 width, height = img.size
+            elif existing_cover_path:
+                cover_path = str(existing_cover_path)
+                try:
+                    width = int(existing_width)
+                except (TypeError, ValueError):
+                    width = 0
+                try:
+                    height = int(existing_height)
+                except (TypeError, ValueError):
+                    height = 0
 
             igdb_id_value = None
             if existing is not None:
@@ -3276,10 +3334,18 @@ def api_save():
                     conn.commit()
                     if new_record:
                         navigator.seq_index += 1
-                    if not was_processed_before:
+                    new_is_done = is_processed_game_done(
+                        row['Summary'], row['Cover Path']
+                    )
+                    if new_is_done and not was_processed_before:
                         navigator.processed_total = min(
                             navigator.total,
                             navigator.processed_total + 1,
+                        )
+                    elif was_processed_before and not new_is_done:
+                        navigator.processed_total = max(
+                            0,
+                            navigator.processed_total - 1,
                         )
                 except sqlite3.IntegrityError:
                     conn.rollback()

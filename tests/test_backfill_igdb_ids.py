@@ -10,10 +10,11 @@ def test_backfill_igdb_ids_skips_rows_with_summary(tmp_path):
         with app_module.db:
             app_module.db.execute('DELETE FROM processed_games')
             app_module.db.executemany(
-                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary") VALUES (?, ?, ?, ?)',
+                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary", "Cover Path") '
+                'VALUES (?, ?, ?, ?, ?)',
                 [
-                    (1, '0', 'First Game', ''),
-                    (2, '1', 'Second Game', 'Existing summary'),
+                    (1, '0', 'First Game', '', None),
+                    (2, '1', 'Second Game', 'Existing summary', f"{app_module.PROCESSED_DIR}/2.jpg"),
                 ],
             )
 

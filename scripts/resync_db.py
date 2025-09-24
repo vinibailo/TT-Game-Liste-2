@@ -10,7 +10,7 @@ from app import (
     db_lock,
     extract_igdb_id,
     coerce_igdb_id,
-    has_summary_text,
+    is_processed_game_done,
 )
 
 
@@ -51,7 +51,8 @@ def main() -> None:
         with conn:
             for src_index, igdb_id in sources:
                 cur = conn.execute(
-                    'SELECT "igdb_id", "Summary" FROM processed_games WHERE "Source Index"=?',
+                    'SELECT "igdb_id", "Summary", "Cover Path" '
+                    'FROM processed_games WHERE "Source Index"=?',
                     (src_index,),
                 )
                 row = cur.fetchone()
@@ -69,7 +70,11 @@ def main() -> None:
                     summary_value = row['Summary']
                 except (KeyError, IndexError, TypeError):
                     summary_value = None
-                if has_summary_text(summary_value):
+                try:
+                    cover_value = row['Cover Path']
+                except (KeyError, IndexError, TypeError):
+                    cover_value = None
+                if is_processed_game_done(summary_value, cover_value):
                     continue
 
                 existing_id = _normalize_existing_id(row)

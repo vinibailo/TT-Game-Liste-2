@@ -46,8 +46,15 @@ def test_seed_processed_games_skips_rows_with_summary(tmp_path):
         with app_module.db:
             app_module.db.execute('DELETE FROM processed_games')
             app_module.db.execute(
-                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary") VALUES (?, ?, ?, ?)',
-                (5, ' 00123 ', 'Stored Name', 'Manual summary'),
+                'INSERT INTO processed_games ("ID", "Source Index", "Name", "Summary", "Cover Path") '
+                'VALUES (?, ?, ?, ?, ?)',
+                (
+                    5,
+                    ' 00123 ',
+                    'Stored Name',
+                    'Manual summary',
+                    f"{app_module.PROCESSED_DIR}/5.jpg",
+                ),
             )
 
     app_module.games_df = pd.DataFrame([
