@@ -204,6 +204,7 @@ def test_out_of_order_ids_are_normalized(tmp_path):
             [('5', '0'), ('1', '1'), ('3', '2')],
         )
     app = load_app(tmp_path)
+    app.normalize_processed_games()
     with app.db_lock:
         cur = app.db.execute(
             'SELECT "ID", "Source Index" FROM processed_games ORDER BY "ID"'
