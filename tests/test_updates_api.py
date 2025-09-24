@@ -83,6 +83,21 @@ def insert_processed_game(app_module, **overrides):
             )
 
 
+def clear_processed_tables(app_module):
+    tables = (
+        'processed_game_developers',
+        'processed_game_publishers',
+        'processed_game_genres',
+        'processed_game_game_modes',
+        'processed_game_platforms',
+        'processed_games',
+    )
+    with app_module.db_lock:
+        with app_module.db:
+            for table in tables:
+                app_module.db.execute(f'DELETE FROM {table}')
+
+
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
@@ -415,6 +430,128 @@ def test_updates_detail_returns_diff(tmp_path):
     assert 'Category' not in payload['diff']
     assert payload['processed_game_id'] == 1
     assert payload['igdb_id'] == '100'
+
+
+def test_fix_names_updates_batches(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{'Source Index': '1', 'Name': 'Wrong Name', 'igdb_id': '101'},
+    )
+    insert_processed_game(
+        app_module,
+        ID=2,
+        **{'Source Index': '2', 'Name': 'Correct 202', 'igdb_id': '202'},
+    )
+    insert_processed_game(
+        app_module,
+        ID=3,
+        **{'Source Index': '3', 'Name': 'Missing Remote', 'igdb_id': '303'},
+    )
+
+    with app_module.db_lock:
+        before_rows = app_module.db.execute(
+            'SELECT "ID", last_edited_at FROM processed_games ORDER BY "ID"'
+        ).fetchall()
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    captured_batches: list[list[str]] = []
+
+    def fake_exchange():
+        return 'token', 'client'
+
+    def fake_fetch(token, client_id, igdb_ids):
+        captured_batches.append(list(igdb_ids))
+        return {
+            '101': {'name': 'Correct Name'},
+            '202': {'name': 'Correct 202'},
+            '303': {'name': ''},
+        }
+
+    app_module.exchange_twitch_credentials = fake_exchange
+    app_module.fetch_igdb_metadata = fake_fetch
+
+    first = client.post('/api/updates/fix-names', json={'limit': 2})
+    assert first.status_code == 200
+    first_data = first.get_json()
+    assert first_data['total'] == 3
+    assert first_data['processed'] == 2
+    assert first_data['updated'] == 1
+    assert first_data['unchanged'] == 1
+    assert first_data['missing'] == []
+    assert first_data['done'] is False
+    assert first_data['next_offset'] == 2
+
+    assert captured_batches[0] == ['101', '202']
+
+    with app_module.db_lock:
+        rows = app_module.db.execute(
+            'SELECT "ID", "Name", last_edited_at FROM processed_games ORDER BY "ID"'
+        ).fetchall()
+
+    assert [row['Name'] for row in rows] == [
+        'Correct Name',
+        'Correct 202',
+        'Missing Remote',
+    ]
+    assert rows[0]['last_edited_at'] != before_rows[0]['last_edited_at']
+    assert rows[1]['last_edited_at'] == before_rows[1]['last_edited_at']
+
+    second = client.post(
+        '/api/updates/fix-names',
+        json={'offset': first_data['next_offset'], 'limit': 2},
+    )
+    assert second.status_code == 200
+    second_data = second.get_json()
+    assert second_data['processed'] == 3
+    assert second_data['done'] is True
+    assert second_data['updated'] == 0
+    assert second_data['missing'] == ['303']
+    assert second_data['missing_name'] == ['303']
+    assert second_data['unchanged'] == 0
+    assert captured_batches[1] == ['303']
+
+    with app_module.db_lock:
+        final_rows = app_module.db.execute(
+            'SELECT "Name" FROM processed_games ORDER BY "ID"'
+        ).fetchall()
+    assert [row['Name'] for row in final_rows] == [
+        'Correct Name',
+        'Correct 202',
+        'Missing Remote',
+    ]
+
+
+def test_fix_names_without_ids_skips_api(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{'Source Index': '10', 'Name': 'No Remote', 'igdb_id': None},
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    def fail_exchange():  # pragma: no cover - ensures endpoint short-circuits
+        raise AssertionError('exchange_twitch_credentials should not be called')
+
+    app_module.exchange_twitch_credentials = fail_exchange
+    app_module.fetch_igdb_metadata = lambda *_args, **_kwargs: {}
+
+    response = client.post('/api/updates/fix-names')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['total'] == 0
+    assert payload['processed'] == 0
+    assert payload['done'] is True
+    assert payload['updated'] == 0
+    assert payload['invalid'] == 0
 
 
 def test_updates_detail_missing_returns_404(tmp_path):

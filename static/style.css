@@ -261,7 +261,8 @@ body.modal-open {
   overflow: hidden;
 }
 
-.progress-bar #progress {
+.progress-bar #progress,
+.progress-bar .progress-fill {
   width: 0;
   height: 100%;
   background: linear-gradient(90deg, var(--color-blue), var(--color-green));
@@ -737,6 +738,23 @@ textarea {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
+}
+
+.updates-bulk-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.updates-progress {
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.updates-progress .progress-bar {
+  width: 200px;
+  max-width: 100%;
 }
 
 .updates-search {
