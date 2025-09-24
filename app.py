@@ -5,6 +5,7 @@ import base64
 import io
 import sqlite3
 import numbers
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -170,6 +171,14 @@ LOOKUP_SOURCE_KEYS = {
     'Game Modes': ['Game Modes', 'Mode'],
     'Platforms': ['Platforms', 'Platform'],
 }
+
+
+def _format_lookup_label(value: str) -> str:
+    text = str(value or '').replace('_', ' ').strip()
+    if not text:
+        return ''
+    spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', text)
+    return spaced.strip().title()
 
 
 def has_summary_text(value: Any) -> bool:
@@ -3016,6 +3025,27 @@ def index():
         total=total_games,
         categories=categories_list,
         platforms=platforms_list,
+    )
+
+
+@app.route('/lookups')
+def lookups_page():
+    lookup_tables = [
+        {
+            'type': table_config['table'],
+            'label': table_config['table'].replace('_', ' ').title(),
+            'singular_label': _format_lookup_label(
+                table_config.get('column', table_config['table'])
+            ),
+        }
+        for table_config in LOOKUP_TABLES
+    ]
+    default_lookup = lookup_tables[0]['type'] if lookup_tables else ''
+    return render_template(
+        'lookups.html',
+        lookup_tables=lookup_tables,
+        default_lookup=default_lookup,
+        default_label=lookup_tables[0]['label'] if lookup_tables else '',
     )
 
 

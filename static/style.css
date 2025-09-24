@@ -36,11 +36,13 @@ body {
 }
 
 body.page-editor,
-body.page-updates {
+body.page-updates,
+body.page-lookups {
   --topbar-height: 64px;
 }
 
-body.page-updates {
+body.page-updates,
+body.page-lookups {
   overflow: auto;
 }
 
@@ -924,6 +926,169 @@ textarea {
   font-size: 1.4rem;
 }
 
+.lookups-page {
+  width: min(1080px, 100% - 48px);
+  margin: 32px auto 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.lookups-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.lookups-title h1 {
+  margin: 0;
+  font-size: 2rem;
+  font-weight: 500;
+}
+
+.lookups-title p {
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  max-width: 720px;
+}
+
+.lookups-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.lookup-select {
+  min-width: 220px;
+}
+
+.lookup-select-label {
+  font-size: 0.95rem;
+  color: var(--color-muted);
+  font-weight: 500;
+}
+
+.lookups-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-muted);
+  min-width: 240px;
+}
+
+.lookups-search input {
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.95rem;
+  outline: none;
+  width: 100%;
+}
+
+.lookups-search input::placeholder {
+  color: rgba(226, 232, 240, 0.5);
+}
+
+.lookups-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.95rem;
+  color: var(--color-muted);
+}
+
+.lookups-summary strong {
+  color: var(--color-text);
+  font-size: 1rem;
+}
+
+.lookups-summary-count {
+  color: var(--color-muted);
+}
+
+.lookups-card {
+  background: var(--color-surface-elevated);
+  border-radius: 20px;
+  border: 1px solid var(--color-border);
+  box-shadow: 0 16px 40px rgba(8, 15, 35, 0.45);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.lookups-card-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.lookups-card-header h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 500;
+}
+
+.lookups-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 520px;
+}
+
+.lookups-table th,
+.lookups-table td {
+  padding: 16px 24px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.lookups-table thead {
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.lookups-table th {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+}
+
+.lookups-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.lookup-name {
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.lookup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.lookup-confirm p {
+  margin: 0 0 16px;
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.lookup-confirm .modal-actions {
+  margin-top: 24px;
+}
+
 .table-empty,
 .table-loading {
   display: flex;
@@ -993,6 +1158,10 @@ textarea {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.modal-dialog.modal-small {
+  width: min(480px, 100%);
 }
 
 .modal-header {
@@ -1142,6 +1311,15 @@ textarea {
   .modal-dialog {
     border-radius: 18px;
   }
+
+  .lookups-page {
+    width: calc(100% - 32px);
+    margin: 24px auto 48px;
+  }
+
+  .lookups-card {
+    border-radius: 18px;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1173,6 +1351,27 @@ textarea {
 
   .modal-meta {
     width: 100%;
+  }
+
+  .lookups-controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .lookup-select,
+  .lookups-search {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .lookups-controls .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .lookups-table {
+    min-width: 100%;
   }
 }
 
