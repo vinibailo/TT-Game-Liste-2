@@ -2,6 +2,8 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+import json
+
 import pandas as pd
 
 from tests.app_helpers import load_app
@@ -85,6 +87,72 @@ def insert_processed_game(app_module, **overrides):
             )
 
 
+def insert_igdb_cache_entry(app_module, igdb_id: int | str, **overrides):
+    defaults = {
+        'name': 'Remote Game',
+        'summary': 'Remote summary',
+        'updated_at': 1_700_000_000,
+        'first_release_date': 1_600_000_000,
+        'category': 0,
+        'cover_image_id': 'cover123',
+        'rating_count': 0,
+        'developers': [],
+        'publishers': [],
+        'genres': [],
+        'platforms': [],
+        'game_modes': [],
+    }
+    defaults.update(overrides)
+
+    def _ensure_json(value):
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return json.dumps(list(value))
+        return json.dumps([])
+
+    with app_module.db_lock:
+        with app_module.db:
+            app_module.db.execute(
+                f'''
+                INSERT INTO {app_module.IGDB_CACHE_TABLE} (
+                    igdb_id, name, summary, updated_at, first_release_date,
+                    category, cover_image_id, rating_count, developers,
+                    publishers, genres, platforms, game_modes, cached_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(igdb_id) DO UPDATE SET
+                    name=excluded.name,
+                    summary=excluded.summary,
+                    updated_at=excluded.updated_at,
+                    first_release_date=excluded.first_release_date,
+                    category=excluded.category,
+                    cover_image_id=excluded.cover_image_id,
+                    rating_count=excluded.rating_count,
+                    developers=excluded.developers,
+                    publishers=excluded.publishers,
+                    genres=excluded.genres,
+                    platforms=excluded.platforms,
+                    game_modes=excluded.game_modes,
+                    cached_at=excluded.cached_at
+                ''',
+                (
+                    int(igdb_id),
+                    defaults['name'],
+                    defaults['summary'],
+                    defaults['updated_at'],
+                    defaults['first_release_date'],
+                    defaults['category'],
+                    defaults['cover_image_id'],
+                    defaults['rating_count'],
+                    _ensure_json(defaults['developers']),
+                    _ensure_json(defaults['publishers']),
+                    _ensure_json(defaults['genres']),
+                    _ensure_json(defaults['platforms']),
+                    _ensure_json(defaults['game_modes']),
+                    app_module.now_utc_iso(),
+                ),
+            )
+
 def clear_processed_tables(app_module):
     tables = (
         'processed_game_developers',
@@ -103,28 +171,15 @@ def clear_processed_tables(app_module):
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
+    insert_igdb_cache_entry(
+        app_module,
+        100,
+        summary='Remote summary',
+        genres=['Action', 'Adventure'],
+        platforms=['PC', 'Switch'],
+    )
     client = app_module.app.test_client()
     authenticate(client)
-
-    captured_ids = []
-
-    def fake_exchange():
-        return "token", "client"
-
-    def fake_fetch(token, client_id, igdb_ids):
-        captured_ids.extend(igdb_ids)
-        return {
-            "100": {
-                "id": 100,
-                "updated_at": 1_700_000_000,
-                "summary": "Remote summary",
-                "genres": ["Action", "Adventure"],
-                "platforms": ["PC", "Switch"],
-            }
-        }
-
-    app_module.exchange_twitch_credentials = fake_exchange
-    app_module.fetch_igdb_metadata = fake_fetch
 
     refresh = client.post('/api/updates/refresh')
     assert refresh.status_code == 200
@@ -132,7 +187,6 @@ def test_refresh_creates_update_records(tmp_path):
     assert data['status'] == 'ok'
     assert data['updated'] == 1
     assert data['missing'] == []
-    assert captured_ids == ['100']
 
     listing = client.get('/api/updates')
     assert listing.status_code == 200
@@ -145,6 +199,69 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['has_diff'] is True
 
 
+def test_cache_refresh_creates_entries(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    app_module.exchange_twitch_credentials = lambda: ('token', 'client')
+
+    def fake_count(token, client_id):
+        assert token == 'token'
+        assert client_id == 'client'
+        return 2
+
+    app_module.download_igdb_game_count = fake_count
+
+    def fake_download(_token, _client_id, offset, limit):
+        if offset > 0:
+            return []
+        return [
+            {
+                'id': 100,
+                'name': 'Cache Game',
+                'summary': 'Summary',
+                'genres': ['Action'],
+                'platforms': ['PC'],
+                'game_modes': ['Single player'],
+                'developers': ['Dev Studio'],
+                'publishers': ['Pub Co'],
+            },
+            {
+                'id': 200,
+                'name': 'Second Game',
+                'summary': '',
+                'genres': [],
+                'platforms': ['Switch'],
+                'game_modes': [],
+                'developers': [],
+                'publishers': [],
+            },
+        ]
+
+    app_module.download_igdb_games = fake_download
+
+    response = client.post('/api/igdb/cache', json={'offset': 0, 'limit': 5})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['total'] == 2
+    assert payload['processed'] == 2
+    assert payload['inserted'] == 2
+    assert payload['updated'] == 0
+    assert payload['done'] is True
+
+    with app_module.db_lock:
+        rows = app_module.db.execute(
+            f'SELECT igdb_id, name FROM {app_module.IGDB_CACHE_TABLE} ORDER BY igdb_id'
+        ).fetchall()
+
+    assert [(row['igdb_id'], row['name']) for row in rows] == [
+        (100, 'Cache Game'),
+        (200, 'Second Game'),
+    ]
+
+
 def test_refresh_parses_involved_companies(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(
@@ -154,61 +271,26 @@ def test_refresh_parses_involved_companies(tmp_path):
         Genres='Ação e Aventura, Tiro',
         **{'Game Modes': 'Single-player, Cooperativo (Co-op), Competitivo (PvP), Multiplayer local, Multiplayer online'},
     )
+    insert_igdb_cache_entry(
+        app_module,
+        100,
+        updated_at=1_700_000_000,
+        genres=['Action', 'Adventure', 'Shooter'],
+        platforms=['PC', 'Switch'],
+        game_modes=[
+            'Single player',
+            'Multiplayer',
+            'Split screen',
+            'Battle Royale',
+            'Online co-op',
+        ],
+        developers=['Remote Dev Co', 'Dual Role Co', 'String Company'],
+        publishers=['Remote Pub Co', 'Dual Role Co'],
+    )
     client = app_module.app.test_client()
     authenticate(client)
 
-    app_module.exchange_twitch_credentials = lambda: ("token", "client")
-
-    response_payload = json.dumps(
-        [
-            {
-                "id": 100,
-                "updated_at": 1_700_000_000,
-                "genres": [
-                    {"name": "Action"},
-                    {"name": "Adventure"},
-                    {"name": "Shooter"},
-                ],
-                "platforms": [
-                    {"name": "PC"},
-                    {"name": "Switch"},
-                ],
-                "game_modes": [
-                    {"name": "Single player"},
-                    {"name": "Multiplayer"},
-                    {"name": "Split screen"},
-                    {"name": "Battle Royale"},
-                    {"name": "Online co-op"},
-                ],
-                "involved_companies": [
-                    {"company": {"name": "Remote Dev Co"}, "developer": True},
-                    {"company": {"name": "Remote Pub Co"}, "publisher": True},
-                    {
-                        "company": {"name": "Dual Role Co"},
-                        "developer": True,
-                        "publisher": True,
-                    },
-                    {"company": "String Company", "developer": True},
-                ],
-            }
-        ]
-    ).encode('utf-8')
-
-    class DummyResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return response_payload
-
-    def fake_urlopen(_request):
-        return DummyResponse()
-
-    with patch.object(app_module, 'urlopen', new=fake_urlopen):
-        refresh = client.post('/api/updates/refresh')
+    refresh = client.post('/api/updates/refresh')
     assert refresh.status_code == 200
     payload = refresh.get_json()
     assert payload['status'] == 'ok'
@@ -278,20 +360,15 @@ def test_refresh_surfaces_igdb_failure(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    app_module.exchange_twitch_credentials = lambda: ("token", "client")
-
-    def failing_fetch(*_args, **_kwargs):
-        raise RuntimeError("IGDB request failed: 401 invalid credentials")
-
-    app_module.fetch_igdb_metadata = failing_fetch
-
     response = client.post('/api/updates/refresh')
-    assert response.status_code == 502
+    assert response.status_code == 200
     payload = response.get_json()
-    assert payload == {'error': 'IGDB request failed: 401 invalid credentials'}
+    assert payload['status'] == 'ok'
+    assert payload['updated'] == 0
+    assert payload['missing'] == [1]
 
 
-def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
+def test_download_igdb_metadata_sets_user_agent(tmp_path):
     app_module = load_app(tmp_path)
 
     original_request = app_module.Request
@@ -319,7 +396,7 @@ def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
     with patch.object(app_module, 'Request', new=capturing_request), patch.object(
         app_module, 'urlopen', new=fake_urlopen
     ):
-        result = app_module.fetch_igdb_metadata('token', 'client', ['100'])
+        result = app_module.download_igdb_metadata('token', 'client', ['100'])
 
     assert result == {}
     assert captured['request'] is captured['opened_request']
@@ -329,7 +406,7 @@ def test_fetch_igdb_metadata_sets_user_agent(tmp_path):
     )
 
 
-def test_fetch_igdb_metadata_batches_requests(tmp_path):
+def test_download_igdb_metadata_batches_requests(tmp_path):
     app_module = load_app(tmp_path)
     app_module.IGDB_BATCH_SIZE = 5
 
@@ -378,7 +455,7 @@ def test_fetch_igdb_metadata_batches_requests(tmp_path):
         return DummyResponse(body)
 
     with patch.object(app_module, 'urlopen', new=fake_urlopen):
-        results = app_module.fetch_igdb_metadata('token', 'client', igdb_ids)
+        results = app_module.download_igdb_metadata('token', 'client', igdb_ids)
 
     assert len(queries) == 3
     assert 'limit 5;' in queries[0]
@@ -401,23 +478,15 @@ def test_fetch_igdb_metadata_batches_requests(tmp_path):
 def test_updates_detail_returns_diff(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
+    insert_igdb_cache_entry(
+        app_module,
+        100,
+        summary='Remote summary',
+        genres=['Action', 'Adventure'],
+        platforms=['PC', 'Switch'],
+    )
     client = app_module.app.test_client()
     authenticate(client)
-
-    app_module.exchange_twitch_credentials = lambda: ("token", "client")
-
-    def fake_fetch(token, client_id, igdb_ids):
-        return {
-            "100": {
-                "id": 100,
-                "updated_at": 1_700_000_000,
-                "summary": "Remote summary",
-                "genres": ["Action", "Adventure"],
-                "platforms": ["PC", "Switch"],
-            }
-        }
-
-    app_module.fetch_igdb_metadata = fake_fetch
 
     refresh = client.post('/api/updates/refresh')
     assert refresh.status_code == 200
@@ -452,6 +521,9 @@ def test_fix_names_updates_batches(tmp_path):
         ID=3,
         **{'Source Index': '3', 'Name': 'Missing Remote', 'igdb_id': '303'},
     )
+    insert_igdb_cache_entry(app_module, 101, name='Correct Name')
+    insert_igdb_cache_entry(app_module, 202, name='Correct 202')
+    insert_igdb_cache_entry(app_module, 303, name='')
 
     with app_module.db_lock:
         before_rows = app_module.db.execute(
@@ -460,22 +532,6 @@ def test_fix_names_updates_batches(tmp_path):
 
     client = app_module.app.test_client()
     authenticate(client)
-
-    captured_batches: list[list[str]] = []
-
-    def fake_exchange():
-        return 'token', 'client'
-
-    def fake_fetch(token, client_id, igdb_ids):
-        captured_batches.append(list(igdb_ids))
-        return {
-            '101': {'name': 'Correct Name'},
-            '202': {'name': 'Correct 202'},
-            '303': {'name': ''},
-        }
-
-    app_module.exchange_twitch_credentials = fake_exchange
-    app_module.fetch_igdb_metadata = fake_fetch
 
     first = client.post('/api/updates/fix-names', json={'limit': 2})
     assert first.status_code == 200
@@ -487,8 +543,6 @@ def test_fix_names_updates_batches(tmp_path):
     assert first_data['missing'] == []
     assert first_data['done'] is False
     assert first_data['next_offset'] == 2
-
-    assert captured_batches[0] == ['101', '202']
 
     with app_module.db_lock:
         rows = app_module.db.execute(
@@ -515,7 +569,6 @@ def test_fix_names_updates_batches(tmp_path):
     assert second_data['missing'] == ['303']
     assert second_data['missing_name'] == ['303']
     assert second_data['unchanged'] == 0
-    assert captured_batches[1] == ['303']
 
     with app_module.db_lock:
         final_rows = app_module.db.execute(
