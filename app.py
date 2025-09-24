@@ -317,7 +317,7 @@ def _format_first_release_date(value: Any) -> str:
     return dt.date().isoformat()
 
 
-def _cover_url_from_cover(value: Any) -> str:
+def _cover_url_from_cover(value: Any, size: str = 't_cover_big') -> str:
     image_id: str | None = None
     if isinstance(value, Mapping):
         raw_id = value.get('image_id')
@@ -331,9 +331,12 @@ def _cover_url_from_cover(value: Any) -> str:
         image_id = str(value).strip()
     if not image_id:
         return ''
+    size_key = str(size).strip() if size else 't_cover_big'
+    if not size_key:
+        size_key = 't_cover_big'
     return (
         'https://images.igdb.com/igdb/image/upload/'
-        f't_cover_big/{image_id}.jpg'
+        f'{size_key}/{image_id}.jpg'
     )
 
 
@@ -2062,7 +2065,15 @@ def load_cover_data(cover_path: str | None = None, fallback_url: str | None = No
 
 
 def find_cover(row: pd.Series) -> str | None:
-    url = str(row.get('Large Cover Image (URL)', ''))
+    igdb_id = extract_igdb_id(row, allow_generic_id=True)
+    prefill = get_igdb_prefill_for_id(igdb_id)
+    if prefill:
+        url = prefill.get('Large Cover Image (URL)')
+        if url:
+            data = cover_data_from_url(url)
+            if data:
+                return data
+    url = str(row.get('Large Cover Image (URL)', '') or '')
     if not url:
         return None
     return cover_data_from_url(url)
@@ -2315,7 +2326,8 @@ def fetch_igdb_metadata(
             'genres.name,platforms.name,game_modes.name,category,'
             'involved_companies.company.name,'
             'involved_companies.developer,'
-            'involved_companies.publisher; '
+            'involved_companies.publisher,'
+            'cover.image_id; '
             f"where id = ({', '.join(str(v) for v in chunk)}); "
             f'limit {len(chunk)};'
         )
@@ -2388,6 +2400,137 @@ def fetch_igdb_metadata(
             parsed_item['game_modes'] = _parse_iterable(item.get('game_modes'))
             results[str(igdb_id)] = parsed_item
     return results
+
+
+_igdb_prefill_cache: dict[str, dict[str, Any]] = {}
+_igdb_prefill_lock = Lock()
+
+
+def _dedupe_normalized_names(values: Iterable[str]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_lookup_name(value)
+        if not normalized:
+            continue
+        fingerprint = normalized.casefold()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        names.append(normalized)
+    return names
+
+
+def _should_replace_with_prefill(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    if isinstance(value, str):
+        text = value.strip()
+        return not text or text.lower() == 'nan'
+    text = str(value).strip()
+    return not text or text.lower() == 'nan'
+
+
+def _igdb_metadata_to_source_values(
+    metadata: Mapping[str, Any], igdb_id: str
+) -> dict[str, Any]:
+    overlay: dict[str, Any] = {}
+
+    name_value = metadata.get('name')
+    if isinstance(name_value, str) and name_value.strip():
+        overlay['Name'] = name_value.strip()
+
+    summary_value = metadata.get('summary')
+    if isinstance(summary_value, str) and summary_value.strip():
+        overlay['Summary'] = summary_value.strip()
+
+    release_date = _format_first_release_date(metadata.get('first_release_date'))
+    if release_date:
+        overlay['First Launch Date'] = release_date
+
+    category = _igdb_category_display(metadata.get('category'))
+    if category:
+        overlay['Category'] = category
+
+    developers = _dedupe_normalized_names(_parse_company_names(metadata.get('developers')))
+    if developers:
+        overlay['Developers'] = ', '.join(developers)
+
+    publishers = _dedupe_normalized_names(_parse_company_names(metadata.get('publishers')))
+    if publishers:
+        overlay['Publishers'] = ', '.join(publishers)
+
+    genre_names = _dedupe_normalized_names(
+        _map_igdb_genres(_parse_iterable(metadata.get('genres')))
+    )
+    if genre_names:
+        overlay['Genres'] = ', '.join(genre_names)
+
+    mode_names = _dedupe_normalized_names(
+        _map_igdb_modes(_parse_iterable(metadata.get('game_modes')))
+    )
+    if mode_names:
+        overlay['Game Modes'] = ', '.join(mode_names)
+
+    platform_names = _dedupe_normalized_names(_parse_iterable(metadata.get('platforms')))
+    if platform_names:
+        overlay['Platforms'] = ', '.join(platform_names)
+
+    cover_url = _cover_url_from_cover(metadata.get('cover'), size='t_original')
+    if cover_url:
+        overlay['Large Cover Image (URL)'] = cover_url
+
+    if igdb_id:
+        overlay['IGDB ID'] = igdb_id
+        overlay['igdb_id'] = igdb_id
+
+    return overlay
+
+
+def get_igdb_prefill_for_id(igdb_id: str | None) -> dict[str, Any] | None:
+    if not igdb_id:
+        return None
+    normalized = coerce_igdb_id(igdb_id)
+    if not normalized:
+        return None
+
+    with _igdb_prefill_lock:
+        cached = _igdb_prefill_cache.get(normalized)
+    if cached is not None:
+        return dict(cached)
+
+    try:
+        access_token, client_id = exchange_twitch_credentials()
+    except Exception as exc:  # pragma: no cover - relies on environment
+        logger.warning('Unable to obtain Twitch credentials for IGDB prefill: %s', exc)
+        return None
+
+    try:
+        metadata_map = fetch_igdb_metadata(access_token, client_id, [normalized])
+    except Exception as exc:  # pragma: no cover - defensive guard for runtime fetch
+        logger.warning('Failed to fetch IGDB metadata for %s: %s', normalized, exc)
+        return None
+
+    if not metadata_map:
+        return None
+
+    item = metadata_map.get(normalized)
+    if item is None:
+        item = metadata_map.get(str(int(normalized))) if normalized.isdigit() else None
+    if not item:
+        return None
+
+    overlay = _igdb_metadata_to_source_values(item, normalized)
+
+    with _igdb_prefill_lock:
+        _igdb_prefill_cache[normalized] = dict(overlay)
+
+    return dict(overlay)
 
 
 def _normalize_text(value: Any) -> str:
@@ -2930,26 +3073,50 @@ def build_game_payload(index: int, seq: int, progress_seq: int | None = None) ->
                 conn, processed_row['ID']
             )
 
-    processed_cover_path = None
-    if processed_row is not None:
-        processed_cover_path = processed_row['Cover Path'] or None
-    fallback_cover_url = str(row.get('Large Cover Image (URL)', ''))
-    cover_data = load_cover_data(processed_cover_path, fallback_cover_url)
-
     processed_mapping: Mapping[str, Any] = (
         dict(processed_row) if processed_row is not None else {}
     )
+
+    source_row = row.copy()
+    processed_cover_path = None
+    fallback_cover_url = str(source_row.get('Large Cover Image (URL)', '') or '')
+
     if processed_mapping:
-        source_row = row.copy()
+        processed_cover_path = processed_mapping.get('Cover Path') or None
         for key, value in processed_mapping.items():
             if key not in source_row.index:
                 continue
-            if value is None:
+            if _should_replace_with_prefill(value):
                 continue
-            source_row[key] = value
-    else:
-        source_row = row
-    igdb_id = extract_igdb_id(source_row)
+            source_row.at[key] = value
+            if key == 'Large Cover Image (URL)' and value:
+                fallback_cover_url = str(value)
+
+    igdb_id = extract_igdb_id(source_row, allow_generic_id=True)
+    should_prefill = True
+    if processed_mapping:
+        summary_value = processed_mapping.get('Summary')
+        cover_value = processed_mapping.get('Cover Path')
+        should_prefill = not is_processed_game_done(summary_value, cover_value)
+
+    if should_prefill:
+        prefill = get_igdb_prefill_for_id(igdb_id or extract_igdb_id(row, allow_generic_id=True))
+        if prefill:
+            for key, value in prefill.items():
+                if key in source_row.index:
+                    if _should_replace_with_prefill(source_row.get(key)):
+                        source_row.at[key] = value
+                else:
+                    source_row[key] = value
+            cover_override = prefill.get('Large Cover Image (URL)')
+            if cover_override:
+                fallback_cover_url = cover_override
+            if not igdb_id:
+                igdb_id = prefill.get('IGDB ID') or prefill.get('igdb_id') or igdb_id
+
+    cover_data = load_cover_data(processed_cover_path, fallback_cover_url)
+    igdb_id = coerce_igdb_id(igdb_id) if igdb_id else ''
+
     if not igdb_id:
         igdb_id = extract_igdb_id(row, allow_generic_id=True)
     lookup_payloads: dict[str, dict[str, Any]] = {}
@@ -2962,7 +3129,7 @@ def build_game_payload(index: int, seq: int, progress_seq: int | None = None) ->
                 processed_mapping, processed_column
             )
         if not entries:
-            entries = _parse_lookup_entries_from_source(row, processed_column)
+            entries = _parse_lookup_entries_from_source(source_row, processed_column)
         formatted = _format_lookup_response(entries)
         formatted['display'] = _lookup_display_text(formatted['names'])
         lookup_payloads[response_key] = formatted
@@ -3028,21 +3195,38 @@ def api_game_raw(index: int):
     except Exception:
         app.logger.exception("api_game_raw failed")
         return jsonify({'error': 'invalid index'}), 404
-    cover_data = find_cover(row)
-    genres = extract_list(row, ['Genres', 'Genre'])
-    modes = extract_list(row, ['Game Modes', 'Mode'])
-    platforms = extract_list(row, ['Platforms', 'Platform'])
+
+    source_row = row.copy()
+    fallback_cover_url = str(source_row.get('Large Cover Image (URL)', '') or '')
+    igdb_id = extract_igdb_id(source_row, allow_generic_id=True)
+    prefill = get_igdb_prefill_for_id(igdb_id)
+    if prefill:
+        for key, value in prefill.items():
+            if key in source_row.index:
+                source_row.at[key] = value
+            else:
+                source_row[key] = value
+        cover_override = prefill.get('Large Cover Image (URL)')
+        if cover_override:
+            fallback_cover_url = cover_override
+        igdb_id = prefill.get('IGDB ID') or prefill.get('igdb_id') or igdb_id
+    if not igdb_id:
+        igdb_id = extract_igdb_id(row, allow_generic_id=True)
+
+    cover_data = load_cover_data(None, fallback_cover_url)
+    genres = extract_list(source_row, ['Genres', 'Genre'])
+    modes = extract_list(source_row, ['Game Modes', 'Mode'])
+    platforms = extract_list(source_row, ['Platforms', 'Platform'])
     dummy: list[str] = []
-    igdb_id = extract_igdb_id(row, allow_generic_id=True)
     game_fields = {
-        'Name': get_cell(row, 'Name', dummy),
-        'Summary': get_cell(row, 'Summary', dummy),
-        'FirstLaunchDate': get_cell(row, 'First Launch Date', dummy),
-        'Developers': get_cell(row, 'Developers', dummy),
-        'Publishers': get_cell(row, 'Publishers', dummy),
+        'Name': get_cell(source_row, 'Name', dummy),
+        'Summary': get_cell(source_row, 'Summary', dummy),
+        'FirstLaunchDate': get_cell(source_row, 'First Launch Date', dummy),
+        'Developers': get_cell(source_row, 'Developers', dummy),
+        'Publishers': get_cell(source_row, 'Publishers', dummy),
         'Genres': genres,
         'GameModes': modes,
-        'Category': get_cell(row, 'Category', dummy),
+        'Category': get_cell(source_row, 'Category', dummy),
         'Platforms': platforms,
         'IGDBID': igdb_id or None,
     }
