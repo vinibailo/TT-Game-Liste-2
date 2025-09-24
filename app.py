@@ -2978,11 +2978,13 @@ def generate_pt_summary(game_name: str) -> str:
 # initial load
 ensure_dirs()
 games_df = load_games()
-categories_list = sorted({
-    str(c).strip()
-    for c in games_df.get('Category', pd.Series(dtype=str)).dropna()
-    if str(c).strip()
-})
+_category_values: set[str] = set()
+for raw_category in games_df.get('Category', pd.Series(dtype=str)).dropna():
+    text = str(raw_category).strip()
+    if text:
+        _category_values.add(text)
+_category_values.update(label for label in IGDB_CATEGORY_LABELS.values() if label)
+categories_list = sorted(_category_values, key=str.casefold)
 platforms_list = sorted({
     p.strip()
     for ps in games_df.get('Platforms', pd.Series(dtype=str)).dropna()

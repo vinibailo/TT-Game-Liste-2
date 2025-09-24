@@ -196,9 +196,11 @@ def test_build_game_payload_prefills_from_igdb(tmp_path):
     assert game['Platforms'] == ['PC', 'Switch']
     assert game['Genres'] == ['Ação e Aventura']
     assert game['GameModes'] == ['Single-player']
+    assert game['Category'] == 'Main Game'
     assert game['IGDBID'] == '123'
     assert payload['cover'] == 'cover::https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
     assert captured_urls[-1] == 'https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
+    assert 'Main Game' in app_module.categories_list
 
 
 def test_api_game_raw_prefills_from_igdb(tmp_path):
@@ -228,6 +230,7 @@ def test_api_game_raw_prefills_from_igdb(tmp_path):
     assert game['Platforms'] == ['PC', 'Switch']
     assert game['Genres'] == ['Ação e Aventura']
     assert game['GameModes'] == ['Single-player']
+    assert game['Category'] == 'Main Game'
     assert game['IGDBID'] == '123'
     assert data['cover'] == 'cover::https://images.igdb.com/igdb/image/upload/t_original/xyz789.jpg'
     assert captured_urls[-1] == 'https://images.igdb.com/igdb/image/upload/t_original/xyz789.jpg'
