@@ -38,6 +38,37 @@ UPLOAD_DIR = 'uploaded_sources'
 PROCESSED_DIR = 'processed_covers'
 COVERS_DIR = 'covers_out'
 
+
+def _coerce_positive_float(value: str | None, default: float) -> float:
+    try:
+        numeric = float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+    return numeric if numeric > 0 else default
+
+
+SQLITE_TIMEOUT_SECONDS = _coerce_positive_float(
+    os.environ.get('SQLITE_TIMEOUT'), 120.0
+)
+
+
+def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Apply standard pragmas and timeouts to SQLite connections."""
+
+    busy_timeout_ms = int(max(SQLITE_TIMEOUT_SECONDS, 0) * 1000)
+    if busy_timeout_ms > 0:
+        try:
+            conn.execute(f'PRAGMA busy_timeout = {busy_timeout_ms}')
+        except sqlite3.OperationalError:
+            pass
+    return conn
+
+
+def _create_sqlite_connection(db_path: str = PROCESSED_DB) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
+    conn.row_factory = sqlite3.Row
+    return _configure_sqlite_connection(conn)
+
 BASE_DIR = Path(__file__).resolve().parent
 LOOKUP_DATA_DIR = Path(os.environ.get('LOOKUP_DATA_DIR', BASE_DIR))
 LOOKUP_TABLES = (
@@ -541,8 +572,7 @@ def get_db():
     if not has_app_context():
         return db
     if 'db' not in g:
-        g.db = sqlite3.connect(PROCESSED_DB)
-        g.db.row_factory = sqlite3.Row
+        g.db = _create_sqlite_connection(PROCESSED_DB)
     return g.db
 
 
@@ -1407,7 +1437,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
 
 
 def _init_db() -> None:
-    conn = sqlite3.connect(PROCESSED_DB)
+    conn = _create_sqlite_connection(PROCESSED_DB)
     try:
         with conn:
             conn.execute('PRAGMA foreign_keys = ON')
@@ -1568,8 +1598,7 @@ def _init_db() -> None:
 _init_db()
 
 # Expose a module-level connection for tests and utilities
-db = sqlite3.connect(PROCESSED_DB)
-db.row_factory = sqlite3.Row
+db = _create_sqlite_connection(PROCESSED_DB)
 
 @app.teardown_appcontext
 def close_db(exc):
