@@ -1,5 +1,6 @@
 import pandas as pd
 
+import json
 from pathlib import Path
 
 from tests.app_helpers import load_app
@@ -71,6 +72,11 @@ def test_game_by_id_returns_payload(tmp_path):
                 'VALUES (?, ?)',
                 (1, genre_id),
             )
+            app_module.db.execute(
+                'UPDATE processed_games SET developers_ids=?, genres_ids=? '
+                'WHERE "ID"=?',
+                (json.dumps([dev_id]), json.dumps([genre_id]), 1),
+            )
     app_module.navigator.current_index = 1
     client = app_module.app.test_client()
     authenticate(client)
@@ -87,7 +93,9 @@ def test_game_by_id_returns_payload(tmp_path):
     assert data['game']['Developers'] == 'Catalogued Dev'
     lookups = data['game']['Lookups']
     assert lookups['Developers']['selected'][0]['name'] == 'Catalogued Dev'
+    assert lookups['Developers']['ids'] == [dev_id]
     assert lookups['Genres']['names'] == ['Adventure']
+    assert lookups['Genres']['ids'] == [genre_id]
     assert app_module.navigator.current_index == 0
     assert not (upload_dir / temp_name).exists()
 

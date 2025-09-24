@@ -747,6 +747,23 @@ def _decode_lookup_id_list(raw_value: Any) -> list[int]:
     return normalized
 
 
+def _encode_lookup_id_list(values: Iterable[int]) -> str:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            continue
+        if coerced in seen:
+            continue
+        seen.add(coerced)
+        normalized.append(coerced)
+    if not normalized:
+        return ''
+    return json.dumps(normalized)
+
+
 def _fetch_lookup_entries_for_game(
     conn: sqlite3.Connection, processed_game_id: int
 ) -> dict[str, list[dict[str, Any]]]:
@@ -766,6 +783,10 @@ def _fetch_lookup_entries_for_game(
         lookup_table = relation['lookup_table']
         join_table = relation['join_table']
         join_column = relation['join_column']
+        id_column = relation.get('id_column')
+        stored_ids: list[int] = []
+        if id_column and processed_mapping:
+            stored_ids = _decode_lookup_id_list(processed_mapping.get(id_column))
         entries: list[dict[str, Any]] = []
         join_rows: list[sqlite3.Row | tuple[Any, ...]] = []
         try:
@@ -783,21 +804,41 @@ def _fetch_lookup_entries_for_game(
         except sqlite3.OperationalError:
             join_rows = []
 
-        seen_ids: set[int] = set()
+        join_id_to_name: dict[int, str] = {}
+        join_order: list[int] = []
         for join_row in join_rows:
             raw_id = _row_value(join_row, 'lookup_id', 0)
             try:
                 lookup_id = int(raw_id)
             except (TypeError, ValueError):
                 continue
-            if lookup_id in seen_ids:
+            if lookup_id in join_id_to_name:
                 continue
-            seen_ids.add(lookup_id)
             lookup_name = _normalize_lookup_name(_row_value(join_row, 'name', 1))
             if not lookup_name:
                 lookup_name = _lookup_name_for_id(conn, lookup_table, lookup_id)
-            normalized_name = _normalize_lookup_name(lookup_name)
-            entries.append({'id': lookup_id, 'name': normalized_name})
+            join_id_to_name[lookup_id] = _normalize_lookup_name(lookup_name)
+            join_order.append(lookup_id)
+
+        id_sequence = stored_ids if stored_ids else join_order
+        seen_ids: set[int] = set()
+        for lookup_id in id_sequence:
+            if lookup_id in seen_ids:
+                continue
+            seen_ids.add(lookup_id)
+            lookup_name = join_id_to_name.get(lookup_id)
+            if not lookup_name:
+                lookup_name = _lookup_name_for_id(conn, lookup_table, lookup_id)
+            entries.append({'id': lookup_id, 'name': _normalize_lookup_name(lookup_name)})
+        for lookup_id in join_order:
+            if lookup_id in seen_ids:
+                continue
+            seen_ids.add(lookup_id)
+            lookup_name = join_id_to_name.get(lookup_id)
+            if not lookup_name:
+                lookup_name = _lookup_name_for_id(conn, lookup_table, lookup_id)
+            entries.append({'id': lookup_id, 'name': _normalize_lookup_name(lookup_name)})
+
         if not entries and processed_mapping:
             raw_value = processed_mapping.get(relation['processed_column'])
             for name in _parse_iterable(raw_value):
@@ -1065,7 +1106,78 @@ def _recreate_lookup_join_tables(conn: sqlite3.Connection) -> None:
             logger.exception('Failed to recreate join table %s', join_table)
 
 
-def _drop_lookup_id_columns(conn: sqlite3.Connection) -> None:
+def _backfill_lookup_id_columns(conn: sqlite3.Connection) -> None:
+    try:
+        cur = conn.execute('SELECT * FROM processed_games')
+    except sqlite3.OperationalError:
+        return
+
+    rows = cur.fetchall()
+    column_names = [desc[0] for desc in cur.description] if cur.description else []
+
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            row_dict = dict(row)
+        else:
+            row_dict = {
+                column_names[idx]: value
+                for idx, value in enumerate(row)
+                if idx < len(column_names)
+            }
+        try:
+            game_id = int(row_dict.get('ID'))
+        except (TypeError, ValueError):
+            continue
+
+        updates: dict[str, str] = {}
+        for relation in LOOKUP_RELATIONS:
+            id_column = relation.get('id_column')
+            if not id_column:
+                continue
+            join_table = relation['join_table']
+            join_column = relation['join_column']
+            stored_value = row_dict.get(id_column)
+            existing_serialized = stored_value if isinstance(stored_value, str) else ''
+
+            join_ids: list[int] = []
+            try:
+                cur_join = conn.execute(
+                    f'SELECT {join_column} FROM {join_table} '
+                    'WHERE processed_game_id = ? ORDER BY rowid',
+                    (game_id,),
+                )
+                join_rows = cur_join.fetchall()
+            except sqlite3.OperationalError:
+                join_rows = []
+
+            seen: set[int] = set()
+            for join_row in join_rows:
+                raw_value = _row_value(join_row, join_column, 0)
+                try:
+                    coerced = int(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if coerced in seen:
+                    continue
+                seen.add(coerced)
+                join_ids.append(coerced)
+
+            serialized = _encode_lookup_id_list(join_ids)
+            if serialized != (existing_serialized or ''):
+                updates[id_column] = serialized
+
+        if updates:
+            assignments = ', '.join(
+                f'{_quote_identifier(column)}=?' for column in updates
+            )
+            params = list(updates.values()) + [game_id]
+            conn.execute(
+                f'UPDATE processed_games SET {assignments} WHERE "ID"=?',
+                params,
+            )
+
+
+def _ensure_lookup_id_columns(conn: sqlite3.Connection) -> None:
     try:
         cur = conn.execute('PRAGMA table_info(processed_games)')
     except sqlite3.OperationalError:
@@ -1073,64 +1185,33 @@ def _drop_lookup_id_columns(conn: sqlite3.Connection) -> None:
 
     rows = cur.fetchall()
     existing_columns = {row[1] for row in rows}
-    legacy_columns = {
+    added = False
+    for relation in LOOKUP_RELATIONS:
+        id_column = relation.get('id_column')
+        if not id_column or id_column in existing_columns:
+            continue
+        try:
+            conn.execute(
+                f'ALTER TABLE processed_games ADD COLUMN {_quote_identifier(id_column)} TEXT'
+            )
+            added = True
+        except sqlite3.OperationalError:
+            continue
+    if added:
+        try:
+            cur = conn.execute('PRAGMA table_info(processed_games)')
+        except sqlite3.OperationalError:
+            return
+        rows = cur.fetchall()
+        existing_columns = {row[1] for row in rows}
+
+    expected_columns = {
         relation['id_column']
         for relation in LOOKUP_RELATIONS
         if relation.get('id_column')
     }
-    if not (existing_columns & legacy_columns):
-        return
-
-    desired_columns: list[tuple[str, str]] = [
-        ('ID', 'INTEGER PRIMARY KEY'),
-        ('Source Index', 'TEXT UNIQUE'),
-        ('Name', 'TEXT'),
-        ('Summary', 'TEXT'),
-        ('First Launch Date', 'TEXT'),
-        ('Developers', 'TEXT'),
-        ('Publishers', 'TEXT'),
-        ('Genres', 'TEXT'),
-        ('Game Modes', 'TEXT'),
-        ('Category', 'TEXT'),
-        ('Platforms', 'TEXT'),
-        ('igdb_id', 'TEXT'),
-        ('Cover Path', 'TEXT'),
-        ('Width', 'INTEGER'),
-        ('Height', 'INTEGER'),
-        ('last_edited_at', 'TEXT'),
-    ]
-
-    column_defs = ',\n                    '.join(
-        f'{_quote_identifier(name)} {col_type}' for name, col_type in desired_columns
-    )
-    insert_columns = [
-        _quote_identifier(name) for name, _ in desired_columns
-    ]
-    select_columns: list[str] = []
-    for name, _ in desired_columns:
-        if name in existing_columns:
-            select_columns.append(_quote_identifier(name))
-        else:
-            select_columns.append('NULL')
-
-    insert_sql = ', '.join(insert_columns)
-    select_sql = ', '.join(select_columns)
-
-    try:
-        conn.execute('PRAGMA foreign_keys = OFF')
-        conn.executescript(
-            f'''
-                ALTER TABLE processed_games RENAME TO processed_games_old;
-                CREATE TABLE processed_games (
-                    {column_defs}
-                );
-                INSERT INTO processed_games ({insert_sql})
-                SELECT {select_sql} FROM processed_games_old;
-                DROP TABLE processed_games_old;
-            '''
-        )
-    finally:
-        conn.execute('PRAGMA foreign_keys = ON')
+    if expected_columns & existing_columns:
+        _backfill_lookup_id_columns(conn)
 
 
 def _replace_lookup_relations(
@@ -1320,11 +1401,16 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
         'Summary',
         'First Launch Date',
         'Developers',
+        'developers_ids',
         'Publishers',
+        'publishers_ids',
         'Genres',
+        'genres_ids',
         'Game Modes',
+        'game_modes_ids',
         'Category',
         'Platforms',
+        'platforms_ids',
         'igdb_id',
         'Cover Path',
         'Width',
@@ -1391,11 +1477,16 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                 "Summary" TEXT,
                 "First Launch Date" TEXT,
                 "Developers" TEXT,
+                "developers_ids" TEXT,
                 "Publishers" TEXT,
+                "publishers_ids" TEXT,
                 "Genres" TEXT,
+                "genres_ids" TEXT,
                 "Game Modes" TEXT,
+                "game_modes_ids" TEXT,
                 "Category" TEXT,
                 "Platforms" TEXT,
+                "platforms_ids" TEXT,
                 "igdb_id" TEXT,
                 "Cover Path" TEXT,
                 "Width" INTEGER,
@@ -1449,11 +1540,16 @@ def _init_db() -> None:
                     "Summary" TEXT,
                     "First Launch Date" TEXT,
                     "Developers" TEXT,
+                    "developers_ids" TEXT,
                     "Publishers" TEXT,
+                    "publishers_ids" TEXT,
                     "Genres" TEXT,
+                    "genres_ids" TEXT,
                     "Game Modes" TEXT,
+                    "game_modes_ids" TEXT,
                     "Category" TEXT,
                     "Platforms" TEXT,
+                    "platforms_ids" TEXT,
                     "igdb_id" TEXT,
                     "Cover Path" TEXT,
                     "Width" INTEGER,
@@ -1515,7 +1611,7 @@ def _init_db() -> None:
             _load_lookup_tables(conn)
             _recreate_lookup_join_tables(conn)
             _backfill_lookup_relations(conn)
-            _drop_lookup_id_columns(conn)
+            _ensure_lookup_id_columns(conn)
 
             cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
             rows = cur.fetchall()
@@ -3061,6 +3157,11 @@ def api_save():
                 'last_edited_at': last_edit_ts,
             }
 
+            for relation in LOOKUP_RELATIONS:
+                id_column = relation.get('id_column')
+                if id_column:
+                    row[id_column] = ''
+
             lookups_input = fields.get('Lookups') if isinstance(fields, Mapping) else {}
 
             with db_lock:
@@ -3082,20 +3183,29 @@ def api_save():
                         selection = _resolve_lookup_selection(conn, relation, raw_value)
                         normalized_lookups[response_key] = selection
                         row[processed_column] = _lookup_display_text(selection['names'])
+                        id_column = relation.get('id_column')
+                        if id_column:
+                            row[id_column] = _encode_lookup_id_list(selection['ids'])
 
                     if existing:
                         conn.execute(
                             '''UPDATE processed_games SET
                                 "Name"=?, "Summary"=?, "First Launch Date"=?,
-                                "Developers"=?, "Publishers"=?, "Genres"=?,
-                                "Game Modes"=?, "Category"=?, "Platforms"=?,
+                                "Developers"=?, "developers_ids"=?,
+                                "Publishers"=?, "publishers_ids"=?,
+                                "Genres"=?, "genres_ids"=?,
+                                "Game Modes"=?, "game_modes_ids"=?,
+                                "Category"=?, "Platforms"=?, "platforms_ids"=?,
                                 "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
                                 last_edited_at=?
                                WHERE "ID"=?''',
                             (
                                 row['Name'], row['Summary'], row['First Launch Date'],
-                                row.get('Developers', ''), row.get('Publishers', ''), row.get('Genres', ''),
-                                row.get('Game Modes', ''), row['Category'], row.get('Platforms', ''),
+                                row.get('Developers', ''), row.get('developers_ids', ''),
+                                row.get('Publishers', ''), row.get('publishers_ids', ''),
+                                row.get('Genres', ''), row.get('genres_ids', ''),
+                                row.get('Game Modes', ''), row.get('game_modes_ids', ''),
+                                row['Category'], row.get('Platforms', ''), row.get('platforms_ids', ''),
                                 row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
                                 row['last_edited_at'],
                                 seq_id,
@@ -3105,16 +3215,22 @@ def api_save():
                         conn.execute(
                             '''INSERT INTO processed_games (
                                 "ID", "Source Index", "Name", "Summary",
-                                "First Launch Date", "Developers", "Publishers",
-                                "Genres", "Game Modes", "Category", "Platforms",
+                                "First Launch Date", "Developers", "developers_ids",
+                                "Publishers", "publishers_ids",
+                                "Genres", "genres_ids", "Game Modes", "game_modes_ids",
+                                "Category", "Platforms", "platforms_ids",
                                 "igdb_id", "Cover Path", "Width", "Height", last_edited_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                             (
                                 seq_id,
                                 row['Source Index'], row['Name'], row['Summary'],
-                                row['First Launch Date'], row.get('Developers', ''), row.get('Publishers', ''),
-                                row.get('Genres', ''), row.get('Game Modes', ''), row['Category'],
-                                row.get('Platforms', ''), row['igdb_id'], row['Cover Path'],
+                                row['First Launch Date'], row.get('Developers', ''),
+                                row.get('developers_ids', ''), row.get('Publishers', ''),
+                                row.get('publishers_ids', ''), row.get('Genres', ''),
+                                row.get('genres_ids', ''), row.get('Game Modes', ''),
+                                row.get('game_modes_ids', ''), row['Category'],
+                                row.get('Platforms', ''), row.get('platforms_ids', ''),
+                                row['igdb_id'], row['Cover Path'],
                                 row['Width'], row['Height'], row['last_edited_at'],
                             ),
                         )
