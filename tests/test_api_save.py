@@ -1,5 +1,7 @@
 import pandas as pd
 
+import json
+
 from tests.app_helpers import load_app
 
 
@@ -79,8 +81,7 @@ def test_api_save_success_increments_seq(tmp_path):
     assert app.navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
-            'SELECT "ID", "igdb_id", "Developers", "Genres" '
-            'FROM processed_games WHERE "Source Index"=?',
+            'SELECT * FROM processed_games WHERE "Source Index"=?',
             ('0',),
         )
         row = cur.fetchone()
@@ -88,6 +89,20 @@ def test_api_save_success_increments_seq(tmp_path):
     assert row['igdb_id'] == '4321'
     assert row['Developers'] == 'Dev Studio'
     assert row['Genres'] == 'Action'
+    for relation in app.LOOKUP_RELATIONS:
+        id_column = relation['id_column']
+        join_table = relation['join_table']
+        join_column = relation['join_column']
+        stored_ids = json.loads(row[id_column]) if row[id_column] else []
+        join_ids = [
+            joined_row[0]
+            for joined_row in app.db.execute(
+                f'SELECT {join_column} FROM {join_table} '
+                'WHERE processed_game_id=? ORDER BY rowid',
+                (row['ID'],),
+            ).fetchall()
+        ]
+        assert stored_ids == join_ids
     with app.db_lock:
         developer_row = app.db.execute(
             'SELECT d.name FROM processed_game_developers pgd '

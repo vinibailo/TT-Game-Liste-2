@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from pathlib import Path
 
@@ -99,11 +100,11 @@ def test_lookup_tables_backfilled(tmp_path):
             row['name'] if isinstance(row, sqlite3.Row) else row[1]
             for row in app.db.execute('PRAGMA table_info(processed_games)')
         }
-        assert 'developers_ids' not in columns
-        assert 'publishers_ids' not in columns
-        assert 'genres_ids' not in columns
-        assert 'game_modes_ids' not in columns
-        assert 'platforms_ids' not in columns
+        assert 'developers_ids' in columns
+        assert 'publishers_ids' in columns
+        assert 'genres_ids' in columns
+        assert 'game_modes_ids' in columns
+        assert 'platforms_ids' in columns
 
         def first_lookup_id(query: str, processed_game_id: int) -> int:
             row = app.db.execute(query, (processed_game_id,)).fetchone()
@@ -161,3 +162,14 @@ def test_lookup_tables_backfilled(tmp_path):
             (platform_id,),
         ).fetchone()
         assert platform_name['name'] == "PC"
+
+        processed_row = app.db.execute(
+            'SELECT developers_ids, publishers_ids, genres_ids, '
+            'game_modes_ids, platforms_ids FROM processed_games WHERE "ID"=?',
+            (1,),
+        ).fetchone()
+        assert json.loads(processed_row['developers_ids']) == [developer_id]
+        assert json.loads(processed_row['publishers_ids']) == [publisher_id]
+        assert json.loads(processed_row['genres_ids']) == [genre_id]
+        assert json.loads(processed_row['game_modes_ids']) == [mode_id]
+        assert json.loads(processed_row['platforms_ids']) == [platform_id]
