@@ -9,6 +9,7 @@
         detailCache: new Map(),
         updateMap: new Map(),
         fixingNames: false,
+        deduping: false,
     };
 
     const placeholderImage = '/no-image.jpg';
@@ -31,6 +32,7 @@
         fixCount: document.querySelector('[data-fix-count]'),
         fixPercent: document.querySelector('[data-fix-percent]'),
         fixBar: document.querySelector('[data-fix-bar]'),
+        dedupeButton: document.querySelector('[data-remove-duplicates]'),
     };
 
     const modal = {
@@ -410,6 +412,28 @@
         }
     }
 
+    function setDedupeButtonLoading(loading) {
+        const button = elements.dedupeButton;
+        if (!button) {
+            return;
+        }
+        const label = button.querySelector('.btn-label');
+        if (loading) {
+            button.disabled = true;
+            if (label) {
+                if (!button.dataset.originalLabel) {
+                    button.dataset.originalLabel = label.textContent || '';
+                }
+                label.textContent = 'Removing…';
+            }
+        } else {
+            button.disabled = false;
+            if (label && button.dataset.originalLabel) {
+                label.textContent = button.dataset.originalLabel;
+            }
+        }
+    }
+
     function setFixProgressVisible(visible) {
         const container = elements.fixProgress;
         if (!container) {
@@ -590,6 +614,64 @@
                 updateFixProgress(0, 0);
                 setFixProgressVisible(false);
             }, 1200);
+        }
+    }
+
+    async function handleRemoveDuplicates() {
+        if (state.deduping) {
+            return;
+        }
+        if (!config.removeDuplicatesUrl) {
+            showToast('Duplicate removal endpoint is not configured.', 'warning');
+            return;
+        }
+        state.deduping = true;
+        setDedupeButtonLoading(true);
+        try {
+            const response = await fetch(config.removeDuplicatesUrl, { method: 'POST' });
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (err) {
+                payload = null;
+            }
+            if (!response.ok || !payload || payload.error) {
+                const errorMessage = payload && payload.error
+                    ? payload.error
+                    : 'Failed to remove duplicates.';
+                throw new Error(errorMessage);
+            }
+            const removed = Number(payload.removed) || 0;
+            const groups = Number(payload.duplicate_groups) || 0;
+            const skipped = Number(payload.skipped) || 0;
+            let message = '';
+            let toastType = removed > 0 ? 'success' : 'info';
+            if (removed > 0) {
+                const plural = removed === 1 ? '' : 's';
+                message = `Removed ${removed} duplicate${plural}.`;
+            } else if (groups > 0) {
+                message = 'No removable duplicates found.';
+            } else {
+                message = 'No duplicates detected.';
+            }
+            if (skipped > 0) {
+                const plural = skipped === 1 ? '' : 's';
+                message += ` Skipped ${skipped} duplicate group${plural}.`;
+                if (removed === 0) {
+                    toastType = 'warning';
+                }
+            }
+            if (removed > 0) {
+                state.detailCache.clear();
+                await loadUpdates();
+            }
+            showToast(message.trim(), toastType);
+        } catch (error) {
+            console.error(error);
+            showToast(error.message, 'warning');
+        } finally {
+            state.deduping = false;
+            setDedupeButtonLoading(false);
         }
     }
 
@@ -828,6 +910,9 @@
         }
         if (elements.fixButton) {
             elements.fixButton.addEventListener('click', handleFixNames);
+        }
+        if (elements.dedupeButton) {
+            elements.dedupeButton.addEventListener('click', handleRemoveDuplicates);
         }
         if (modal.closeButton) {
             modal.closeButton.addEventListener('click', closeModal);

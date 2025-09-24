@@ -63,6 +63,13 @@
                         </div>
                     </div>
                 </div>
+                <button type="button" class="btn btn-red" data-remove-duplicates>
+                    <span class="btn-icon" aria-hidden="true">
+                        <span class="material-symbols-rounded">layers_clear</span>
+                    </span>
+                    <span class="btn-label">Remove Duplicates</span>
+                    <span class="sr-only">Remove unprocessed duplicate IGDB entries</span>
+                </button>
             </div>
         </header>
         <section class="updates-summary" aria-live="polite">
@@ -157,6 +164,7 @@
             updatesUrl: {{ url_for('api_updates_list')|tojson }},
             refreshUrl: {{ url_for('api_updates_refresh')|tojson }},
             fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
+            removeDuplicatesUrl: {{ url_for('api_updates_remove_duplicates')|tojson }},
             detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }}
         };
     </script>
