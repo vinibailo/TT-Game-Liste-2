@@ -15,8 +15,8 @@
             <a class="topbar-brand" href="{{ url_for('index') }}">Game Editor</a>
             <nav class="topbar-nav" aria-label="Global">
                 <a class="topbar-link" href="{{ url_for('index') }}">Editor</a>
-                <a class="topbar-link is-active" href="{{ url_for('updates_page') }}">IGDB Updates</a>
-                <a class="topbar-link" href="{{ url_for('lookups_page') }}">Lookups</a>
+                <a class="topbar-link is-active" href="{{ url_for('updates.updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link" href="{{ url_for('lookups.lookups_page') }}">Lookups</a>
                 <a class="topbar-link" href="{{ url_for('logout') }}">Logout</a>
             </nav>
         </div>
@@ -183,15 +183,15 @@
     <script>
         window.updatesConfig = {
             editBaseUrl: {{ url_for('index')|tojson }},
-            updatesUrl: {{ url_for('api_updates_list')|tojson }},
-            refreshUrl: {{ url_for('api_updates_refresh')|tojson }},
-            cacheRefreshUrl: {{ url_for('api_igdb_cache_refresh')|tojson }},
-            fixNamesUrl: {{ url_for('api_updates_fix_names')|tojson }},
-            removeDuplicatesUrl: {{ url_for('api_updates_remove_duplicates')|tojson }},
-            deleteDuplicateUrlTemplate: {{ url_for('api_updates_remove_duplicate', processed_game_id=0)|replace('0', '{id}')|tojson }},
-            jobsUrl: {{ url_for('api_updates_job_list')|tojson }},
-            jobDetailUrlTemplate: {{ url_for('api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
-            detailUrlTemplate: {{ url_for('api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
+            updatesUrl: {{ url_for('updates.api_updates_list')|tojson }},
+            refreshUrl: {{ url_for('updates.api_updates_refresh')|tojson }},
+            cacheRefreshUrl: {{ url_for('updates.api_igdb_cache_refresh')|tojson }},
+            fixNamesUrl: {{ url_for('updates.api_updates_fix_names')|tojson }},
+            removeDuplicatesUrl: {{ url_for('updates.api_updates_remove_duplicates')|tojson }},
+            deleteDuplicateUrlTemplate: {{ url_for('updates.api_updates_remove_duplicate', processed_game_id=0)|replace('0', '{id}')|tojson }},
+            jobsUrl: {{ url_for('updates.api_updates_job_list')|tojson }},
+            jobDetailUrlTemplate: {{ url_for('updates.api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
+            detailUrlTemplate: {{ url_for('updates.api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
             cacheBatchSize: {{ igdb_batch_size|tojson }},
             fixBatchSize: {{ FIX_NAMES_BATCH_LIMIT|default(50)|tojson }}
         };

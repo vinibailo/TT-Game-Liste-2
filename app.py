@@ -24,7 +24,6 @@ from flask import (
     redirect,
     url_for,
     g,
-    has_app_context,
 )
 from werkzeug.exceptions import RequestEntityTooLarge
 from PIL import Image, ExifTags
@@ -33,6 +32,51 @@ from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+
+# Placeholder imports to establish the upcoming modular structure.
+import config as app_config
+from db import utils as db_utils
+from igdb import cache as igdb_cache
+from igdb import client as igdb_client
+from igdb import diff as igdb_diff
+from ingestion import data_loader as ingestion_data_loader
+from jobs import manager as jobs_manager
+from lookups import config as lookups_config
+from lookups import service as lookups_service
+from media import covers as media_covers
+from processed import duplicates as processed_duplicates
+from processed import navigator as processed_navigator
+from processed import source_index_cache as processed_source_index_cache
+from routes import games as routes_games
+from routes import lookups as routes_lookups
+from routes import updates as routes_updates
+from routes import web as routes_web
+from services import summaries as services_summaries
+from updates import service as updates_service
+from web import app_factory as web_app_factory
+
+_PLACEHOLDER_IMPORTS = (
+    app_config,
+    db_utils,
+    igdb_cache,
+    igdb_client,
+    igdb_diff,
+    ingestion_data_loader,
+    jobs_manager,
+    lookups_config,
+    lookups_service,
+    media_covers,
+    processed_duplicates,
+    processed_navigator,
+    processed_source_index_cache,
+    routes_games,
+    routes_lookups,
+    routes_updates,
+    routes_web,
+    services_summaries,
+    updates_service,
+    web_app_factory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,22 +110,10 @@ def _coerce_truthy_env(value: str | None) -> bool:
 RUN_DB_MIGRATIONS = _coerce_truthy_env(os.environ.get('RUN_DB_MIGRATIONS'))
 
 
-def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
-    """Apply standard pragmas and timeouts to SQLite connections."""
-
-    busy_timeout_ms = int(max(SQLITE_TIMEOUT_SECONDS, 0) * 1000)
-    if busy_timeout_ms > 0:
-        try:
-            conn.execute(f'PRAGMA busy_timeout = {busy_timeout_ms}')
-        except sqlite3.OperationalError:
-            pass
-    return conn
-
-
-def _create_sqlite_connection(db_path: str = PROCESSED_DB) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
-    conn.row_factory = sqlite3.Row
-    return _configure_sqlite_connection(conn)
+def _db_connection_factory() -> sqlite3.Connection:
+    return db_utils._create_sqlite_connection(
+        PROCESSED_DB, timeout=SQLITE_TIMEOUT_SECONDS
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 LOOKUP_DATA_DIR = Path(os.environ.get('LOOKUP_DATA_DIR', BASE_DIR))
@@ -556,8 +588,7 @@ logger.setLevel(logging.DEBUG)
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
 
 # SQLite setup for processed games
-db_lock = Lock()
-_processed_games_columns_cache: set[str] | None = None
+db_lock = db_utils.db_lock
 
 _source_index_cache_lock = Lock()
 _source_index_by_position: dict[int, str] | None = None
@@ -879,27 +910,18 @@ def get_position_for_source_index(value: Any) -> int | None:
     return fallback
 
 
-def get_db():
-    if not has_app_context():
-        return db
-    if 'db' not in g:
-        g.db = _create_sqlite_connection(PROCESSED_DB)
-    return g.db
+def get_db() -> sqlite3.Connection:
+    return db_utils.get_db(_db_connection_factory)
 
 
 def get_processed_games_columns(conn: sqlite3.Connection | None = None) -> set[str]:
-    global _processed_games_columns_cache
-    if _processed_games_columns_cache is not None:
-        return _processed_games_columns_cache
-    if conn is None:
-        conn = get_db()
-    cur = conn.execute('PRAGMA table_info(processed_games)')
-    _processed_games_columns_cache = {row['name'] for row in cur.fetchall()}
-    return _processed_games_columns_cache
+    return db_utils.get_processed_games_columns(
+        conn, connection_factory=_db_connection_factory
+    )
 
 
 def _quote_identifier(identifier: str) -> str:
-    return '"' + str(identifier).replace('"', '""') + '"'
+    return db_utils._quote_identifier(identifier)
 
 
 def _parse_iterable(value: Any) -> list[str]:
@@ -1929,7 +1951,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
 
 
 def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
-    conn = _create_sqlite_connection(PROCESSED_DB)
+    conn = _db_connection_factory()
     try:
         with conn:
             conn.execute('PRAGMA foreign_keys = ON')
@@ -2135,7 +2157,8 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 _init_db(run_migrations=RUN_DB_MIGRATIONS)
 
 # Expose a module-level connection for tests and utilities
-db = _create_sqlite_connection(PROCESSED_DB)
+db = _db_connection_factory()
+db_utils.set_fallback_connection(db)
 
 @app.teardown_appcontext
 def close_db(exc):
@@ -2725,39 +2748,6 @@ def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def exchange_twitch_credentials() -> tuple[str, str]:
-    client_id = os.environ.get('TWITCH_CLIENT_ID')
-    client_secret = os.environ.get('TWITCH_CLIENT_SECRET')
-    if not client_id or not client_secret:
-        raise RuntimeError('missing twitch client credentials')
-
-    payload = urlencode(
-        {
-            'client_id': client_id,
-            'client_secret': client_secret,
-            'grant_type': 'client_credentials',
-        }
-    ).encode('utf-8')
-
-    request = Request(
-        'https://id.twitch.tv/oauth2/token',
-        data=payload,
-        method='POST',
-    )
-    request.add_header('Content-Type', 'application/x-www-form-urlencoded')
-
-    try:
-        with urlopen(request) as response:
-            data = json.loads(response.read().decode('utf-8'))
-    except Exception as exc:  # pragma: no cover - network failures surfaced
-        raise RuntimeError(f'failed to obtain twitch token: {exc}') from exc
-
-    token = data.get('access_token')
-    if not token:
-        raise RuntimeError('missing access token in twitch response')
-    return token, client_id
-
-
 def _normalize_igdb_payload(item: Mapping[str, Any]) -> dict[str, Any] | None:
     if not isinstance(item, Mapping):
         return None
@@ -2938,193 +2928,62 @@ def fetch_igdb_metadata(
     return results
 
 
+def exchange_twitch_credentials() -> tuple[str, str]:
+    """Compatibility wrapper that proxies to :mod:`igdb.client`."""
+
+    return igdb_client.exchange_twitch_credentials()
+
+
 def download_igdb_metadata(
     access_token: str, client_id: str, igdb_ids: Iterable[str]
 ) -> dict[str, dict[str, Any]]:
-    numeric_ids: list[int] = []
-    seen: set[int] = set()
-    for value in igdb_ids:
-        normalized = coerce_igdb_id(value)
-        if not normalized:
-            continue
-        try:
-            numeric = int(normalized)
-        except (TypeError, ValueError):
-            logger.warning('Skipping invalid IGDB id %s', value)
-            continue
-        if numeric in seen:
-            continue
-        seen.add(numeric)
-        numeric_ids.append(numeric)
+    """Fetch IGDB metadata using the shared client helpers."""
 
-    if not numeric_ids:
-        return {}
-
-    results: dict[str, dict[str, Any]] = {}
     batch_size = (
         IGDB_BATCH_SIZE
         if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0
         else 500
     )
-    for start in range(0, len(numeric_ids), batch_size):
-        chunk = numeric_ids[start : start + batch_size]
-        if not chunk:
-            continue
-        query = (
-            'fields '
-            'id,name,summary,updated_at,first_release_date,'
-            'genres.name,platforms.name,game_modes.name,category,'
-            'involved_companies.company.name,'
-            'involved_companies.developer,'
-            'involved_companies.publisher,'
-            'cover.image_id,total_rating_count,rating_count; '
-            f"where id = ({', '.join(str(v) for v in chunk)}); "
-            f'limit {len(chunk)};'
-        )
-        request = Request(
-            'https://api.igdb.com/v4/games',
-            data=query.encode('utf-8'),
-            method='POST',
-        )
-        request.add_header('Client-ID', client_id)
-        request.add_header('Authorization', f'Bearer {access_token}')
-        request.add_header('Accept', 'application/json')
-        request.add_header('User-Agent', IGDB_USER_AGENT)
-
-        try:
-            with urlopen(request) as response:
-                payload = json.loads(response.read().decode('utf-8'))
-        except HTTPError as exc:
-            error_message = ''
-            try:
-                error_body = exc.read()
-            except Exception:  # pragma: no cover - best effort to capture error body
-                error_body = b''
-            if error_body:
-                try:
-                    error_message = error_body.decode('utf-8', errors='replace').strip()
-                except Exception:  # pragma: no cover - unexpected decoding failures
-                    error_message = ''
-            if not error_message and exc.reason:
-                error_message = str(exc.reason)
-            message = f"IGDB request failed: {exc.code}"
-            if error_message:
-                message = f"{message} {error_message}"
-            raise RuntimeError(message) from exc
-        except Exception as exc:  # pragma: no cover - network failures surfaced
-            logger.warning('Failed to query IGDB: %s', exc)
-            return {}
-
-        for item in payload or []:
-            normalized_item = _normalize_igdb_payload(item)
-            if not normalized_item:
-                continue
-            results[str(normalized_item['id'])] = normalized_item
-    return results
+    return igdb_client.download_igdb_metadata(
+        access_token,
+        client_id,
+        igdb_ids,
+        batch_size=batch_size,
+        user_agent=IGDB_USER_AGENT,
+        normalize=_normalize_igdb_payload,
+        coerce_id=coerce_igdb_id,
+        request_factory=Request,
+        opener=urlopen,
+    )
 
 
 def download_igdb_game_count(access_token: str, client_id: str) -> int:
-    request = Request(
-        'https://api.igdb.com/v4/games/count',
-        data='where id != null;'.encode('utf-8'),
-        method='POST',
+    """Return the IGDB game count via the shared client module."""
+
+    return igdb_client.download_igdb_game_count(
+        access_token,
+        client_id,
+        user_agent=IGDB_USER_AGENT,
+        request_factory=Request,
+        opener=urlopen,
     )
-    request.add_header('Client-ID', client_id)
-    request.add_header('Authorization', f'Bearer {access_token}')
-    request.add_header('Accept', 'application/json')
-    request.add_header('User-Agent', IGDB_USER_AGENT)
-
-    try:
-        with urlopen(request) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-    except HTTPError as exc:
-        message = f'IGDB count request failed: {exc.code}'
-        try:
-            error_body = exc.read()
-        except Exception:  # pragma: no cover - defensive guard
-            error_body = b''
-        if error_body:
-            try:
-                decoded = error_body.decode('utf-8', errors='replace').strip()
-            except Exception:
-                decoded = ''
-            if decoded:
-                message = f'{message} {decoded}'
-        raise RuntimeError(message) from exc
-    except Exception as exc:  # pragma: no cover - network failures surfaced
-        raise RuntimeError(f'failed to query IGDB count: {exc}') from exc
-
-    if isinstance(payload, Mapping):
-        count_value = payload.get('count')
-    elif isinstance(payload, list) and payload:
-        first = payload[0]
-        count_value = first.get('count') if isinstance(first, Mapping) else None
-    else:
-        count_value = None
-
-    try:
-        return int(count_value)
-    except (TypeError, ValueError):
-        raise RuntimeError('invalid count payload from IGDB')
 
 
 def download_igdb_games(
     access_token: str, client_id: str, offset: int, limit: int
 ) -> list[dict[str, Any]]:
-    if limit <= 0:
-        return []
+    """Download and normalize a page of IGDB games."""
 
-    query = (
-        'fields '
-        'id,name,summary,updated_at,first_release_date,'
-        'genres.name,platforms.name,game_modes.name,category,'
-        'involved_companies.company.name,'
-        'involved_companies.developer,'
-        'involved_companies.publisher,'
-        'cover.image_id,total_rating_count,rating_count; '
-        f'limit {limit}; '
-        f'offset {offset}; '
-        'sort id asc;'
+    return igdb_client.download_igdb_games(
+        access_token,
+        client_id,
+        offset,
+        limit,
+        user_agent=IGDB_USER_AGENT,
+        normalize=_normalize_igdb_payload,
+        request_factory=Request,
+        opener=urlopen,
     )
-    request = Request(
-        'https://api.igdb.com/v4/games',
-        data=query.encode('utf-8'),
-        method='POST',
-    )
-    request.add_header('Client-ID', client_id)
-    request.add_header('Authorization', f'Bearer {access_token}')
-    request.add_header('Accept', 'application/json')
-    request.add_header('User-Agent', IGDB_USER_AGENT)
-
-    try:
-        with urlopen(request) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-    except HTTPError as exc:
-        error_message = ''
-        try:
-            error_body = exc.read()
-        except Exception:  # pragma: no cover - best effort to capture error body
-            error_body = b''
-        if error_body:
-            try:
-                error_message = error_body.decode('utf-8', errors='replace').strip()
-            except Exception:  # pragma: no cover - unexpected decoding failures
-                error_message = ''
-        if not error_message and exc.reason:
-            error_message = str(exc.reason)
-        message = f"IGDB request failed: {exc.code}"
-        if error_message:
-            message = f"{message} {error_message}"
-        raise RuntimeError(message) from exc
-    except Exception as exc:  # pragma: no cover - network failures surfaced
-        raise RuntimeError(f'failed to query IGDB games: {exc}') from exc
-
-    results: list[dict[str, Any]] = []
-    for item in payload or []:
-        normalized_item = _normalize_igdb_payload(item)
-        if normalized_item is not None:
-            results.append(normalized_item)
-    return results
 
 
 def _build_cache_row_from_payload(
@@ -3296,115 +3155,6 @@ def _set_cached_igdb_total(
     )
 
 
-@app.route('/api/igdb/cache', methods=['POST'])
-def api_igdb_cache_refresh():
-    payload = request.get_json(silent=True) or {}
-    try:
-        offset = int(payload.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    try:
-        limit = int(payload.get('limit', IGDB_BATCH_SIZE))
-    except (TypeError, ValueError):
-        limit = IGDB_BATCH_SIZE
-
-    if offset < 0:
-        offset = 0
-    if not isinstance(limit, int) or limit <= 0:
-        limit = IGDB_BATCH_SIZE
-    if not isinstance(limit, int) or limit <= 0:
-        limit = 500
-    limit = min(limit, 500)
-
-    try:
-        access_token, client_id = exchange_twitch_credentials()
-    except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 400
-
-    with db_lock:
-        conn = get_db()
-        total = _get_cached_igdb_total(conn)
-
-    if total is None or offset == 0:
-        try:
-            total = download_igdb_game_count(access_token, client_id)
-        except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 502
-        with db_lock:
-            conn = get_db()
-            with conn:
-                _set_cached_igdb_total(conn, total)
-
-    if total is None or total <= 0:
-        with db_lock:
-            conn = get_db()
-            with conn:
-                _set_cached_igdb_total(conn, total)
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total or 0,
-                'processed': 0,
-                'inserted': 0,
-                'updated': 0,
-                'unchanged': 0,
-                'done': True,
-                'next_offset': 0,
-                'batch_count': 0,
-            }
-        )
-
-    if offset >= total:
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total,
-                'processed': total,
-                'inserted': 0,
-                'updated': 0,
-                'unchanged': 0,
-                'done': True,
-                'next_offset': total,
-                'batch_count': 0,
-            }
-        )
-
-    try:
-        payloads = download_igdb_games(access_token, client_id, offset, limit)
-    except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 502
-
-    batch_count = len(payloads)
-    with db_lock:
-        conn = get_db()
-        with conn:
-            inserted, updated, unchanged = _upsert_igdb_cache_entries(conn, payloads)
-
-    with _igdb_prefill_lock:
-        if batch_count:
-            _igdb_prefill_cache.clear()
-
-    processed = offset + batch_count
-    if total is not None:
-        processed = min(processed, total)
-    if processed < 0:
-        processed = 0
-    done = processed >= total or batch_count == 0
-    next_offset = offset + batch_count if batch_count else processed
-
-    return jsonify(
-        {
-            'status': 'ok',
-            'total': total,
-            'processed': processed,
-            'inserted': inserted,
-            'updated': updated,
-            'unchanged': unchanged,
-            'done': done,
-            'next_offset': next_offset,
-            'batch_count': batch_count,
-        }
-    )
 
 
 _igdb_prefill_cache: dict[str, dict[str, Any]] = {}
@@ -4069,186 +3819,10 @@ def index():
     )
 
 
-@app.route('/lookups')
-def lookups_page():
-    lookup_tables = [
-        {
-            'type': table_config['table'],
-            'label': table_config['table'].replace('_', ' ').title(),
-            'singular_label': _format_lookup_label(
-                table_config.get('column', table_config['table'])
-            ),
-        }
-        for table_config in LOOKUP_TABLES
-    ]
-    default_lookup = lookup_tables[0]['type'] if lookup_tables else ''
-    return render_template(
-        'lookups.html',
-        lookup_tables=lookup_tables,
-        default_lookup=default_lookup,
-        default_label=lookup_tables[0]['label'] if lookup_tables else '',
-    )
 
 
-@app.route('/api/lookups/<lookup_type>', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def api_lookup_options(lookup_type: str):
-    normalized = lookup_type.strip().lower().replace('-', '_').replace(' ', '_')
-    table_name = LOOKUP_ENDPOINT_MAP.get(normalized)
-    if not table_name or table_name not in LOOKUP_TABLES_BY_NAME:
-        return jsonify({'error': 'unknown lookup type'}), 404
-
-    if request.method == 'GET':
-        with db_lock:
-            conn = get_db()
-            cur = conn.execute(
-                f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE'
-            )
-            rows = cur.fetchall()
-        items: list[dict[str, Any]] = []
-        seen_ids: set[int] = set()
-        for row in rows:
-            raw_id = _row_value(row, 'id', 0)
-            try:
-                coerced_id = int(raw_id)
-            except (TypeError, ValueError):
-                coerced_id = None
-            if coerced_id is None or coerced_id in seen_ids:
-                continue
-            name = _normalize_lookup_name(_row_value(row, 'name', 1))
-            if not name:
-                continue
-            seen_ids.add(coerced_id)
-            items.append({'id': coerced_id, 'name': name})
-        return jsonify({'items': items, 'type': table_name})
-
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, Mapping):
-        return jsonify({'error': 'invalid payload'}), 400
-
-    if request.method == 'POST':
-        name = _normalize_lookup_name(payload.get('name'))
-        if not name:
-            return jsonify({'error': 'invalid name'}), 400
-        with db_lock:
-            conn = get_db()
-            existing = conn.execute(
-                f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE',
-                (name,),
-            ).fetchone()
-            lookup_id = _get_or_create_lookup_id(conn, table_name, name)
-            final_name = _lookup_name_for_id(conn, table_name, lookup_id) or name
-            status_code = 201 if existing is None else 200
-            if existing is None:
-                conn.commit()
-        return (
-            jsonify({'item': {'id': lookup_id, 'name': final_name}, 'type': table_name}),
-            status_code,
-        )
-
-    lookup_id_raw = payload.get('id')
-    try:
-        lookup_id = int(lookup_id_raw)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'invalid lookup id'}), 400
-
-    relation = LOOKUP_RELATIONS_BY_TABLE.get(table_name)
-
-    if request.method == 'PUT':
-        new_name = _normalize_lookup_name(payload.get('name'))
-        if not new_name:
-            return jsonify({'error': 'invalid name'}), 400
-        with db_lock:
-            conn = get_db()
-            row = conn.execute(
-                f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
-            ).fetchone()
-            if row is None:
-                return jsonify({'error': 'lookup not found'}), 404
-            existing_name = _normalize_lookup_name(_row_value(row, 'name', 1))
-            if existing_name != new_name:
-                conflict = conn.execute(
-                    f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE AND id != ?',
-                    (new_name, lookup_id),
-                ).fetchone()
-                if conflict is not None:
-                    return jsonify({'error': 'name conflict'}), 409
-                conn.execute(
-                    f'UPDATE {table_name} SET name = ? WHERE id = ?',
-                    (new_name, lookup_id),
-                )
-            affected_game_ids: list[int] = []
-            if relation:
-                join_table = relation['join_table']
-                join_column = relation['join_column']
-                cur_games = conn.execute(
-                    f'SELECT DISTINCT processed_game_id FROM {join_table} '
-                    f'WHERE {join_column} = ?',
-                    (lookup_id,),
-                )
-                for game_row in cur_games.fetchall():
-                    try:
-                        game_id = int(_row_value(game_row, 'processed_game_id', 0))
-                    except (TypeError, ValueError):
-                        continue
-                    affected_game_ids.append(game_id)
-            for game_id in affected_game_ids:
-                entries_map = {
-                    key: list(value)
-                    for key, value in _fetch_lookup_entries_for_game(conn, game_id).items()
-                }
-                selections = _lookup_entries_to_selection(entries_map)
-                _persist_lookup_relations(conn, game_id, selections)
-                _apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
-            updated_name = _lookup_name_for_id(conn, table_name, lookup_id) or new_name
-            conn.commit()
-        return jsonify({'item': {'id': lookup_id, 'name': updated_name}, 'type': table_name})
-
-    if request.method == 'DELETE':
-        with db_lock:
-            conn = get_db()
-            row = conn.execute(
-                f'SELECT id FROM {table_name} WHERE id = ?', (lookup_id,)
-            ).fetchone()
-            if row is None:
-                return jsonify({'error': 'lookup not found'}), 404
-            if relation:
-                join_table = relation['join_table']
-                join_column = relation['join_column']
-                cur_games = conn.execute(
-                    f'SELECT DISTINCT processed_game_id FROM {join_table} '
-                    f'WHERE {join_column} = ?',
-                    (lookup_id,),
-                )
-                entries_by_game: dict[int, dict[str, list[dict[str, Any]]]] = {}
-                for game_row in cur_games.fetchall():
-                    try:
-                        game_id = int(_row_value(game_row, 'processed_game_id', 0))
-                    except (TypeError, ValueError):
-                        continue
-                    entries_map = {
-                        key: list(value)
-                        for key, value in _fetch_lookup_entries_for_game(conn, game_id).items()
-                    }
-                    _remove_lookup_id_from_entries(entries_map, relation, lookup_id)
-                    entries_by_game[game_id] = entries_map
-                for game_id, entries_map in entries_by_game.items():
-                    selections = _lookup_entries_to_selection(entries_map)
-                    _persist_lookup_relations(conn, game_id, selections)
-                    _apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
-            conn.execute(f'DELETE FROM {table_name} WHERE id = ?', (lookup_id,))
-            conn.commit()
-        return jsonify({'status': 'deleted', 'type': table_name, 'id': lookup_id})
-
-    return jsonify({'error': 'unsupported method'}), 405
 
 
-@app.route('/updates')
-def updates_page():
-    return render_template(
-        'updates.html',
-        igdb_batch_size=IGDB_BATCH_SIZE,
-        FIX_NAMES_BATCH_LIMIT=FIX_NAMES_BATCH_LIMIT,
-    )
 
 
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
@@ -4366,400 +3940,16 @@ def build_game_payload(index: int, seq: int, progress_seq: int | None = None) ->
     }
 
 
-@app.route('/api/game')
-def api_game():
-    try:
-        index = navigator.current()
-        if index >= total_games:
-            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-        data = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(data)
-    except Exception as e:
-        app.logger.exception("api_game failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/game/<int:index>/raw')
-def api_game_raw(index: int):
-    if index < 0 or index >= total_games:
-        return jsonify({'error': 'invalid index'}), 404
-    try:
-        row = games_df.iloc[index]
-    except Exception:
-        app.logger.exception("api_game_raw failed")
-        return jsonify({'error': 'invalid index'}), 404
-
-    source_row = row.copy()
-    fallback_cover_url = str(source_row.get('Large Cover Image (URL)', '') or '')
-    igdb_id = extract_igdb_id(source_row, allow_generic_id=True)
-    prefill = get_igdb_prefill_for_id(igdb_id)
-    if prefill:
-        for key, value in prefill.items():
-            if key in source_row.index:
-                source_row.at[key] = value
-            else:
-                source_row[key] = value
-        cover_override = prefill.get('Large Cover Image (URL)')
-        if cover_override:
-            fallback_cover_url = cover_override
-        igdb_id = prefill.get('IGDB ID') or prefill.get('igdb_id') or igdb_id
-    if not igdb_id:
-        igdb_id = extract_igdb_id(row, allow_generic_id=True)
-
-    cover_data = load_cover_data(None, fallback_cover_url)
-    genres = extract_list(source_row, ['Genres', 'Genre'])
-    modes = extract_list(source_row, ['Game Modes', 'Mode'])
-    platforms = extract_list(source_row, ['Platforms', 'Platform'])
-    dummy: list[str] = []
-    game_fields = {
-        'Name': get_cell(source_row, 'Name', dummy),
-        'Summary': get_cell(source_row, 'Summary', dummy),
-        'FirstLaunchDate': get_cell(source_row, 'First Launch Date', dummy),
-        'Developers': get_cell(source_row, 'Developers', dummy),
-        'Publishers': get_cell(source_row, 'Publishers', dummy),
-        'Genres': genres,
-        'GameModes': modes,
-        'Category': get_cell(source_row, 'Category', dummy),
-        'Platforms': platforms,
-        'IGDBID': igdb_id or None,
-    }
-    return jsonify({
-        'index': int(index),
-        'total': total_games,
-        'game': game_fields,
-        'cover': cover_data,
-        'seq': navigator.processed_total + 1,
-    })
 
 
-@app.route('/api/summary', methods=['POST'])
-def api_summary():
-    data = request.get_json(force=True)
-    game_name = data.get('game_name', '')
-    try:
-        summary_pt = generate_pt_summary(game_name)
-        return jsonify({'summary': summary_pt})
-    except Exception as e:
-        app.logger.exception("Summary generation failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/upload', methods=['POST'])
-def api_upload():
-    file = request.files.get('file')
-    if not file:
-        return jsonify({'error': 'no file'}), 400
-    img = open_image_auto_rotate(file.stream)
-    filename = f"{uuid.uuid4().hex}.jpg"
-    path = os.path.join(UPLOAD_DIR, filename)
-    img.save(path, format='JPEG')
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG')
-    data = 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
-    return jsonify({'filename': filename, 'data': data})
 
 
-@app.route('/api/save', methods=['POST'])
-def api_save():
-    data = request.get_json(force=True)
-    index = int(data.get('index', 0))
-    expected_id = data.get('id')
-    fields = data.get('fields', {})
-    image_b64 = data.get('image')
-    upload_name = data.get('upload_name')
-    if expected_id is None:
-        return jsonify({'error': 'missing id'}), 400
-    expected_id = int(expected_id)
-    total_rows = len(games_df)
-    if 0 <= index < total_rows:
-        try:
-            source_index = get_source_index_for_position(index)
-        except IndexError:
-            source_index = str(index)
-    else:
-        source_index = str(index)
-    try:
-        with navigator.lock:
-            if index != navigator.current_index:
-                expected_index = navigator.current_index
-                expected_seq_id = navigator.seq_index
-                if 0 <= expected_index < total_rows:
-                    try:
-                        expected_source_index = get_source_index_for_position(
-                            expected_index
-                        )
-                    except IndexError:
-                        expected_source_index = str(expected_index)
-                else:
-                    expected_source_index = str(expected_index)
-                with db_lock:
-                    conn = get_db()
-                    cur = conn.execute(
-                        'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
-                        (expected_source_index,),
-                    )
-                    row = cur.fetchone()
-                    if row is not None:
-                        expected_seq_id = row['ID']
-                return (
-                    jsonify(
-                        {
-                            'error': 'index mismatch',
-                            'expected': expected_index,
-                            'actual': index,
-                            'expected_id': expected_seq_id,
-                        }
-                    ),
-                    409,
-                )
-            was_processed_before = False
-            existing_summary = None
-            existing_cover_path = None
-            existing_width = None
-            existing_height = None
-            with db_lock:
-                conn = get_db()
-                cur = conn.execute(
-                    'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
-                    'FROM processed_games WHERE "Source Index"=?',
-                    (source_index,),
-                )
-                existing = cur.fetchone()
-                if existing:
-                    existing_id = existing['ID']
-                    if existing_id != expected_id:
-                        return (
-                            jsonify(
-                                {
-                                    'error': 'id mismatch',
-                                    'expected': existing_id,
-                                    'actual': expected_id,
-                                }
-                            ),
-                            409,
-                        )
-                    seq_id = existing_id
-                    new_record = False
-                    try:
-                        existing_summary = existing['Summary']
-                    except (KeyError, IndexError, TypeError):
-                        existing_summary = None
-                    try:
-                        existing_cover_path = existing['Cover Path']
-                    except (KeyError, IndexError, TypeError):
-                        existing_cover_path = None
-                    try:
-                        existing_width = existing['Width']
-                    except (KeyError, IndexError, TypeError):
-                        existing_width = None
-                    try:
-                        existing_height = existing['Height']
-                    except (KeyError, IndexError, TypeError):
-                        existing_height = None
-                    was_processed_before = is_processed_game_done(
-                        existing_summary, existing_cover_path
-                    )
-                else:
-                    seq_id = navigator.seq_index
-                    if expected_id != seq_id:
-                        return (
-                            jsonify(
-                                {
-                                    'error': 'id mismatch',
-                                    'expected': seq_id,
-                                    'actual': expected_id,
-                                }
-                            ),
-                            409,
-                        )
-                    new_record = True
-
-            cover_path = ''
-            width = height = 0
-            if image_b64:
-                header, b64data = image_b64.split(',', 1)
-                img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-                img = img.convert('RGB')
-                if min(img.size) < 1080:
-                    img = img.resize((1080, 1080))
-                else:
-                    img = img.resize((1080, 1080))
-                cover_path = os.path.join(PROCESSED_DIR, f"{seq_id}.jpg")
-                img.save(cover_path, format='JPEG', quality=90)
-                width, height = img.size
-            elif existing_cover_path:
-                cover_path = str(existing_cover_path)
-                try:
-                    width = int(existing_width)
-                except (TypeError, ValueError):
-                    width = 0
-                try:
-                    height = int(existing_height)
-                except (TypeError, ValueError):
-                    height = 0
-
-            igdb_id_value = None
-            if existing is not None:
-                try:
-                    existing_raw = existing['igdb_id']
-                except (KeyError, IndexError):
-                    existing_raw = None
-                existing_coerced = coerce_igdb_id(existing_raw)
-                if existing_coerced:
-                    igdb_id_value = existing_coerced
-            if igdb_id_value is None and 0 <= index < len(games_df):
-                igdb_candidate = extract_igdb_id(
-                    games_df.iloc[index], allow_generic_id=True
-                )
-                if igdb_candidate:
-                    igdb_id_value = igdb_candidate
-
-            last_edit_ts = now_utc_iso()
-            row = {
-                "ID": seq_id,
-                "Source Index": source_index,
-                "Name": fields.get('Name', ''),
-                "Summary": fields.get('Summary', ''),
-                "First Launch Date": fields.get('FirstLaunchDate', ''),
-                "Category": fields.get('Category', ''),
-                "igdb_id": igdb_id_value,
-                "Cover Path": cover_path,
-                "Width": width,
-                "Height": height,
-                'last_edited_at': last_edit_ts,
-            }
-
-            for relation in LOOKUP_RELATIONS:
-                id_column = relation.get('id_column')
-                if id_column:
-                    row[id_column] = ''
-
-            lookups_input = fields.get('Lookups') if isinstance(fields, Mapping) else {}
-
-            with db_lock:
-                conn = get_db()
-                try:
-                    normalized_lookups: dict[str, dict[str, Any]] = {}
-                    for relation in LOOKUP_RELATIONS:
-                        response_key = relation['response_key']
-                        processed_column = relation['processed_column']
-                        raw_value: Any = None
-                        if isinstance(lookups_input, Mapping):
-                            raw_value = lookups_input.get(response_key)
-                            if raw_value is None:
-                                raw_value = lookups_input.get(processed_column)
-                        if raw_value is None:
-                            raw_value = fields.get(response_key)
-                            if raw_value is None:
-                                raw_value = fields.get(processed_column)
-                        selection = _resolve_lookup_selection(conn, relation, raw_value)
-                        normalized_lookups[response_key] = selection
-                        row[processed_column] = _lookup_display_text(selection['names'])
-                        id_column = relation.get('id_column')
-                        if id_column:
-                            row[id_column] = _encode_lookup_id_list(selection['ids'])
-
-                    if existing:
-                        conn.execute(
-                            '''UPDATE processed_games SET
-                                "Name"=?, "Summary"=?, "First Launch Date"=?,
-                                "Developers"=?, "developers_ids"=?,
-                                "Publishers"=?, "publishers_ids"=?,
-                                "Genres"=?, "genres_ids"=?,
-                                "Game Modes"=?, "game_modes_ids"=?,
-                                "Category"=?, "Platforms"=?, "platforms_ids"=?,
-                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
-                                last_edited_at=?
-                               WHERE "ID"=?''',
-                            (
-                                row['Name'], row['Summary'], row['First Launch Date'],
-                                row.get('Developers', ''), row.get('developers_ids', ''),
-                                row.get('Publishers', ''), row.get('publishers_ids', ''),
-                                row.get('Genres', ''), row.get('genres_ids', ''),
-                                row.get('Game Modes', ''), row.get('game_modes_ids', ''),
-                                row['Category'], row.get('Platforms', ''), row.get('platforms_ids', ''),
-                                row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
-                                row['last_edited_at'],
-                                seq_id,
-                            ),
-                        )
-                    else:
-                        conn.execute(
-                            '''INSERT INTO processed_games (
-                                "ID", "Source Index", "Name", "Summary",
-                                "First Launch Date", "Developers", "developers_ids",
-                                "Publishers", "publishers_ids",
-                                "Genres", "genres_ids", "Game Modes", "game_modes_ids",
-                                "Category", "Platforms", "platforms_ids",
-                                "igdb_id", "Cover Path", "Width", "Height", last_edited_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (
-                                seq_id,
-                                row['Source Index'], row['Name'], row['Summary'],
-                                row['First Launch Date'], row.get('Developers', ''),
-                                row.get('developers_ids', ''), row.get('Publishers', ''),
-                                row.get('publishers_ids', ''), row.get('Genres', ''),
-                                row.get('genres_ids', ''), row.get('Game Modes', ''),
-                                row.get('game_modes_ids', ''), row['Category'],
-                                row.get('Platforms', ''), row.get('platforms_ids', ''),
-                                row['igdb_id'], row['Cover Path'],
-                                row['Width'], row['Height'], row['last_edited_at'],
-                            ),
-                        )
-
-                    _persist_lookup_relations(conn, seq_id, normalized_lookups)
-                    conn.commit()
-                    if new_record:
-                        navigator.seq_index += 1
-                    new_is_done = is_processed_game_done(
-                        row['Summary'], row['Cover Path']
-                    )
-                    if new_is_done and not was_processed_before:
-                        navigator.processed_total = min(
-                            navigator.total,
-                            navigator.processed_total + 1,
-                        )
-                    elif was_processed_before and not new_is_done:
-                        navigator.processed_total = max(
-                            0,
-                            navigator.processed_total - 1,
-                        )
-                except sqlite3.IntegrityError:
-                    conn.rollback()
-                    return jsonify({'error': 'conflict'}), 409
-
-            if upload_name:
-                up_path = os.path.join(UPLOAD_DIR, upload_name)
-                if os.path.exists(up_path):
-                    os.remove(up_path)
-            navigator.skip_queue = [s for s in navigator.skip_queue if s['index'] != index]
-            navigator._save()
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        app.logger.exception("api_save failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/skip', methods=['POST'])
-def api_skip():
-    data = request.get_json(force=True)
-    index = int(data.get('index', 0))
-    upload_name = data.get('upload_name')
-
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-    try:
-        navigator.skip(index)
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        app.logger.exception("api_skip failed")
-        return jsonify({'error': str(e)}), 500
 
 
 def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
@@ -5549,32 +4739,6 @@ def _execute_refresh_job(update_progress: Callable[..., None]) -> dict[str, Any]
     }
 
 
-@app.route('/api/updates/refresh', methods=['POST'])
-def api_updates_refresh():
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
-    if run_sync:
-        try:
-            result = _execute_refresh_job(lambda **_kwargs: None)
-        except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 502
-        return jsonify(result)
-
-    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
-        with app.app_context():
-            return _execute_refresh_job(update_progress)
-
-    job, created = job_manager.start_job(
-        'refresh_updates',
-        runner,
-        description='Refreshing IGDB updates…',
-    )
-    status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
-    if job:
-        response.headers['Location'] = url_for(
-            'api_updates_job_detail', job_id=job['id']
-        )
-    return response, status_code
 
 
 def _execute_fix_names_job(
@@ -5795,48 +4959,6 @@ def _execute_fix_names_job(
     }
 
 
-@app.route('/api/updates/fix-names', methods=['POST'])
-def api_updates_fix_names():
-    payload = request.get_json(silent=True) or {}
-    try:
-        offset = int(payload.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    try:
-        limit = int(payload.get('limit', FIX_NAMES_BATCH_LIMIT))
-    except (TypeError, ValueError):
-        limit = FIX_NAMES_BATCH_LIMIT
-    if offset < 0:
-        offset = 0
-    if limit <= 0:
-        limit = FIX_NAMES_BATCH_LIMIT
-
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
-    if run_sync:
-        result = _execute_fix_names_job(
-            lambda **_kwargs: None,
-            offset=offset,
-            limit=limit,
-            process_all=False,
-        )
-        return jsonify(result)
-
-    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
-        with app.app_context():
-            return _execute_fix_names_job(update_progress)
-
-    job, created = job_manager.start_job(
-        'fix_names',
-        runner,
-        description='Fixing IGDB names…',
-    )
-    status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
-    if job:
-        response.headers['Location'] = url_for(
-            'api_updates_job_detail', job_id=job['id']
-        )
-    return response, status_code
 
 
 def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
@@ -5952,293 +5074,107 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
     }
 
 
-@app.route('/api/updates/remove-duplicates', methods=['POST'])
-def api_updates_remove_duplicates():
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or app.config.get('TESTING')
-    if run_sync:
-        result = _execute_remove_duplicates_job(lambda **_kwargs: None)
-        return jsonify(result)
-
-    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
-        with app.app_context():
-            return _execute_remove_duplicates_job(update_progress)
-
-    job, created = job_manager.start_job(
-        'remove_duplicates',
-        runner,
-        description='Removing duplicates…',
-    )
-    status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
-    if job:
-        response.headers['Location'] = url_for(
-            'api_updates_job_detail', job_id=job['id']
-        )
-    return response, status_code
 
 
-@app.route('/api/updates/remove-duplicate/<int:processed_game_id>', methods=['POST'])
-def api_updates_remove_duplicate(processed_game_id: int):
-    with db_lock:
-        conn = get_db()
-        relation_count_sql = ', '.join(
-            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = pg."ID") AS {relation["join_table"]}_count'
-            for relation in LOOKUP_RELATIONS
-        )
-        cur = conn.execute(
-            f'''SELECT
-                    pg."ID",
-                    pg."Source Index",
-                    pg."Name",
-                    pg."igdb_id",
-                    pg."Summary",
-                    pg."Cover Path",
-                    pg."First Launch Date",
-                    pg."Category",
-                    pg."Width",
-                    pg."Height",
-                    pg.last_edited_at,
-                    {relation_count_sql}
-               FROM processed_games AS pg'''
-        )
-        rows = cur.fetchall()
-
-    resolutions, duplicate_groups, skipped_groups, _ = _scan_duplicate_candidates(rows)
-    target_resolution: DuplicateGroupResolution | None = None
-    for resolution in resolutions:
-        for entry in resolution.duplicates:
-            entry_id = _coerce_int(entry['ID'])
-            if entry_id != processed_game_id:
-                continue
-            metadata_updates = _compute_metadata_updates(resolution.canonical, [entry])
-            target_resolution = DuplicateGroupResolution(
-                canonical=resolution.canonical,
-                duplicates=[entry],
-                metadata_updates=metadata_updates,
-            )
-            break
-        if target_resolution is not None:
-            break
-
-    if target_resolution is None:
-        return (
-            jsonify({'error': 'Duplicate not found or already processed.'}),
-            404,
-        )
-
-    ids_to_delete = _merge_duplicate_resolutions([target_resolution])
-    if processed_game_id not in ids_to_delete:
-        return (
-            jsonify({'error': 'Unable to remove duplicate entry.'}),
-            400,
-        )
-
-    removed_count, remaining_total = _remove_processed_games(ids_to_delete)
-    if removed_count <= 0:
-        return (
-            jsonify({'error': 'Unable to remove duplicate entry.'}),
-            400,
-        )
-
-    name_value = _normalize_text(target_resolution.duplicates[0]['Name']) or f'ID {processed_game_id}'
-    message = f'Removed duplicate entry for {name_value}.'
-    return jsonify(
-        {
-            'status': 'ok',
-            'removed': removed_count,
-            'remaining': remaining_total,
-            'duplicate_groups': duplicate_groups,
-            'skipped': skipped_groups,
-            'removed_id': processed_game_id,
-            'message': message,
-            'toast_type': 'success',
-        }
-    )
 
 
-@app.route('/api/updates/jobs', methods=['GET'])
-def api_updates_job_list():
-    job_type = request.args.get('type')
-    active_only = request.args.get('active')
-    jobs = job_manager.list_jobs(job_type=job_type)
-    if active_only and str(active_only).lower() in {'1', 'true', 'yes'}:
-        jobs = [job for job in jobs if job['status'] in JOB_ACTIVE_STATUSES]
-    return jsonify({'jobs': jobs})
 
 
-@app.route('/api/updates/jobs/<job_id>', methods=['GET'])
-def api_updates_job_detail(job_id: str):
-    job = job_manager.get_job(job_id)
-    if job is None:
-        return jsonify({'error': 'job not found'}), 404
-    return jsonify({'job': job})
 
 
-@app.route('/api/updates', methods=['GET'])
-def api_updates_list():
-    return jsonify({'updates': fetch_cached_updates()})
 
 
-@app.route('/api/updates/<int:processed_game_id>', methods=['GET'])
-def api_updates_detail(processed_game_id: int):
-    with db_lock:
-        conn = get_db()
-        processed_columns = get_processed_games_columns(conn)
-        cover_url_select = (
-            'p."Large Cover Image (URL)" AS cover_url'
-            if 'Large Cover Image (URL)' in processed_columns
-            else 'NULL AS cover_url'
-        )
-        cur = conn.execute(
-            f'''SELECT
-                   u.processed_game_id,
-                   u.igdb_id,
-                   u.igdb_updated_at,
-                   u.igdb_payload,
-                   u.diff,
-                   u.local_last_edited_at,
-                   u.refreshed_at,
-                   p."Name" AS game_name,
-                   p."Cover Path" AS cover_path,
-                   {cover_url_select}
-               FROM igdb_updates u
-               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
-               WHERE u.processed_game_id=?''',
-            (processed_game_id,),
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        return jsonify({'error': 'not found'}), 404
-
-    payload = json.loads(row['igdb_payload']) if row['igdb_payload'] else None
-    diff = json.loads(row['diff']) if row['diff'] else {}
-
-    return jsonify(
-        {
-            'processed_game_id': row['processed_game_id'],
-            'igdb_id': row['igdb_id'],
-            'igdb_updated_at': row['igdb_updated_at'],
-            'igdb_payload': payload,
-            'diff': diff,
-            'local_last_edited_at': row['local_last_edited_at'],
-            'refreshed_at': row['refreshed_at'],
-            'name': row['game_name'],
-            'cover': load_cover_data(row['cover_path'], row['cover_url']),
-        }
-    )
 
 
-@app.route('/api/set_index', methods=['POST'])
-def api_set_index():
-    data = request.get_json(silent=True) or {}
-    index = int(data.get('index', 0))
-    upload_name = data.get('upload_name')
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-    try:
-        navigator.set_index(index)
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        app.logger.exception("api_set_index failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/game_by_id', methods=['POST'])
-def api_game_by_id():
-    data = request.get_json(silent=True) or {}
-    raw_id = data.get('id')
-    if raw_id is None:
-        return jsonify({'error': 'missing id'}), 400
-    try:
-        game_id = int(str(raw_id).strip())
-    except (TypeError, ValueError):
-        return jsonify({'error': 'invalid id'}), 400
-
-    upload_name = data.get('upload_name')
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-
-    with db_lock:
-        conn = get_db()
-        cur = conn.execute(
-            'SELECT "Source Index" FROM processed_games WHERE "ID"=?',
-            (game_id,),
-        )
-        row = cur.fetchone()
-
-    if row is None:
-        return jsonify({'error': 'id not found'}), 404
-
-    index = get_position_for_source_index(row['Source Index'])
-    if index is None:
-        app.logger.error(
-            "Invalid source index for ID %s: %s", game_id, row['Source Index']
-        )
-        return jsonify({'error': 'invalid source index'}), 500
-
-    try:
-        navigator.set_index(index)
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except IndexError:
-        return jsonify({'error': 'invalid index'}), 404
-    except Exception as e:
-        app.logger.exception("api_game_by_id failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/next', methods=['POST'])
-def api_next():
-    data = request.get_json(silent=True) or {}
-    upload_name = data.get('upload_name')
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-    try:
-        index = navigator.next()
-        if index >= total_games:
-            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except Exception as e:
-        app.logger.exception("api_next failed")
-        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/back', methods=['POST'])
-def api_back():
-    data = request.get_json(silent=True) or {}
-    upload_name = data.get('upload_name')
-    if upload_name:
-        up_path = os.path.join(UPLOAD_DIR, upload_name)
-        if os.path.exists(up_path):
-            os.remove(up_path)
-    try:
-        index = navigator.back()
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except Exception as e:
-        app.logger.exception("api_back failed")
-        return jsonify({'error': str(e)}), 500
 
+
+routes_games.configure({
+    'navigator': navigator,
+    'get_navigator': lambda: navigator,
+    'get_total_games': lambda: total_games,
+    'get_games_df': lambda: games_df,
+    'build_game_payload': build_game_payload,
+    'generate_pt_summary': generate_pt_summary,
+    'open_image_auto_rotate': open_image_auto_rotate,
+    'upload_dir': UPLOAD_DIR,
+    'processed_dir': PROCESSED_DIR,
+    'db_lock': db_lock,
+    'get_db': get_db,
+    'get_source_index_for_position': get_source_index_for_position,
+    'get_position_for_source_index': get_position_for_source_index,
+    'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
+    '_resolve_lookup_selection': _resolve_lookup_selection,
+    '_lookup_display_text': _lookup_display_text,
+    '_encode_lookup_id_list': _encode_lookup_id_list,
+    '_persist_lookup_relations': _persist_lookup_relations,
+    'is_processed_game_done': is_processed_game_done,
+    'now_utc_iso': now_utc_iso,
+    'extract_igdb_id': extract_igdb_id,
+    'coerce_igdb_id': coerce_igdb_id,
+    'get_cell': get_cell,
+    'extract_list': extract_list,
+    'load_cover_data': load_cover_data,
+    'get_igdb_prefill_for_id': get_igdb_prefill_for_id,
+})
+
+routes_lookups.configure({
+    'LOOKUP_TABLES': LOOKUP_TABLES,
+    '_format_lookup_label': _format_lookup_label,
+    'LOOKUP_ENDPOINT_MAP': LOOKUP_ENDPOINT_MAP,
+    'LOOKUP_TABLES_BY_NAME': LOOKUP_TABLES_BY_NAME,
+    'LOOKUP_RELATIONS_BY_TABLE': LOOKUP_RELATIONS_BY_TABLE,
+    'db_lock': db_lock,
+    'get_db': get_db,
+    '_row_value': _row_value,
+    '_normalize_lookup_name': _normalize_lookup_name,
+    '_get_or_create_lookup_id': _get_or_create_lookup_id,
+    '_lookup_name_for_id': _lookup_name_for_id,
+    '_fetch_lookup_entries_for_game': _fetch_lookup_entries_for_game,
+    '_lookup_entries_to_selection': _lookup_entries_to_selection,
+    '_persist_lookup_relations': _persist_lookup_relations,
+    '_apply_lookup_entries_to_processed_game': _apply_lookup_entries_to_processed_game,
+    '_remove_lookup_id_from_entries': _remove_lookup_id_from_entries,
+})
+
+routes_updates.configure({
+    'IGDB_BATCH_SIZE': IGDB_BATCH_SIZE,
+    'FIX_NAMES_BATCH_LIMIT': FIX_NAMES_BATCH_LIMIT,
+    'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
+    'db_lock': db_lock,
+    'get_db': get_db,
+    '_get_cached_igdb_total': _get_cached_igdb_total,
+    '_set_cached_igdb_total': _set_cached_igdb_total,
+    'download_igdb_game_count': lambda: download_igdb_game_count,
+    'download_igdb_games': lambda: download_igdb_games,
+    '_upsert_igdb_cache_entries': _upsert_igdb_cache_entries,
+    '_igdb_prefill_lock': _igdb_prefill_lock,
+    '_igdb_prefill_cache': _igdb_prefill_cache,
+    '_execute_refresh_job': _execute_refresh_job,
+    'job_manager': job_manager,
+    '_execute_fix_names_job': _execute_fix_names_job,
+    '_execute_remove_duplicates_job': _execute_remove_duplicates_job,
+    'fetch_cached_updates': fetch_cached_updates,
+    'get_processed_games_columns': get_processed_games_columns,
+    'load_cover_data': load_cover_data,
+    'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
+    '_scan_duplicate_candidates': _scan_duplicate_candidates,
+    '_coerce_int': _coerce_int,
+    '_compute_metadata_updates': _compute_metadata_updates,
+    '_merge_duplicate_resolutions': _merge_duplicate_resolutions,
+    '_remove_processed_games': _remove_processed_games,
+    '_normalize_text': _normalize_text,
+    'DuplicateGroupResolution': DuplicateGroupResolution,
+})
+
+app.register_blueprint(routes_games.games_blueprint)
+app.register_blueprint(routes_lookups.lookups_blueprint)
+app.register_blueprint(routes_updates.updates_blueprint)
 
 if __name__ == '__main__':
     app.run(debug=True)
