@@ -1,6 +1,5 @@
 import os
 import json
-import uuid
 import base64
 import io
 import sqlite3
@@ -9,9 +8,8 @@ import re
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Optional
-from threading import Lock, Thread
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional
+from threading import Lock
 import logging
 from bisect import bisect_left
 
@@ -35,16 +33,50 @@ from urllib.error import HTTPError
 
 # Placeholder imports to establish the upcoming modular structure.
 import config as app_config
+from config import (
+    APP_PASSWORD,
+    APP_SECRET_KEY,
+    COVERS_DIR,
+    IGDB_USER_AGENT,
+    INPUT_XLSX,
+    OPENAI_API_KEY,
+    PROCESSED_DB,
+    PROCESSED_DIR,
+    RUN_DB_MIGRATIONS,
+    SQLITE_TIMEOUT_SECONDS,
+    UPLOAD_DIR,
+    get_lookup_data_dir,
+)
+from helpers import (
+    _collect_company_names,
+    _format_first_release_date,
+    _format_name_list,
+    _normalize_lookup_name,
+    _parse_company_names,
+    _parse_iterable,
+    has_cover_path_value,
+    has_summary_text,
+)
 from db import utils as db_utils
 from igdb import cache as igdb_cache
 from igdb import client as igdb_client
 from igdb import diff as igdb_diff
+from igdb.client import (
+    coerce_igdb_id,
+    cover_url_from_cover,
+    extract_igdb_id,
+    map_igdb_genres,
+    map_igdb_modes,
+    resolve_igdb_page_size,
+)
 from ingestion import data_loader as ingestion_data_loader
+from init import initialize_app
 from jobs import manager as jobs_manager
 from lookups import config as lookups_config
 from lookups import service as lookups_service
 from media import covers as media_covers
 from processed import duplicates as processed_duplicates
+from processed import catalog as processed_catalog
 from processed import navigator as processed_navigator
 from processed import source_index_cache as processed_source_index_cache
 from routes import games as routes_games
@@ -80,43 +112,13 @@ _PLACEHOLDER_IMPORTS = (
 
 logger = logging.getLogger(__name__)
 
-INPUT_XLSX = 'igdb_all_games.xlsx'
-PROCESSED_DB = 'processed_games.db'
-UPLOAD_DIR = 'uploaded_sources'
-PROCESSED_DIR = 'processed_covers'
-COVERS_DIR = 'covers_out'
-
-
-def _coerce_positive_float(value: str | None, default: float) -> float:
-    try:
-        numeric = float(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-    return numeric if numeric > 0 else default
-
-
-SQLITE_TIMEOUT_SECONDS = _coerce_positive_float(
-    os.environ.get('SQLITE_TIMEOUT'), 120.0
-)
-
-
-def _coerce_truthy_env(value: str | None) -> bool:
-    if value is None:
-        return False
-    text = value.strip().lower()
-    return text in {'1', 'true', 'yes', 'on'}
-
-
-RUN_DB_MIGRATIONS = _coerce_truthy_env(os.environ.get('RUN_DB_MIGRATIONS'))
-
-
 def _db_connection_factory() -> sqlite3.Connection:
     return db_utils._create_sqlite_connection(
         PROCESSED_DB, timeout=SQLITE_TIMEOUT_SECONDS
     )
 
-BASE_DIR = Path(__file__).resolve().parent
-LOOKUP_DATA_DIR = Path(os.environ.get('LOOKUP_DATA_DIR', BASE_DIR))
+LOOKUP_DATA_DIR = get_lookup_data_dir()
+
 LOOKUP_TABLES = (
     {
         'table': 'developers',
@@ -222,16 +224,6 @@ LOOKUP_SOURCE_KEYS = {
 }
 
 FIX_NAMES_BATCH_LIMIT = 50
-MAX_BACKGROUND_JOBS = 50
-
-
-# Global catalog state populated during startup and refresh jobs.
-games_df: pd.DataFrame = pd.DataFrame()
-_category_values: set[str] = set()
-categories_list: list[str] = []
-platforms_list: list[str] = []
-total_games: int = 0
-navigator = None
 
 
 def _format_lookup_label(value: str) -> str:
@@ -242,58 +234,13 @@ def _format_lookup_label(value: str) -> str:
     return spaced.strip().title()
 
 
-def has_summary_text(value: Any) -> bool:
-    """Return ``True`` when ``value`` contains non-empty summary text."""
-
-    if value is None:
-        return False
-    if isinstance(value, str):
-        text = value.strip()
-    else:
-        try:
-            if pd.isna(value):
-                return False
-        except Exception:
-            pass
-        text = str(value).strip()
-    if not text:
-        return False
-    if text.lower() == 'nan':
-        return False
-    return True
-
-
-def has_cover_path_value(value: Any) -> bool:
-    """Return ``True`` when ``value`` contains a usable cover path."""
-
-    if value is None:
-        return False
-    if isinstance(value, str):
-        text = value.strip()
-    else:
-        try:
-            if pd.isna(value):
-                return False
-        except Exception:
-            pass
-        text = str(value).strip()
-    if not text:
-        return False
-    if text.lower() == 'nan':
-        return False
-    return True
-
-
 def is_processed_game_done(summary_value: Any, cover_path_value: Any) -> bool:
     """Return ``True`` when a processed row has the required summary and cover."""
 
     return has_summary_text(summary_value) and has_cover_path_value(cover_path_value)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('APP_SECRET_KEY', 'dev-secret')
-APP_PASSWORD = os.environ.get('APP_PASSWORD', 'password')
-DEFAULT_IGDB_USER_AGENT = 'TT-Game-Liste/1.0 (support@example.com)'
-IGDB_USER_AGENT = os.environ.get('IGDB_USER_AGENT') or DEFAULT_IGDB_USER_AGENT
+app.secret_key = APP_SECRET_KEY
 IGDB_BATCH_SIZE = 500
 
 IGDB_CATEGORY_LABELS = {
@@ -317,101 +264,6 @@ IGDB_CATEGORY_LABELS = {
 
 IGDB_CACHE_TABLE = 'igdb_games'
 IGDB_CACHE_STATE_TABLE = 'igdb_cache_state'
-
-
-def _igdb_page_size() -> int:
-    try:
-        size = int(IGDB_BATCH_SIZE)
-    except (TypeError, ValueError):
-        return 500
-    if size <= 0:
-        return 500
-    return min(size, 500)
-
-
-def _dedupe_preserve_order(values: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value).strip()
-        if not text:
-            continue
-        key = text.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(text)
-    return result
-
-
-def _format_name_list(value: Any) -> str:
-    return ', '.join(_dedupe_preserve_order(_parse_iterable(value)))
-
-
-def _collect_company_names(
-    companies: Any, role_key: str
-) -> list[str]:  # pragma: no cover - simple data formatter
-    names: list[str] = []
-    if isinstance(companies, list):
-        for company in companies:
-            if not isinstance(company, Mapping):
-                continue
-            if not company.get(role_key):
-                continue
-            company_obj = company.get('company')
-            name_value: Any = None
-            if isinstance(company_obj, Mapping):
-                name_value = company_obj.get('name')
-            elif isinstance(company_obj, str):
-                name_value = company_obj
-            if not name_value:
-                continue
-            text = str(name_value).strip()
-            if text:
-                names.append(text)
-    return _dedupe_preserve_order(names)
-
-
-def _format_first_release_date(value: Any) -> str:
-    if value in (None, '', 0):
-        return ''
-    try:
-        timestamp = float(value)
-    except (TypeError, ValueError):
-        try:
-            timestamp = float(str(value).strip())
-        except (TypeError, ValueError):
-            return ''
-    if timestamp <= 0:
-        return ''
-    try:
-        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        return ''
-    return dt.date().isoformat()
-
-
-def _cover_url_from_cover(value: Any, size: str = 't_cover_big') -> str:
-    image_id: str | None = None
-    if isinstance(value, Mapping):
-        raw_id = value.get('image_id')
-        if isinstance(raw_id, str):
-            image_id = raw_id.strip()
-        elif raw_id is not None:
-            image_id = str(raw_id).strip()
-    elif isinstance(value, str):
-        image_id = value.strip()
-    elif value is not None:
-        image_id = str(value).strip()
-    if not image_id:
-        return ''
-    size_key = str(size).strip() if size else 't_cover_big'
-    if not size_key:
-        size_key = 't_cover_big'
-    return (
-        'https://images.igdb.com/igdb/image/upload/'
-        f'{size_key}/{image_id}.jpg'
-    )
 
 
 def _igdb_category_display(value: Any) -> str:
@@ -462,452 +314,16 @@ def _read_http_error(exc: HTTPError) -> str:
     return str(exc)
 
 
-def _normalize_translation_key(value: str) -> str:
-    key = str(value).strip().casefold()
-    for old, new in (
-        ('&', ' and '),
-        ('/', ' '),
-        ('-', ' '),
-        ('_', ' '),
-        ("'", ''),
-        (',', ' '),
-        ('.', ' '),
-        ('+', ' '),
-    ):
-        key = key.replace(old, new)
-    for char in '()[]{}':
-        key = key.replace(char, ' ')
-    key = ''.join(ch for ch in key if ch.isalnum() or ch.isspace())
-    return ' '.join(key.split())
-
-
-IGDB_GENRE_TRANSLATIONS: dict[str, tuple[str, ...]] = {
-    _normalize_translation_key('Action'): ('Ação e Aventura',),
-    _normalize_translation_key('Action Adventure'): ('Ação e Aventura',),
-    _normalize_translation_key('Adventure'): ('Ação e Aventura',),
-    _normalize_translation_key('Point-and-click'): ('Ação e Aventura',),
-    _normalize_translation_key('Stealth'): ('Ação e Aventura',),
-    _normalize_translation_key('Survival'): ('Ação e Aventura',),
-    _normalize_translation_key('Platform'): ('Plataformas',),
-    _normalize_translation_key('Platformer'): ('Plataformas',),
-    _normalize_translation_key('Shooter'): ('Tiro',),
-    _normalize_translation_key("Shoot 'em up"): ('Tiro',),
-    _normalize_translation_key('Fighting'): ('Luta',),
-    _normalize_translation_key("Hack and slash/Beat 'em up"): ('Luta',),
-    _normalize_translation_key('Brawler'): ('Luta',),
-    _normalize_translation_key('Racing'): ('Corrida e Voo',),
-    _normalize_translation_key('Driving Racing'): ('Corrida e Voo',),
-    _normalize_translation_key('Flight'): ('Corrida e Voo',),
-    _normalize_translation_key('Simulator'): ('Simulação',),
-    _normalize_translation_key('Simulation'): ('Simulação',),
-    _normalize_translation_key('Strategy'): ('Estratégia',),
-    _normalize_translation_key('Real Time Strategy (RTS)'): ('Estratégia',),
-    _normalize_translation_key('Turn-based strategy (TBS)'): ('Estratégia',),
-    _normalize_translation_key('Tactical'): ('Estratégia',),
-    _normalize_translation_key('MOBA'): ('Multijogador',),
-    _normalize_translation_key('Massively Multiplayer Online (MMO)'): ('Multijogador',),
-    _normalize_translation_key('Battle Royale'): ('Multijogador',),
-    _normalize_translation_key('MMORPG'): ('RPG', 'Multijogador'),
-    _normalize_translation_key('Role-playing (RPG)'): ('RPG',),
-    _normalize_translation_key('Role playing'): ('RPG',),
-    _normalize_translation_key('Roguelike'): ('RPG',),
-    _normalize_translation_key('Roguelite'): ('RPG',),
-    _normalize_translation_key('Puzzle'): ('Quebra-cabeça e Trivia',),
-    _normalize_translation_key('Quiz/Trivia'): ('Quebra-cabeça e Trivia',),
-    _normalize_translation_key('Trivia'): ('Quebra-cabeça e Trivia',),
-    _normalize_translation_key('Card & Board Game'): ('Cartas e Tabuleiro',),
-    _normalize_translation_key('Board game'): ('Cartas e Tabuleiro',),
-    _normalize_translation_key('Tabletop'): ('Cartas e Tabuleiro',),
-    _normalize_translation_key('Family'): ('Família e Crianças',),
-    _normalize_translation_key('Kids'): ('Família e Crianças',),
-    _normalize_translation_key('Educational'): ('Família e Crianças',),
-    _normalize_translation_key('Party'): ('Família e Crianças',),
-    _normalize_translation_key('Music'): ('Família e Crianças',),
-    _normalize_translation_key('Indie'): ('Indie',),
-    _normalize_translation_key('Arcade'): ('Clássicos',),
-    _normalize_translation_key('Pinball'): ('Clássicos',),
-    _normalize_translation_key('Classic'): ('Clássicos',),
-    _normalize_translation_key('Visual Novel'): ('Visual Novel',),
-    _normalize_translation_key('ação e aventura'): ('Ação e Aventura',),
-    _normalize_translation_key('plataformas'): ('Plataformas',),
-    _normalize_translation_key('tiro'): ('Tiro',),
-    _normalize_translation_key('luta'): ('Luta',),
-    _normalize_translation_key('corrida e voo'): ('Corrida e Voo',),
-    _normalize_translation_key('simulação'): ('Simulação',),
-    _normalize_translation_key('estratégia'): ('Estratégia',),
-    _normalize_translation_key('multijogador'): ('Multijogador',),
-    _normalize_translation_key('rpg'): ('RPG',),
-    _normalize_translation_key('quebra-cabeça e trivia'): ('Quebra-cabeça e Trivia',),
-    _normalize_translation_key('cartas e tabuleiro'): ('Cartas e Tabuleiro',),
-    _normalize_translation_key('família e crianças'): ('Família e Crianças',),
-    _normalize_translation_key('indie'): ('Indie',),
-    _normalize_translation_key('clássicos'): ('Clássicos',),
-    _normalize_translation_key('visual novel'): ('Visual Novel',),
-}
-
-
-IGDB_MODE_TRANSLATIONS: dict[str, tuple[str, ...]] = {
-    _normalize_translation_key('Single player'): ('Single-player',),
-    _normalize_translation_key('Single-player'): ('Single-player',),
-    _normalize_translation_key('Singleplayer'): ('Single-player',),
-    _normalize_translation_key('Solo'): ('Single-player',),
-    _normalize_translation_key('Campaign'): ('Single-player',),
-    _normalize_translation_key('Co-operative'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('Cooperative'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('Co-op'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('Co op'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('Local co-op'): ('Cooperativo (Co-op)', 'Multiplayer local'),
-    _normalize_translation_key('Offline co-op'): ('Cooperativo (Co-op)', 'Multiplayer local'),
-    _normalize_translation_key('Online co-op'): ('Cooperativo (Co-op)', 'Multiplayer online'),
-    _normalize_translation_key('Co-op campaign'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('Multiplayer'): ('Multiplayer online',),
-    _normalize_translation_key('Online multiplayer'): ('Multiplayer online',),
-    _normalize_translation_key('Multiplayer online'): ('Multiplayer online',),
-    _normalize_translation_key('Offline multiplayer'): ('Multiplayer local',),
-    _normalize_translation_key('Local multiplayer'): ('Multiplayer local',),
-    _normalize_translation_key('Split screen'): ('Multiplayer local',),
-    _normalize_translation_key('Shared/Split screen'): ('Multiplayer local',),
-    _normalize_translation_key('PvP'): ('Competitivo (PvP)',),
-    _normalize_translation_key('Player vs Player'): ('Competitivo (PvP)',),
-    _normalize_translation_key('Versus'): ('Competitivo (PvP)',),
-    _normalize_translation_key('Competitive'): ('Competitivo (PvP)',),
-    _normalize_translation_key('Battle Royale'): ('Competitivo (PvP)', 'Multiplayer online'),
-    _normalize_translation_key('Massively Multiplayer Online (MMO)'): ('Multiplayer online',),
-    _normalize_translation_key('MMO'): ('Multiplayer online',),
-    _normalize_translation_key('MMORPG'): ('Cooperativo (Co-op)', 'Multiplayer online'),
-    _normalize_translation_key('single-player'): ('Single-player',),
-    _normalize_translation_key('cooperativo (co-op)'): ('Cooperativo (Co-op)',),
-    _normalize_translation_key('multiplayer local'): ('Multiplayer local',),
-    _normalize_translation_key('multiplayer online'): ('Multiplayer online',),
-    _normalize_translation_key('competitivo (pvp)'): ('Competitivo (PvP)',),
-}
 logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
 # Configure OpenAI using API key from environment
-client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY', ''))
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # SQLite setup for processed games
 db_lock = db_utils.db_lock
 
-_source_index_cache_lock = Lock()
-_source_index_by_position: dict[int, str] | None = None
-_position_by_source_index: dict[str, int] | None = None
-_source_index_cache_df_id: int | None = None
-
-
-def _job_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-JOB_STATUS_PENDING = 'pending'
-JOB_STATUS_RUNNING = 'running'
-JOB_STATUS_SUCCESS = 'success'
-JOB_STATUS_ERROR = 'error'
-JOB_ACTIVE_STATUSES = {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
-JOB_TERMINAL_STATUSES = {JOB_STATUS_SUCCESS, JOB_STATUS_ERROR}
-
-
-@dataclass
-class BackgroundJob:
-    id: str
-    job_type: str
-    status: str = JOB_STATUS_PENDING
-    message: str = ''
-    progress_current: int = 0
-    progress_total: int = 0
-    data: dict[str, Any] = field(default_factory=dict)
-    result: dict[str, Any] = field(default_factory=dict)
-    error: Optional[str] = None
-    created_at: str = ''
-    updated_at: str = ''
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
-
-
-class BackgroundJobManager:
-    def __init__(self) -> None:
-        self._jobs: dict[str, BackgroundJob] = {}
-        self._lock = Lock()
-
-    def _serialize_job(self, job: BackgroundJob) -> dict[str, Any]:
-        return {
-            'id': job.id,
-            'job_type': job.job_type,
-            'status': job.status,
-            'message': job.message,
-            'progress_current': job.progress_current,
-            'progress_total': job.progress_total,
-            'data': dict(job.data),
-            'result': dict(job.result),
-            'error': job.error,
-            'created_at': job.created_at,
-            'updated_at': job.updated_at,
-            'started_at': job.started_at,
-            'finished_at': job.finished_at,
-        }
-
-    def _find_active_job_locked(self, job_type: str) -> Optional[BackgroundJob]:
-        for job in self._jobs.values():
-            if job.job_type == job_type and job.status in JOB_ACTIVE_STATUSES:
-                return job
-        return None
-
-    def _prune_jobs_locked(self) -> None:
-        if len(self._jobs) <= MAX_BACKGROUND_JOBS:
-            return
-        removable: list[BackgroundJob] = [
-            job
-            for job in self._jobs.values()
-            if job.status in JOB_TERMINAL_STATUSES
-        ]
-        removable.sort(key=lambda j: j.finished_at or j.updated_at)
-        while len(self._jobs) > MAX_BACKGROUND_JOBS and removable:
-            victim = removable.pop(0)
-            self._jobs.pop(victim.id, None)
-
-    def list_jobs(self, job_type: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            jobs = list(self._jobs.values())
-            if job_type:
-                jobs = [job for job in jobs if job.job_type == job_type]
-            jobs.sort(key=lambda job: job.created_at)
-            return [self._serialize_job(job) for job in jobs]
-
-    def get_job(self, job_id: str) -> Optional[dict[str, Any]]:
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return None
-            return self._serialize_job(job)
-
-    def get_active_job(self, job_type: str) -> Optional[dict[str, Any]]:
-        with self._lock:
-            job = self._find_active_job_locked(job_type)
-            if job is None:
-                return None
-            return self._serialize_job(job)
-
-    def start_job(
-        self,
-        job_type: str,
-        runner: Callable[[Callable[..., None]], Optional[dict[str, Any]]],
-        *,
-        description: str | None = None,
-    ) -> tuple[dict[str, Any], bool]:
-        with self._lock:
-            existing = self._find_active_job_locked(job_type)
-            if existing is not None:
-                return self._serialize_job(existing), False
-            job_id = uuid.uuid4().hex
-            timestamp = _job_timestamp()
-            job = BackgroundJob(
-                id=job_id,
-                job_type=job_type,
-                message=description or '',
-                created_at=timestamp,
-                updated_at=timestamp,
-            )
-            self._jobs[job_id] = job
-            self._prune_jobs_locked()
-
-        thread = Thread(
-            target=self._run_job,
-            args=(job_id, runner),
-            name=f'job-{job_type}-{job_id}',
-            daemon=True,
-        )
-        thread.start()
-        return self.get_job(job_id), True
-
-    def _set_job_running(self, job_id: str) -> None:
-        timestamp = _job_timestamp()
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job.status = JOB_STATUS_RUNNING
-            job.started_at = timestamp
-            job.updated_at = timestamp
-            if not job.message:
-                job.message = 'Running…'
-
-    def _update_job(
-        self,
-        job_id: str,
-        *,
-        progress_current: int | None = None,
-        progress_total: int | None = None,
-        message: str | None = None,
-        data: Optional[Mapping[str, Any]] = None,
-    ) -> None:
-        timestamp = _job_timestamp()
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            if progress_current is not None:
-                job.progress_current = max(int(progress_current), 0)
-            if progress_total is not None:
-                job.progress_total = max(int(progress_total), 0)
-            if message is not None:
-                job.message = str(message)
-            if data:
-                for key, value in data.items():
-                    job.data[key] = value
-            job.updated_at = timestamp
-
-    def _finalize_job(
-        self,
-        job_id: str,
-        status: str,
-        result: Optional[dict[str, Any]] = None,
-        error: Optional[str] = None,
-    ) -> None:
-        timestamp = _job_timestamp()
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
-            job.status = status
-            job.error = error
-            job.result = dict(result or {})
-            job.finished_at = timestamp
-            job.updated_at = timestamp
-
-    def _run_job(
-        self,
-        job_id: str,
-        runner: Callable[[Callable[..., None]], Optional[dict[str, Any]]],
-    ) -> None:
-        def progress_callback(
-            current: int | None = None,
-            total: int | None = None,
-            message: str | None = None,
-            *,
-            data: Optional[Mapping[str, Any]] = None,
-            **extra: Any,
-        ) -> None:
-            merged: dict[str, Any] = {}
-            if data:
-                merged.update(dict(data))
-            if extra:
-                merged.update({k: v for k, v in extra.items() if v is not None})
-            self._update_job(
-                job_id,
-                progress_current=current,
-                progress_total=total,
-                message=message,
-                data=merged or None,
-            )
-
-        self._set_job_running(job_id)
-        try:
-            result = runner(progress_callback)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.exception('Background job %s failed', job_id)
-            self._finalize_job(job_id, JOB_STATUS_ERROR, error=str(exc))
-            return
-        self._finalize_job(job_id, JOB_STATUS_SUCCESS, result=result)
-
-
-job_manager = BackgroundJobManager()
-
-
-def _canonical_source_index(value: Any) -> str | None:
-    """Normalize ``Source Index`` values to a consistent string representation."""
-
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return str(int(text))
-    except (TypeError, ValueError):
-        return text
-
-
-def reset_source_index_cache() -> None:
-    """Clear cached mappings between navigator positions and ``Source Index`` values."""
-
-    global _source_index_by_position, _position_by_source_index, _source_index_cache_df_id
-    with _source_index_cache_lock:
-        _source_index_by_position = None
-        _position_by_source_index = None
-        _source_index_cache_df_id = None
-
-
-def _ensure_source_index_cache() -> tuple[dict[int, str], dict[str, int]]:
-    """Build and return cached lookup tables for ``Source Index`` values."""
-
-    global _source_index_by_position, _position_by_source_index, _source_index_cache_df_id
-
-    df = globals().get('games_df')
-    if df is None:
-        raise RuntimeError('games_df is not loaded')
-
-    with _source_index_cache_lock:
-        df_id = id(df)
-        if (
-            _source_index_by_position is None
-            or _position_by_source_index is None
-            or _source_index_cache_df_id != df_id
-            or len(_source_index_by_position) != len(df)
-        ):
-            mapping: dict[int, str] = {}
-            reverse: dict[str, int] = {}
-            if len(df) > 0:
-                source_values: list[Any] | None = None
-                if 'Source Index' in df.columns:
-                    source_values = df['Source Index'].tolist()
-                for position in range(len(df)):
-                    raw_value: Any
-                    if source_values is not None and position < len(source_values):
-                        raw_value = source_values[position]
-                    else:
-                        raw_value = position
-                    canonical = _canonical_source_index(raw_value)
-                    if canonical is None:
-                        canonical = str(position)
-                    mapping[position] = canonical
-                    reverse.setdefault(canonical, position)
-            _source_index_by_position = mapping
-            _position_by_source_index = reverse
-            _source_index_cache_df_id = df_id
-
-        return _source_index_by_position, _position_by_source_index
-
-
-def get_source_index_for_position(position: int) -> str:
-    """Return the normalized ``Source Index`` string for a DataFrame position."""
-
-    if position < 0:
-        raise IndexError('invalid index')
-    mapping, _ = _ensure_source_index_cache()
-    try:
-        return mapping[position]
-    except KeyError as exc:
-        raise IndexError('invalid index') from exc
-
-
-def get_position_for_source_index(value: Any) -> int | None:
-    """Resolve a ``Source Index`` value back to its DataFrame position."""
-
-    canonical = _canonical_source_index(value)
-    if canonical is None:
-        return None
-    mapping, reverse = _ensure_source_index_cache()
-    position = reverse.get(canonical)
-    if position is not None:
-        return position
-    try:
-        fallback = int(canonical)
-    except (TypeError, ValueError):
-        return None
-    if fallback < 0:
-        return None
-    return fallback
+job_manager = jobs_manager.get_job_manager()
 
 
 def get_db() -> sqlite3.Connection:
@@ -920,113 +336,69 @@ def get_processed_games_columns(conn: sqlite3.Connection | None = None) -> set[s
     )
 
 
+def _navigator_factory() -> processed_navigator.GameNavigator:
+    return processed_navigator.GameNavigator(
+        db_lock=db_lock,
+        get_db=get_db,
+        is_processed_game_done=is_processed_game_done,
+        logger=logger,
+    )
+
+
+catalog_state = processed_catalog.CatalogState(
+    navigator_factory=_navigator_factory,
+    category_labels=IGDB_CATEGORY_LABELS,
+    logger=logger,
+)
+
+
+def _ensure_navigator_dataframe(rebuild_state: bool = False) -> processed_navigator.GameNavigator:
+    """Sync navigator state with the current in-memory games DataFrame."""
+
+    return catalog_state.ensure_navigator_dataframe(rebuild_state=rebuild_state)
+
+
+def reset_source_index_cache() -> None:
+    """Expose navigator cache reset for test helpers and background jobs."""
+
+    catalog_state.reset_source_index_cache()
+
+
+def get_source_index_for_position(position: int) -> str:
+    """Delegate to the navigator instance for ``Source Index`` lookups."""
+
+    navigator = _ensure_navigator_dataframe(rebuild_state=False)
+    return navigator.get_source_index_for_position(position)
+
+
+def get_position_for_source_index(value: Any) -> int | None:
+    """Delegate reverse lookup of ``Source Index`` values to the navigator."""
+
+    navigator = _ensure_navigator_dataframe(rebuild_state=False)
+    return navigator.get_position_for_source_index(value)
+
+
+class GameNavigator(processed_navigator.GameNavigator):
+    """Compatibility wrapper exposing the legacy navigator constructor signature."""
+
+    def __init__(self, total_rows: int):
+        super().__init__(
+            db_lock=db_lock,
+            get_db=get_db,
+            is_processed_game_done=is_processed_game_done,
+            logger=logger,
+        )
+        df = catalog_state.games_df if catalog_state.games_df is not None else pd.DataFrame()
+        self.set_games_df(df, rebuild_state=False)
+        self.total = total_rows
+        self._load_initial()
+
+
 def _quote_identifier(identifier: str) -> str:
     return db_utils._quote_identifier(identifier)
 
 
-def _parse_iterable(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [v.strip() for v in value.split(',') if v.strip()]
-    if isinstance(value, numbers.Number):
-        return [str(value)]
-    items: list[str] = []
-    try:
-        iterator = iter(value)
-    except TypeError:
-        return [str(value)]
-    for element in iterator:
-        if isinstance(element, Mapping):
-            name = element.get('name')
-            if isinstance(name, str) and name.strip():
-                items.append(name.strip())
-            else:
-                items.append(str(element).strip())
-        else:
-            items.append(str(element).strip())
-    return [item for item in items if item]
 
-
-def _map_igdb_values(
-    names: Iterable[str], translations: Mapping[str, tuple[str, ...]]
-) -> list[str]:
-    results: list[str] = []
-    seen: set[str] = set()
-    for raw_name in names:
-        normalized = _normalize_lookup_name(raw_name)
-        if not normalized:
-            continue
-        key = _normalize_translation_key(normalized)
-        mapped = translations.get(key)
-        if not mapped:
-            mapped = (normalized,)
-        for candidate in mapped:
-            final = _normalize_lookup_name(candidate)
-            if not final:
-                continue
-            dedupe_key = final.casefold()
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            results.append(final)
-    return results
-
-
-def _map_igdb_genres(names: Iterable[str]) -> list[str]:
-    return _map_igdb_values(names, IGDB_GENRE_TRANSLATIONS)
-
-
-def _map_igdb_modes(names: Iterable[str]) -> list[str]:
-    return _map_igdb_values(names, IGDB_MODE_TRANSLATIONS)
-
-
-def _parse_company_names(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        cleaned = value.strip()
-        return [cleaned] if cleaned else []
-    if isinstance(value, numbers.Number):
-        return [str(value)]
-    names: list[str] = []
-    try:
-        iterator = iter(value)
-    except TypeError:
-        text = str(value).strip()
-        return [text] if text else []
-    for element in iterator:
-        name_value: Any = None
-        if isinstance(element, Mapping):
-            if isinstance(element.get('name'), str):
-                name_value = element['name']
-            else:
-                company_obj = element.get('company')
-                if isinstance(company_obj, Mapping) and isinstance(
-                    company_obj.get('name'), str
-                ):
-                    name_value = company_obj['name']
-                elif isinstance(company_obj, str):
-                    name_value = company_obj
-        else:
-            name_value = element
-        text = _normalize_lookup_name(name_value)
-        if text:
-            names.append(text)
-    return names
-
-
-def _normalize_lookup_name(value: Any) -> str:
-    if value is None:
-        return ''
-    if isinstance(value, str):
-        return value.strip()
-    try:
-        if pd.isna(value):
-            return ''
-    except Exception:
-        pass
-    return str(value).strip()
 
 
 def _row_value(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> Any:
@@ -1547,79 +919,23 @@ def _ensure_lookup_id_columns(conn: sqlite3.Connection) -> None:
         _backfill_lookup_id_columns(conn)
 
 
-def _replace_lookup_relations(
-    conn: sqlite3.Connection,
-    join_table: str,
-    join_column: str,
-    processed_game_id: int,
-    lookup_ids: list[int],
-) -> None:
-    try:
-        conn.execute(
-            f'DELETE FROM {join_table} WHERE processed_game_id = ?',
-            (processed_game_id,),
-        )
-    except sqlite3.OperationalError:
-        return
-    to_insert: list[tuple[int, int]] = []
-    for value in lookup_ids:
-        try:
-            coerced = int(value)
-        except (TypeError, ValueError):
-            continue
-        to_insert.append((processed_game_id, coerced))
-    if not to_insert:
-        return
-    try:
-        conn.executemany(
-            f'INSERT OR IGNORE INTO {join_table} '
-            f'(processed_game_id, {join_column}) VALUES (?, ?)',
-            to_insert,
-        )
-    except sqlite3.OperationalError:
-        return
-
-
 def _persist_lookup_relations(
     conn: sqlite3.Connection,
     processed_game_id: int,
     selections: Mapping[str, Mapping[str, Any]] | Mapping[str, Any],
 ) -> None:
-    for relation in LOOKUP_RELATIONS:
-        response_key = relation['response_key']
-        join_table = relation['join_table']
-        join_column = relation['join_column']
-        ids: list[int] = []
-        selection: Any = None
-        if isinstance(selections, Mapping):
-            selection = selections.get(response_key)
-        if isinstance(selection, Mapping):
-            raw_ids = selection.get('ids')
-            if isinstance(raw_ids, (list, tuple)):
-                ids = [value for value in raw_ids if value is not None]
-        _replace_lookup_relations(conn, join_table, join_column, processed_game_id, ids)
+    lookups_service.persist_relations(
+        conn,
+        processed_game_id,
+        selections,
+        LOOKUP_RELATIONS,
+    )
 
 
 def _lookup_entries_to_selection(
     entries: Mapping[str, list[dict[str, Any]]]
 ) -> dict[str, dict[str, list[int]]]:
-    payload: dict[str, dict[str, list[int]]] = {}
-    for relation in LOOKUP_RELATIONS:
-        response_key = relation['response_key']
-        relation_entries = entries.get(response_key, [])
-        ids: list[int] = []
-        for entry in relation_entries:
-            if not isinstance(entry, Mapping):
-                continue
-            entry_id = entry.get('id')
-            if entry_id is None:
-                continue
-            try:
-                ids.append(int(entry_id))
-            except (TypeError, ValueError):
-                continue
-        payload[response_key] = {'ids': ids}
-    return payload
+    return lookups_service.lookup_entries_to_selection(entries, LOOKUP_RELATIONS)
 
 
 def _apply_lookup_entries_to_processed_game(
@@ -1627,160 +943,36 @@ def _apply_lookup_entries_to_processed_game(
     processed_game_id: int,
     entries: Mapping[str, list[dict[str, Any]]],
 ) -> None:
-    columns = get_processed_games_columns(conn)
-    set_fragments: list[str] = []
-    params: list[Any] = []
-    for relation in LOOKUP_RELATIONS:
-        response_key = relation['response_key']
-        processed_column = relation['processed_column']
-        id_column = relation.get('id_column')
-        relation_entries = entries.get(response_key, [])
-        if processed_column in columns:
-            names: list[str] = []
-            for entry in relation_entries:
-                if not isinstance(entry, Mapping):
-                    continue
-                normalized = _normalize_lookup_name(entry.get('name'))
-                if normalized:
-                    names.append(normalized)
-            set_fragments.append(f'{_quote_identifier(processed_column)} = ?')
-            params.append(_lookup_display_text(names))
-        if id_column and id_column in columns:
-            ids: list[int] = []
-            for entry in relation_entries:
-                if not isinstance(entry, Mapping):
-                    continue
-                entry_id = entry.get('id')
-                if entry_id is None:
-                    continue
-                try:
-                    ids.append(int(entry_id))
-                except (TypeError, ValueError):
-                    continue
-            set_fragments.append(f'{_quote_identifier(id_column)} = ?')
-            params.append(_encode_lookup_id_list(ids))
-    if not set_fragments:
-        return
-    params.append(processed_game_id)
-    conn.execute(
-        f'UPDATE processed_games SET {", ".join(set_fragments)} WHERE "ID" = ?',
-        params,
+    lookups_service.apply_relations_to_game(
+        conn,
+        processed_game_id,
+        entries,
+        LOOKUP_RELATIONS,
+        normalize_lookup_name=_normalize_lookup_name,
+        encode_lookup_id_list=_encode_lookup_id_list,
+        lookup_display_text=_lookup_display_text,
+        columns=get_processed_games_columns(conn),
     )
 
 
 def _remove_lookup_id_from_entries(
-    entries: Mapping[str, list[dict[str, Any]]],
+    entries: MutableMapping[str, list[dict[str, Any]]],
     relation: Mapping[str, Any],
     lookup_id: int,
 ) -> None:
-    response_key = relation['response_key']
-    relation_entries = list(entries.get(response_key, []) or [])
-    filtered: list[dict[str, Any]] = []
-    for entry in relation_entries:
-        if not isinstance(entry, Mapping):
-            continue
-        entry_id = entry.get('id')
-        try:
-            coerced = int(entry_id) if entry_id is not None else None
-        except (TypeError, ValueError):
-            coerced = None
-        if coerced == lookup_id:
-            continue
-        filtered.append(entry)
-    entries[response_key] = filtered
+    lookups_service.remove_lookup_id_from_entries(entries, relation, lookup_id)
 
 
 def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
-    try:
-        cur = conn.execute('SELECT * FROM processed_games')
-    except sqlite3.OperationalError:
-        return
-
-    rows = cur.fetchall()
-    column_names = [desc[0] for desc in cur.description] if cur.description else []
-
-    for row in rows:
-        if isinstance(row, sqlite3.Row):
-            row_dict = dict(row)
-        else:
-            row_dict = {
-                column_names[idx]: value
-                for idx, value in enumerate(row)
-                if idx < len(column_names)
-            }
-        try:
-            game_id = int(row_dict.get('ID'))
-        except (TypeError, ValueError):
-            continue
-
-        for relation in LOOKUP_RELATIONS:
-            lookup_table = relation['lookup_table']
-            processed_column = relation['processed_column']
-            join_table = relation['join_table']
-            join_column = relation['join_column']
-            id_column = relation.get('id_column')
-
-            existing_ids: list[int] = []
-            try:
-                cur_existing = conn.execute(
-                    f'SELECT {join_column} FROM {join_table} '
-                    'WHERE processed_game_id = ? ORDER BY rowid',
-                    (game_id,),
-                )
-            except sqlite3.OperationalError:
-                existing_ids = []
-            else:
-                for existing_row in cur_existing.fetchall():
-                    try:
-                        existing_id = int(
-                            _row_value(existing_row, join_column, 0)
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    existing_ids.append(existing_id)
-
-            candidate_ids: list[int] = list(existing_ids)
-            if not candidate_ids and id_column in row_dict:
-                candidate_ids.extend(
-                    _decode_lookup_id_list(row_dict.get(id_column))
-                )
-            if not candidate_ids:
-                raw_value = row_dict.get(processed_column)
-                names = _parse_iterable(raw_value)
-                seen_names: set[str] = set()
-                for name in names:
-                    normalized = _normalize_lookup_name(name)
-                    if not normalized:
-                        continue
-                    fingerprint = normalized.casefold()
-                    if fingerprint in seen_names:
-                        continue
-                    seen_names.add(fingerprint)
-                    lookup_id = _get_or_create_lookup_id(
-                        conn, lookup_table, normalized
-                    )
-                    if lookup_id is None:
-                        continue
-                    candidate_ids.append(int(lookup_id))
-
-            deduped_ids: list[int] = []
-            seen_ids: set[int] = set()
-            for value in candidate_ids:
-                try:
-                    coerced = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if coerced in seen_ids:
-                    continue
-                seen_ids.add(coerced)
-                deduped_ids.append(coerced)
-
-            if existing_ids and deduped_ids == existing_ids:
-                continue
-
-            _replace_lookup_relations(
-                conn, join_table, join_column, game_id, deduped_ids
-            )
+    lookups_service.backfill_relations(
+        conn,
+        LOOKUP_RELATIONS,
+        normalize_lookup_name=_normalize_lookup_name,
+        parse_iterable=_parse_iterable,
+        get_or_create_lookup_id=_get_or_create_lookup_id,
+        decode_lookup_id_list=_decode_lookup_id_list,
+        row_value=_row_value,
+    )
 
 
 def _migrate_id_column(conn: sqlite3.Connection) -> None:
@@ -2154,11 +1346,6 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
         conn.close()
 
 
-_init_db(run_migrations=RUN_DB_MIGRATIONS)
-
-# Expose a module-level connection for tests and utilities
-db = _db_connection_factory()
-db_utils.set_fallback_connection(db)
 
 @app.teardown_appcontext
 def close_db(exc):
@@ -2341,7 +1528,7 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
                     'Genres': ', '.join(genres),
                     'Game Modes': ', '.join(game_modes),
                     'Platforms': ', '.join(platforms),
-                    'Large Cover Image (URL)': _cover_url_from_cover(
+                    'Large Cover Image (URL)': cover_url_from_cover(
                         cover_value, size='t_original'
                     ),
                     'Rating Count': rating_value,
@@ -2365,7 +1552,7 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
             )
             return pd.DataFrame(columns=columns)
 
-        page_size = _igdb_page_size()
+        page_size = resolve_igdb_page_size(IGDB_BATCH_SIZE)
         offset = 0
         raw_items: list[Mapping[str, Any]] = []
 
@@ -2444,7 +1631,7 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
             genres = _format_name_list(item.get('genres'))
             game_modes = _format_name_list(item.get('game_modes'))
             platforms = _format_name_list(item.get('platforms'))
-            cover_url = _cover_url_from_cover(item.get('cover'))
+            cover_url = cover_url_from_cover(item.get('cover'))
             rating_count = _coerce_rating_count(
                 item.get('total_rating_count'), item.get('rating_count')
             )
@@ -2595,9 +1782,8 @@ def normalize_processed_games() -> None:
 def seed_processed_games_from_source() -> None:
     """Ensure ``processed_games`` has a seeded row for each IGDB source entry."""
 
-    if 'games_df' not in globals():
-        return
-    if games_df.empty:
+    games_df = catalog_state.games_df
+    if games_df is None or games_df.empty:
         return
 
     def _normalize_name(value: Any) -> str:
@@ -2616,7 +1802,7 @@ def seed_processed_games_from_source() -> None:
         return text
 
     def _coerce_source_index(value: Any) -> str | None:
-        return _canonical_source_index(value)
+        return processed_navigator.GameNavigator.canonical_source_index(value)
 
     with db_lock:
         conn = get_db()
@@ -2673,7 +1859,11 @@ def seed_processed_games_from_source() -> None:
                 if name_values is not None and position < len(name_values):
                     name_value = name_values[position]
                 else:
-                    name_value = games_df.iloc[position].get('Name') if position < row_count else None
+                    name_value = (
+                        games_df.iloc[position].get('Name')
+                        if position < row_count
+                        else None
+                    )
                 igdb_name = _normalize_name(name_value)
                 stored_name: str | None = igdb_name if igdb_name else None
 
@@ -2704,9 +1894,8 @@ def seed_processed_games_from_source() -> None:
 
 
 def backfill_igdb_ids() -> None:
-    if 'games_df' not in globals():
-        return
-    if games_df.empty:
+    games_df = catalog_state.games_df
+    if games_df is None or games_df.empty:
         return
     with db_lock:
         conn = get_db()
@@ -3221,13 +2410,13 @@ def _igdb_metadata_to_source_values(
         overlay['Publishers'] = ', '.join(publishers)
 
     genre_names = _dedupe_normalized_names(
-        _map_igdb_genres(_parse_iterable(metadata.get('genres')))
+        map_igdb_genres(_parse_iterable(metadata.get('genres')))
     )
     if genre_names:
         overlay['Genres'] = ', '.join(genre_names)
 
     mode_names = _dedupe_normalized_names(
-        _map_igdb_modes(_parse_iterable(metadata.get('game_modes')))
+        map_igdb_modes(_parse_iterable(metadata.get('game_modes')))
     )
     if mode_names:
         overlay['Game Modes'] = ', '.join(mode_names)
@@ -3236,7 +2425,7 @@ def _igdb_metadata_to_source_values(
     if platform_names:
         overlay['Platforms'] = ', '.join(platform_names)
 
-    cover_url = _cover_url_from_cover(metadata.get('cover'), size='t_original')
+    cover_url = cover_url_from_cover(metadata.get('cover'), size='t_original')
     if cover_url:
         overlay['Large Cover Image (URL)'] = cover_url
 
@@ -3366,9 +2555,9 @@ def build_igdb_diff(
         if field_type == 'list':
             remote_items = _parse_iterable(remote_value)
             if local_field == 'Genres':
-                remote_items = _map_igdb_genres(remote_items)
+                remote_items = map_igdb_genres(remote_items)
             elif local_field == 'Game Modes':
-                remote_items = _map_igdb_modes(remote_items)
+                remote_items = map_igdb_modes(remote_items)
             remote_set = set(remote_items)
             local_set = set(
                 _extract_lookup_names_from_processed(processed_row, local_field)
@@ -3409,209 +2598,7 @@ def build_igdb_diff(
     return diff
 
 
-class GameNavigator:
-    """Thread-safe helper to navigate game list and track progress."""
 
-    def __init__(self, total_rows: int):
-        self.lock = Lock()
-        self.total = total_rows
-        self.current_index = 0
-        self.seq_index = 1
-        self.processed_total = 0
-        self.skip_queue: list[dict[str, int]] = []
-        self._load_initial()
-
-    def _load_initial(self) -> None:
-        with db_lock:
-            conn = get_db()
-            cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
-            state_row = cur.fetchone()
-            cur = conn.execute(
-                'SELECT "Source Index", "ID", "Summary", "Cover Path" FROM processed_games'
-            )
-            rows = cur.fetchall()
-        processed: set[int] = set()
-        max_seq = 0
-        for row in rows:
-            position = get_position_for_source_index(row['Source Index'])
-            if position is not None and 0 <= position < self.total:
-                try:
-                    summary_value = row['Summary']
-                except (KeyError, IndexError, TypeError):
-                    summary_value = None
-                try:
-                    cover_value = row['Cover Path']
-                except (KeyError, IndexError, TypeError):
-                    cover_value = None
-                if is_processed_game_done(summary_value, cover_value):
-                    processed.add(position)
-            try:
-                row_id = int(row['ID'])
-            except (TypeError, ValueError):
-                row_id = None
-            if row_id is not None and row_id > max_seq:
-                max_seq = row_id
-        next_index = next((i for i in range(self.total) if i not in processed), self.total)
-        expected_seq = max_seq + 1 if max_seq > 0 else 1
-        self.processed_total = len(processed)
-        if state_row is not None:
-            try:
-                file_current = int(state_row['current_index'])
-                file_seq = int(state_row['seq_index'])
-                file_skip = json.loads(state_row['skip_queue'] or '[]')
-                if file_current == next_index and file_seq == expected_seq:
-                    self.current_index = file_current
-                    self.seq_index = file_seq
-                    self.skip_queue = file_skip
-                    logger.debug(
-                        "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
-                        self.current_index,
-                        self.seq_index,
-                        self.skip_queue,
-                    )
-                    return
-                logger.warning("Navigator state out of sync with database; rebuilding")
-            except Exception as e:
-                logger.warning("Failed to load navigator state: %s", e)
-        self.current_index = next_index
-        self.seq_index = expected_seq
-        self.skip_queue = []
-        logger.debug(
-            "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
-            self.current_index,
-            self.seq_index,
-            self.skip_queue,
-        )
-        self._save()
-
-    def _load(self) -> None:
-        with db_lock:
-            conn = get_db()
-            cur = conn.execute('SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1')
-            state_row = cur.fetchone()
-            cur = conn.execute(
-                'SELECT "Summary", "Cover Path" FROM processed_games'
-            )
-            rows = cur.fetchall()
-        processed_total = 0
-        for row in rows:
-            try:
-                summary_value = row['Summary']
-            except (KeyError, IndexError, TypeError):
-                summary_value = None
-            try:
-                cover_value = row['Cover Path']
-            except (KeyError, IndexError, TypeError):
-                cover_value = None
-            if is_processed_game_done(summary_value, cover_value):
-                processed_total += 1
-        self.processed_total = max(processed_total, 0)
-        if state_row is not None:
-            try:
-                self.current_index = int(state_row['current_index'])
-                self.seq_index = int(state_row['seq_index'])
-                self.skip_queue = json.loads(state_row['skip_queue'] or '[]')
-                logger.debug(
-                    "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
-                    self.current_index,
-                    self.seq_index,
-                    self.skip_queue,
-                )
-                return
-            except Exception as e:
-                logger.warning("Failed to load navigator state: %s", e)
-        # fallback: rebuild from processed_games
-        self._load_initial()
-
-    def _save(self) -> None:
-        try:
-            with db_lock:
-                conn = get_db()
-                conn.execute(
-                    'REPLACE INTO navigator_state (id, current_index, seq_index, skip_queue) VALUES (1, ?, ?, ?)',
-                    (
-                        self.current_index,
-                        self.seq_index,
-                        json.dumps(self.skip_queue),
-                    ),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.warning("Failed to save navigator state: %s", e)
-
-    def _process_skip_queue(self) -> None:
-        logger.debug(
-            "Processing skip queue: index=%s queue=%s",
-            self.current_index,
-            self.skip_queue,
-        )
-        for item in self.skip_queue:
-            item['countdown'] -= 1
-        for i, item in enumerate(self.skip_queue):
-            if item['countdown'] <= 0:
-                old_index = self.current_index
-                self.current_index = item['index']
-                del self.skip_queue[i]
-                logger.debug(
-                    "Skip queue hit: index from %s to %s",
-                    old_index,
-                    self.current_index,
-                )
-                break
-        logger.debug(
-            "After processing skip queue: index=%s queue=%s",
-            self.current_index,
-            self.skip_queue,
-        )
-
-    def current(self) -> int:
-        with self.lock:
-            self._load()
-            self._process_skip_queue()
-            self._save()
-            return self.current_index
-
-    def next(self) -> int:
-        with self.lock:
-            self._load()
-            before = self.current_index
-            logger.debug("next() before skip queue: index=%s", before)
-            self._process_skip_queue()
-            logger.debug("next() after skip queue: index=%s", self.current_index)
-            if self.current_index < self.total:
-                self.current_index += 1
-            logger.debug("next() after increment: index=%s", self.current_index)
-            self._save()
-            return self.current_index
-
-    def back(self) -> int:
-        with self.lock:
-            self._load()
-            before = self.current_index
-            logger.debug("back() before skip queue: index=%s", before)
-            self._process_skip_queue()
-            logger.debug("back() after skip queue: index=%s", self.current_index)
-            if self.current_index > 0:
-                self.current_index -= 1
-            logger.debug("back() after decrement: index=%s", self.current_index)
-            self._save()
-            return self.current_index
-
-    def skip(self, index: int) -> None:
-        with self.lock:
-            self._load()
-            self.skip_queue = [s for s in self.skip_queue if s['index'] != index]
-            self.skip_queue.append({'index': index, 'countdown': 30})
-            if index == self.current_index:
-                self.current_index += 1
-            self._save()
-
-    def set_index(self, index: int) -> None:
-        with self.lock:
-            self._load()
-            if 0 <= index <= self.total:
-                self.current_index = index
-            self._save()
 
 
 def _set_games_dataframe(
@@ -3620,45 +2607,14 @@ def _set_games_dataframe(
     rebuild_metadata: bool = True,
     rebuild_navigator: bool = True,
 ) -> None:
-    global games_df, total_games, categories_list, platforms_list, _category_values, navigator
-
-    if df is None:
-        df = pd.DataFrame()
-
-    games_df = df
-    total_games = len(df)
-
-    if rebuild_metadata:
-        category_values: set[str] = set()
-        if not df.empty and 'Category' in df.columns:
-            for raw_category in df['Category'].dropna():
-                text = str(raw_category).strip()
-                if text:
-                    category_values.add(text)
-        category_values.update(
-            label for label in IGDB_CATEGORY_LABELS.values() if label
+    try:
+        catalog_state.set_games_dataframe(
+            df,
+            rebuild_metadata=rebuild_metadata,
+            rebuild_navigator=rebuild_navigator,
         )
-        _category_values = category_values
-        categories_list = sorted(category_values, key=str.casefold)
-
-        platform_values: set[str] = set()
-        if not df.empty and 'Platforms' in df.columns:
-            for raw_platforms in df['Platforms'].dropna():
-                for entry in str(raw_platforms).split(','):
-                    text = entry.strip()
-                    if text:
-                        platform_values.add(text)
-        platforms_list = sorted(platform_values, key=str.casefold)
-
-    if rebuild_navigator:
-        previous_navigator = navigator
-        try:
-            navigator = GameNavigator(total_games)
-        except Exception:
-            logger.exception('Failed to rebuild navigator state')
-            navigator = previous_navigator
-
-    reset_source_index_cache()
+    except Exception:
+        logger.exception('Failed to rebuild navigator state')
 
 
 def refresh_processed_games_from_cache() -> None:
@@ -3697,54 +2653,6 @@ def extract_list(row: pd.Series, keys: list[str]) -> list[str]:
     return []
 
 
-def _normalize_column_name(name: str) -> str:
-    return ''.join(ch.lower() for ch in str(name) if ch.isalnum())
-
-
-def coerce_igdb_id(value: Any) -> str:
-    if value is None:
-        return ''
-    try:
-        if pd.isna(value):
-            return ''
-    except Exception:
-        pass
-    if isinstance(value, str):
-        text = value.strip()
-        if not text or text.lower() == 'nan':
-            return ''
-        if text.endswith('.0') and text[:-2].isdigit():
-            return text[:-2]
-        return text
-    if isinstance(value, numbers.Integral):
-        return str(int(value))
-    if isinstance(value, numbers.Real):
-        if float(value).is_integer():
-            return str(int(value))
-        return str(value)
-    text = str(value).strip()
-    if not text or text.lower() == 'nan':
-        return ''
-    return text
-
-
-def extract_igdb_id(row: pd.Series, allow_generic_id: bool = False) -> str:
-    for key in row.index:
-        normalized = _normalize_column_name(key)
-        if 'igdb' in normalized and 'id' in normalized:
-            value = coerce_igdb_id(row.get(key))
-            if value:
-                return value
-    if allow_generic_id:
-        for key in row.index:
-            key_str = str(key)
-            if key_str.lower() == 'id':
-                value = coerce_igdb_id(row.get(key))
-                if value:
-                    return value
-    return ''
-
-
 def get_cell(row: pd.Series, key: str, missing: list[str]) -> str:
     """Return the cell value or an empty string if missing, tracking missing fields."""
     val = row.get(key, '')
@@ -3758,7 +2666,7 @@ def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
     if not game_name:
         raise ValueError("game_name is required")
-    if not os.environ.get('OPENAI_API_KEY'):
+    if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY not set")
     response = client.chat.completions.create(
         model='gpt-3.5-turbo',
@@ -3784,48 +2692,18 @@ def generate_pt_summary(game_name: str) -> str:
 
 
 # initial load
-ensure_dirs()
-_set_games_dataframe(load_games(), rebuild_metadata=True, rebuild_navigator=True)
-
-@app.before_request
-def require_login():
-    if request.endpoint in ('login', 'static'):
-        return
-    if not session.get('authenticated'):
-        return redirect(url_for('login'))
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    error = None
-    if request.method == 'POST':
-        if request.form.get('password') == APP_PASSWORD:
-            session['authenticated'] = True
-            return redirect(url_for('index'))
-        error = 'Invalid password'
-    return render_template('login.html', error=error)
-
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect(url_for('login'))
-
-@app.route('/')
-def index():
-    return render_template(
-        'index.html',
-        total=total_games,
-        categories=categories_list,
-        platforms=platforms_list,
-    )
-
-
-
-
-
-
-
+db = initialize_app(
+    ensure_dirs=ensure_dirs,
+    init_db=_init_db,
+    load_games=load_games,
+    set_games_dataframe=_set_games_dataframe,
+    connection_factory=_db_connection_factory,
+    run_migrations=RUN_DB_MIGRATIONS,
+)
 
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
+    games_df = catalog_state.games_df
+    total_games = catalog_state.total_games
     try:
         row = games_df.iloc[index]
         source_index = get_source_index_for_position(index)
@@ -4246,12 +3124,13 @@ def _merge_duplicate_resolutions(
 
 
 def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
-    global games_df, total_games, navigator
+    games_df = catalog_state.games_df
 
-    unique_ids = sorted({int(game_id) for game_id in ids_to_delete if str(game_id).strip()})
+    unique_ids = sorted(
+        {int(game_id) for game_id in ids_to_delete if str(game_id).strip()}
+    )
     if not unique_ids:
-        remaining_total = len(games_df) if games_df is not None else total_games
-        return 0, remaining_total
+        return 0, len(games_df)
 
     placeholders = ','.join('?' for _ in unique_ids)
     with db_lock:
@@ -4263,8 +3142,7 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
         rows = cur.fetchall()
 
     if not rows:
-        remaining_total = len(games_df) if games_df is not None else total_games
-        return 0, remaining_total
+        return 0, len(games_df)
 
     delete_params = [(row['ID'],) for row in rows]
     raw_source_indices = [row['Source Index'] for row in rows if row['Source Index'] is not None]
@@ -4283,7 +3161,7 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
 
     canonical_indices: set[str] = set()
     for value in raw_source_indices:
-        canonical = _canonical_source_index(value)
+        canonical = processed_navigator.GameNavigator.canonical_source_index(value)
         if canonical is not None:
             canonical_indices.add(canonical)
 
@@ -4295,48 +3173,42 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
     for value in raw_source_indices:
         position = get_position_for_source_index(value)
         if position is None:
-            canonical = _canonical_source_index(value)
+            canonical = processed_navigator.GameNavigator.canonical_source_index(value)
             if canonical is not None and canonical != value:
                 position = get_position_for_source_index(canonical)
         if position is not None:
             positions_to_remove.add(position)
 
-    if games_df is not None:
-        if not games_df.empty and positions_to_remove:
-            drop_indices = sorted(positions_to_remove)
-            games_df = games_df.drop(games_df.index[drop_indices]).reset_index(drop=True)
-        if not games_df.empty:
-            if 'Source Index' in games_df.columns:
-                current_values = games_df['Source Index'].tolist()
-            else:
-                current_values = [str(idx) for idx in range(len(games_df))]
-            new_values: list[str] = []
-            for idx, value in enumerate(current_values):
-                canonical = _canonical_source_index(value)
-                if canonical is None:
-                    new_values.append(str(idx))
-                    continue
-                if canonical.isdigit():
-                    numeric_value = int(canonical)
-                    shift = bisect_left(removed_numeric, numeric_value)
-                    new_numeric = numeric_value - shift
-                    stripped = str(value).strip()
-                    if stripped.isdigit():
-                        formatted = str(new_numeric).zfill(len(stripped))
-                    else:
-                        formatted = str(new_numeric)
-                    new_values.append(formatted)
+    updated_df = games_df
+    if not updated_df.empty and positions_to_remove:
+        drop_indices = sorted(positions_to_remove)
+        updated_df = updated_df.drop(updated_df.index[drop_indices]).reset_index(drop=True)
+
+    if not updated_df.empty:
+        if 'Source Index' in updated_df.columns:
+            current_values = updated_df['Source Index'].tolist()
+        else:
+            current_values = [str(idx) for idx in range(len(updated_df))]
+        new_values: list[str] = []
+        for idx, value in enumerate(current_values):
+            canonical = processed_navigator.GameNavigator.canonical_source_index(value)
+            if canonical is None:
+                new_values.append(str(idx))
+                continue
+            if canonical.isdigit():
+                numeric_value = int(canonical)
+                shift = bisect_left(removed_numeric, numeric_value)
+                new_numeric = numeric_value - shift
+                stripped = str(value).strip()
+                if stripped.isdigit():
+                    formatted = str(new_numeric).zfill(len(stripped))
                 else:
-                    new_values.append(canonical)
-            games_df = games_df.copy()
-            games_df['Source Index'] = new_values
-        total_games = len(games_df)
-        try:
-            reset_source_index_cache()
-        except Exception:
-            pass
-    else:
-        total_games = 0
+                    formatted = str(new_numeric)
+                new_values.append(formatted)
+            else:
+                new_values.append(canonical)
+        updated_df = updated_df.copy()
+        updated_df['Source Index'] = new_values
 
     if removed_numeric:
         with db_lock:
@@ -4347,7 +3219,9 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
                 )
                 stored_rows = cur.fetchall()
                 for entry in stored_rows:
-                    canonical = _canonical_source_index(entry['Source Index'])
+                    canonical = processed_navigator.GameNavigator.canonical_source_index(
+                        entry['Source Index']
+                    )
                     if canonical is None or not canonical.isdigit():
                         continue
                     numeric_value = int(canonical)
@@ -4369,11 +3243,15 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
     normalize_processed_games()
 
     try:
-        navigator = GameNavigator(total_games)
+        catalog_state.set_games_dataframe(
+            updated_df,
+            rebuild_metadata=False,
+            rebuild_navigator=True,
+        )
     except Exception:
         pass
 
-    remaining_total = total_games
+    remaining_total = catalog_state.total_games
     removed_count = len(delete_params)
     return removed_count, remaining_total
 
@@ -4962,7 +3840,7 @@ def _execute_fix_names_job(
 
 
 def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
-    global games_df, total_games, navigator
+    games_df = catalog_state.games_df
 
     update_progress(message='Scanning for duplicates…', data={'phase': 'dedupe'}, current=0, total=0)
 
@@ -5009,7 +3887,7 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
     ids_to_delete = _merge_duplicate_resolutions(resolutions)
 
     if not ids_to_delete:
-        remaining_total = len(games_df) if games_df is not None else total_games
+        remaining_total = catalog_state.total_games
         message = (
             'No removable duplicates found.'
             if duplicate_groups
@@ -5094,87 +3972,114 @@ def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict
 
 
 
-routes_games.configure({
-    'navigator': navigator,
-    'get_navigator': lambda: navigator,
-    'get_total_games': lambda: total_games,
-    'get_games_df': lambda: games_df,
-    'build_game_payload': build_game_payload,
-    'generate_pt_summary': generate_pt_summary,
-    'open_image_auto_rotate': open_image_auto_rotate,
-    'upload_dir': UPLOAD_DIR,
-    'processed_dir': PROCESSED_DIR,
-    'db_lock': db_lock,
-    'get_db': get_db,
-    'get_source_index_for_position': get_source_index_for_position,
-    'get_position_for_source_index': get_position_for_source_index,
-    'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
-    '_resolve_lookup_selection': _resolve_lookup_selection,
-    '_lookup_display_text': _lookup_display_text,
-    '_encode_lookup_id_list': _encode_lookup_id_list,
-    '_persist_lookup_relations': _persist_lookup_relations,
-    'is_processed_game_done': is_processed_game_done,
-    'now_utc_iso': now_utc_iso,
-    'extract_igdb_id': extract_igdb_id,
-    'coerce_igdb_id': coerce_igdb_id,
-    'get_cell': get_cell,
-    'extract_list': extract_list,
-    'load_cover_data': load_cover_data,
-    'get_igdb_prefill_for_id': get_igdb_prefill_for_id,
-})
+_blueprints_configured = False
 
-routes_lookups.configure({
-    'LOOKUP_TABLES': LOOKUP_TABLES,
-    '_format_lookup_label': _format_lookup_label,
-    'LOOKUP_ENDPOINT_MAP': LOOKUP_ENDPOINT_MAP,
-    'LOOKUP_TABLES_BY_NAME': LOOKUP_TABLES_BY_NAME,
-    'LOOKUP_RELATIONS_BY_TABLE': LOOKUP_RELATIONS_BY_TABLE,
-    'db_lock': db_lock,
-    'get_db': get_db,
-    '_row_value': _row_value,
-    '_normalize_lookup_name': _normalize_lookup_name,
-    '_get_or_create_lookup_id': _get_or_create_lookup_id,
-    '_lookup_name_for_id': _lookup_name_for_id,
-    '_fetch_lookup_entries_for_game': _fetch_lookup_entries_for_game,
-    '_lookup_entries_to_selection': _lookup_entries_to_selection,
-    '_persist_lookup_relations': _persist_lookup_relations,
-    '_apply_lookup_entries_to_processed_game': _apply_lookup_entries_to_processed_game,
-    '_remove_lookup_id_from_entries': _remove_lookup_id_from_entries,
-})
 
-routes_updates.configure({
-    'IGDB_BATCH_SIZE': IGDB_BATCH_SIZE,
-    'FIX_NAMES_BATCH_LIMIT': FIX_NAMES_BATCH_LIMIT,
-    'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
-    'db_lock': db_lock,
-    'get_db': get_db,
-    '_get_cached_igdb_total': _get_cached_igdb_total,
-    '_set_cached_igdb_total': _set_cached_igdb_total,
-    'download_igdb_game_count': lambda: download_igdb_game_count,
-    'download_igdb_games': lambda: download_igdb_games,
-    '_upsert_igdb_cache_entries': _upsert_igdb_cache_entries,
-    '_igdb_prefill_lock': _igdb_prefill_lock,
-    '_igdb_prefill_cache': _igdb_prefill_cache,
-    '_execute_refresh_job': _execute_refresh_job,
-    'job_manager': job_manager,
-    '_execute_fix_names_job': _execute_fix_names_job,
-    '_execute_remove_duplicates_job': _execute_remove_duplicates_job,
-    'fetch_cached_updates': fetch_cached_updates,
-    'get_processed_games_columns': get_processed_games_columns,
-    'load_cover_data': load_cover_data,
-    'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
-    '_scan_duplicate_candidates': _scan_duplicate_candidates,
-    '_coerce_int': _coerce_int,
-    '_compute_metadata_updates': _compute_metadata_updates,
-    '_merge_duplicate_resolutions': _merge_duplicate_resolutions,
-    '_remove_processed_games': _remove_processed_games,
-    '_normalize_text': _normalize_text,
-    'DuplicateGroupResolution': DuplicateGroupResolution,
-})
+def configure_blueprints(flask_app: Flask) -> None:
+    global _blueprints_configured
+    if _blueprints_configured:
+        return
 
-app.register_blueprint(routes_games.games_blueprint)
-app.register_blueprint(routes_lookups.lookups_blueprint)
-app.register_blueprint(routes_updates.updates_blueprint)
+    routes_games.configure({
+        'get_navigator': lambda: _ensure_navigator_dataframe(rebuild_state=False),
+        'get_total_games': lambda: catalog_state.total_games,
+        'get_games_df': lambda: catalog_state.games_df,
+        'build_game_payload': build_game_payload,
+        'generate_pt_summary': generate_pt_summary,
+        'open_image_auto_rotate': open_image_auto_rotate,
+        'upload_dir': UPLOAD_DIR,
+        'processed_dir': PROCESSED_DIR,
+        'db_lock': db_lock,
+        'get_db': get_db,
+        'get_source_index_for_position': get_source_index_for_position,
+        'get_position_for_source_index': get_position_for_source_index,
+        'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
+        '_resolve_lookup_selection': _resolve_lookup_selection,
+        '_lookup_display_text': _lookup_display_text,
+        '_encode_lookup_id_list': _encode_lookup_id_list,
+        '_persist_lookup_relations': _persist_lookup_relations,
+        'is_processed_game_done': is_processed_game_done,
+        'now_utc_iso': now_utc_iso,
+        'extract_igdb_id': extract_igdb_id,
+        'coerce_igdb_id': coerce_igdb_id,
+        'get_cell': get_cell,
+        'extract_list': extract_list,
+        'load_cover_data': load_cover_data,
+        'get_igdb_prefill_for_id': get_igdb_prefill_for_id,
+    })
+
+    routes_lookups.configure({
+        'LOOKUP_TABLES': LOOKUP_TABLES,
+        '_format_lookup_label': _format_lookup_label,
+        'LOOKUP_ENDPOINT_MAP': LOOKUP_ENDPOINT_MAP,
+        'LOOKUP_TABLES_BY_NAME': LOOKUP_TABLES_BY_NAME,
+        'LOOKUP_RELATIONS_BY_TABLE': LOOKUP_RELATIONS_BY_TABLE,
+        'db_lock': db_lock,
+        'get_db': get_db,
+        '_row_value': _row_value,
+        '_normalize_lookup_name': _normalize_lookup_name,
+        '_get_or_create_lookup_id': _get_or_create_lookup_id,
+        '_lookup_name_for_id': _lookup_name_for_id,
+        '_fetch_lookup_entries_for_game': _fetch_lookup_entries_for_game,
+        '_lookup_entries_to_selection': _lookup_entries_to_selection,
+        '_persist_lookup_relations': _persist_lookup_relations,
+        '_apply_lookup_entries_to_processed_game': _apply_lookup_entries_to_processed_game,
+        '_remove_lookup_id_from_entries': _remove_lookup_id_from_entries,
+    })
+
+    routes_updates.configure({
+        'IGDB_BATCH_SIZE': IGDB_BATCH_SIZE,
+        'FIX_NAMES_BATCH_LIMIT': FIX_NAMES_BATCH_LIMIT,
+        'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
+        'db_lock': db_lock,
+        'get_db': get_db,
+        '_get_cached_igdb_total': _get_cached_igdb_total,
+        '_set_cached_igdb_total': _set_cached_igdb_total,
+        'download_igdb_game_count': lambda: download_igdb_game_count,
+        'download_igdb_games': lambda: download_igdb_games,
+        '_upsert_igdb_cache_entries': _upsert_igdb_cache_entries,
+        '_igdb_prefill_lock': _igdb_prefill_lock,
+        '_igdb_prefill_cache': _igdb_prefill_cache,
+        '_execute_refresh_job': _execute_refresh_job,
+        'job_manager': job_manager,
+        '_execute_fix_names_job': _execute_fix_names_job,
+        '_execute_remove_duplicates_job': _execute_remove_duplicates_job,
+        'fetch_cached_updates': fetch_cached_updates,
+        'get_processed_games_columns': get_processed_games_columns,
+        'load_cover_data': load_cover_data,
+        'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
+        '_scan_duplicate_candidates': _scan_duplicate_candidates,
+        '_coerce_int': _coerce_int,
+        '_compute_metadata_updates': _compute_metadata_updates,
+        '_merge_duplicate_resolutions': _merge_duplicate_resolutions,
+        '_remove_processed_games': _remove_processed_games,
+        '_normalize_text': _normalize_text,
+        'DuplicateGroupResolution': DuplicateGroupResolution,
+    })
+
+    routes_web.configure({
+        'app_password': APP_PASSWORD,
+        'get_total_games': lambda: catalog_state.total_games,
+        'get_categories': catalog_state.get_categories,
+        'get_platforms': catalog_state.get_platforms,
+    })
+
+    if 'games' not in flask_app.blueprints:
+        flask_app.register_blueprint(routes_games.games_blueprint)
+    if 'lookups' not in flask_app.blueprints:
+        flask_app.register_blueprint(routes_lookups.lookups_blueprint)
+    if 'updates' not in flask_app.blueprints:
+        flask_app.register_blueprint(routes_updates.updates_blueprint)
+    if 'web' not in flask_app.blueprints:
+        flask_app.register_blueprint(routes_web.web_blueprint)
+
+    _blueprints_configured = True
+
+
+from web.app_factory import create_app
+
+app = create_app(app, configure_blueprints=configure_blueprints)
+
 
 if __name__ == '__main__':
     app.run(debug=True)

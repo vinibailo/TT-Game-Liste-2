@@ -7,6 +7,8 @@ import os
 import uuid
 from pathlib import Path
 
+import pandas as pd
+
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
@@ -33,15 +35,40 @@ def load_app(tmp_path: Path) -> object:
             else:
                 os.environ[key] = value
 
-    module.games_df = module.games_df.copy()
+    if hasattr(module, "catalog_state"):
+        module.catalog_state.set_games_dataframe(
+            module.catalog_state.games_df.copy(),
+            rebuild_metadata=False,
+            rebuild_navigator=True,
+        )
     if hasattr(module, "reset_source_index_cache"):
         module.reset_source_index_cache()
-    module.total_games = len(module.games_df)
-    if hasattr(module, "navigator"):
-        module.navigator.total = module.total_games
 
     if hasattr(module, "app"):
         module.app.config['TESTING'] = True
         module.app.testing = True
 
     return module
+
+
+def set_games_dataframe(
+    module: object,
+    df: pd.DataFrame,
+    *,
+    rebuild_metadata: bool = True,
+    rebuild_navigator: bool = True,
+) -> None:
+    """Helper to update the app's games DataFrame during tests."""
+
+    if hasattr(module, "_set_games_dataframe"):
+        module._set_games_dataframe(
+            df,
+            rebuild_metadata=rebuild_metadata,
+            rebuild_navigator=rebuild_navigator,
+        )
+    elif hasattr(module, "catalog_state"):
+        module.catalog_state.set_games_dataframe(
+            df,
+            rebuild_metadata=rebuild_metadata,
+            rebuild_navigator=rebuild_navigator,
+        )
