@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Mapping
 
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
@@ -167,13 +167,9 @@ def api_updates_refresh():
             return jsonify({'error': str(exc)}), 502
         return jsonify(result)
 
-    def runner(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
-        with current_app.app_context():
-            return execute_refresh_job(update_progress)
-
-    job, created = job_manager.start_job(
+    job, created = job_manager.enqueue_job(
         'refresh_updates',
-        runner,
+        'app._execute_refresh_job',
         description='Refreshing IGDB updates…',
     )
     status_code = 202 if created else 200
@@ -214,13 +210,9 @@ def api_updates_fix_names():
         )
         return jsonify(result)
 
-    def runner(update_progress: Callable[..., None]) -> dict[str, Any]:
-        with current_app.app_context():
-            return execute_fix_names_job(update_progress)
-
-    job, created = job_manager.start_job(
+    job, created = job_manager.enqueue_job(
         'fix_names',
-        runner,
+        'app._execute_fix_names_job',
         description='Fixing IGDB names…',
     )
     status_code = 202 if created else 200
@@ -237,17 +229,13 @@ def api_updates_remove_duplicates():
     job_manager = _ctx('job_manager')
     execute_remove_duplicates_job = _ctx('_execute_remove_duplicates_job')
 
-    def runner(update_progress: Callable[..., None]) -> dict[str, Any]:
-        with current_app.app_context():
-            return execute_remove_duplicates_job(update_progress)
-
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
         return jsonify(execute_remove_duplicates_job(lambda **_kwargs: None))
 
-    job, created = job_manager.start_job(
+    job, created = job_manager.enqueue_job(
         'remove_duplicates',
-        runner,
+        'app._execute_remove_duplicates_job',
         description='Removing duplicates…',
     )
     status_code = 202 if created else 200
