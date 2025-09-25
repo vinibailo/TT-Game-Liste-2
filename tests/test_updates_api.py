@@ -666,7 +666,7 @@ def test_updates_detail_missing_returns_404(tmp_path):
     assert response.get_json()['error'] == 'not found'
 
 
-def test_remove_duplicates_removes_unprocessed_entry(tmp_path):
+def test_remove_duplicates_merges_duplicate_entries(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
@@ -695,14 +695,24 @@ def test_remove_duplicates_removes_unprocessed_entry(tmp_path):
             'Source Index': '1',
             'Name': 'Duplicated Game',
             'igdb_id': '20',
-            'Summary': 'Done',
+            'Summary': 'Primary summary',
             'Cover Path': f"{app_module.PROCESSED_DIR}/2.jpg",
+            'Developers': 'Canonical Dev',
+            'Platforms': 'Base Platform',
         },
     )
     insert_processed_game(
         app_module,
         ID=3,
-        **{'Source Index': '2', 'Name': 'Duplicated Game', 'igdb_id': '20', 'Summary': '', 'Cover Path': ''},
+        **{
+            'Source Index': '2',
+            'Name': 'Duplicated Game',
+            'igdb_id': '20',
+            'Summary': '',
+            'Cover Path': '',
+            'Publishers': 'Extra Pub',
+            'Platforms': 'Extra Platform',
+        },
     )
     insert_processed_game(
         app_module,
@@ -731,16 +741,41 @@ def test_remove_duplicates_removes_unprocessed_entry(tmp_path):
 
     with app_module.db_lock:
         rows = app_module.db.execute(
-            'SELECT "ID", "Source Index", "Name" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+            'SELECT "ID", "Source Index", "Name", "Developers", "Publishers", "Platforms" '
+            'FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
         ).fetchall()
         updates = app_module.db.execute(
             'SELECT processed_game_id FROM igdb_updates ORDER BY processed_game_id'
+        ).fetchall()
+        developer_rows = app_module.db.execute(
+            'SELECT processed_game_id, developer_id FROM processed_game_developers ORDER BY processed_game_id, developer_id'
+        ).fetchall()
+        publisher_rows = app_module.db.execute(
+            'SELECT processed_game_id, publisher_id FROM processed_game_publishers ORDER BY processed_game_id, publisher_id'
+        ).fetchall()
+        platform_rows = app_module.db.execute(
+            'SELECT processed_game_id, platform_id FROM processed_game_platforms ORDER BY processed_game_id, platform_id'
         ).fetchall()
 
     assert len(rows) == 3
     assert [row['Name'] for row in rows] == ['Unique Game', 'Duplicated Game', 'Tail Game']
     assert [row['Source Index'] for row in rows] == ['0', '1', '2']
-    assert [row['processed_game_id'] for row in updates] == [rows[1]['ID']]
+    duplicate_row = next(row for row in rows if row['Name'] == 'Duplicated Game')
+    assert 'Canonical Dev' in duplicate_row['Developers']
+    assert 'Local Dev' in duplicate_row['Developers']
+    assert 'Extra Pub' in duplicate_row['Publishers']
+    assert 'Local Pub' in duplicate_row['Publishers']
+    assert duplicate_row['Platforms'] == 'Base Platform, Extra Platform'
+    assert [row['processed_game_id'] for row in updates] == [duplicate_row['ID']]
+    developer_ids = {row['processed_game_id'] for row in developer_rows}
+    publisher_ids = {row['processed_game_id'] for row in publisher_rows}
+    platform_ids = {row['processed_game_id'] for row in platform_rows}
+    assert duplicate_row['ID'] in developer_ids
+    assert duplicate_row['ID'] in publisher_ids
+    assert duplicate_row['ID'] in platform_ids
+    assert 3 not in developer_ids
+    assert 3 not in publisher_ids
+    assert 3 not in platform_ids
 
     assert len(app_module.games_df) == 3
     assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
@@ -777,14 +812,23 @@ def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
             'Source Index': '1',
             'Name': 'Duplicated Game',
             'igdb_id': '20',
-            'Summary': 'Done',
+            'Summary': '',
             'Cover Path': f"{app_module.PROCESSED_DIR}/2.jpg",
+            'Developers': 'Canonical Dev',
+            'Platforms': 'Base Platform',
         },
     )
     insert_processed_game(
         app_module,
         ID=3,
-        **{'Source Index': '2', 'Name': 'Duplicated Game', 'igdb_id': '20', 'Summary': '', 'Cover Path': ''},
+        **{
+            'Source Index': '2',
+            'Name': 'Duplicated Game',
+            'igdb_id': '20',
+            'Summary': 'Better summary',
+            'Cover Path': '',
+            'Publishers': 'Extra Pub',
+        },
     )
     insert_processed_game(
         app_module,
@@ -806,7 +850,11 @@ def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
 
     with app_module.db_lock:
         rows = app_module.db.execute(
-            'SELECT "ID", "Source Index", "Name" FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+            'SELECT "ID", "Source Index", "Name", "Summary", "Publishers" '
+            'FROM processed_games ORDER BY CAST("ID" AS INTEGER)'
+        ).fetchall()
+        publisher_rows = app_module.db.execute(
+            'SELECT processed_game_id, publisher_id FROM processed_game_publishers ORDER BY processed_game_id, publisher_id'
         ).fetchall()
 
     assert len(rows) == 3
@@ -814,11 +862,17 @@ def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
     names = [row['Name'] for row in rows]
     assert names.count('Duplicated Game') == 1
     assert 'Tail Game' in names
+    duplicate_row = next(row for row in rows if row['Name'] == 'Duplicated Game')
+    assert duplicate_row['Summary'] == 'Better summary'
+    assert 'Extra Pub' in duplicate_row['Publishers']
+    publisher_ids = {row['processed_game_id'] for row in publisher_rows}
+    assert duplicate_row['ID'] in publisher_ids
+    assert 3 not in publisher_ids
     assert len(app_module.games_df) == 3
     assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
 
 
-def test_remove_duplicates_skips_without_processed_entry(tmp_path):
+def test_remove_duplicates_handles_all_duplicates(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
@@ -851,17 +905,17 @@ def test_remove_duplicates_skips_without_processed_entry(tmp_path):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload['status'] == 'ok'
-    assert payload['removed'] == 0
+    assert payload['removed'] == 1
     assert payload['duplicate_groups'] == 1
-    assert payload['skipped'] == 1
-    assert payload['remaining'] == 2
+    assert payload['skipped'] == 0
+    assert payload['remaining'] == 1
 
     with app_module.db_lock:
         rows = app_module.db.execute(
             'SELECT "Source Index" FROM processed_games ORDER BY CAST("Source Index" AS INTEGER)'
         ).fetchall()
 
-    assert [row['Source Index'] for row in rows] == ['0', '1']
-    assert len(app_module.games_df) == 2
-    assert list(app_module.games_df['Source Index']) == ['0', '1']
-    assert app_module.total_games == 2
+    assert [row['Source Index'] for row in rows] == ['0']
+    assert len(app_module.games_df) == 1
+    assert list(app_module.games_df['Source Index']) == ['0']
+    assert app_module.total_games == 1
