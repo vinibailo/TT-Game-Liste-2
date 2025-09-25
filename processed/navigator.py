@@ -333,6 +333,16 @@ class GameNavigator:
             self._load()
             return self.current_index
 
+    def completion_percentage(self) -> float:
+        """Return the percentage of games that have been processed."""
+
+        with self.lock:
+            self._load()
+            if self.total <= 0:
+                return 0.0
+            completed = min(max(self.processed_total, 0), self.total)
+            return (completed / self.total) * 100.0
+
     def skip(self, index: int) -> None:
         with self.lock:
             self._load()
