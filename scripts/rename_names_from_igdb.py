@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+from config import IGDB_BATCH_SIZE, IGDB_USER_AGENT, PROCESSED_DB_PATH, SQLITE_TIMEOUT_SECONDS
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -32,20 +34,6 @@ except ModuleNotFoundError:
 
     logger = logging.getLogger(__name__)
 
-    DEFAULT_IGDB_USER_AGENT = "TT-Game-Liste/1.0 (support@example.com)"
-    IGDB_USER_AGENT = os.environ.get("IGDB_USER_AGENT") or DEFAULT_IGDB_USER_AGENT
-    IGDB_BATCH_SIZE = 500
-
-    def _coerce_positive_float(value: str | None, default: float) -> float:
-        try:
-            numeric = float(value) if value is not None else default
-        except (TypeError, ValueError):
-            return default
-        return numeric if numeric > 0 else default
-
-    SQLITE_TIMEOUT_SECONDS = _coerce_positive_float(os.environ.get("SQLITE_TIMEOUT"), 120.0)
-    PROCESSED_DB_NAME = os.environ.get("PROCESSED_DB", "processed_games.db")
-
     db_lock = Lock()
 
     def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
@@ -58,7 +46,9 @@ except ModuleNotFoundError:
         return conn
 
     def get_db() -> sqlite3.Connection:
-        db_path = PROJECT_ROOT / PROCESSED_DB_NAME
+        db_path = PROCESSED_DB_PATH
+        if not db_path.is_absolute():
+            db_path = (PROJECT_ROOT / db_path).resolve()
         conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         return _configure_sqlite_connection(conn)
