@@ -8,6 +8,538 @@ import sqlite3
 
 from db import utils as db_utils
 
+SQLALCHEMY_AVAILABLE = True
+try:  # pragma: no cover - import guard for optional dependency during bootstrap
+    from sqlalchemy import (
+        MetaData,
+        Table,
+        create_engine,
+        func,
+        insert,
+        select,
+        update as sa_update,
+        delete as sa_delete,
+    )
+    from sqlalchemy.engine import Engine
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.pool import StaticPool
+except Exception:  # pragma: no cover - surfaced by tests when dependency missing
+    SQLALCHEMY_AVAILABLE = False
+    MetaData = Table = Engine = object  # type: ignore[assignment]
+    create_engine = StaticPool = None  # type: ignore[assignment]
+    func = insert = select = sa_update = sa_delete = None  # type: ignore[assignment]
+
+
+class LookupServiceError(RuntimeError):
+    """Base class for lookup service errors."""
+
+
+class LookupConflictError(LookupServiceError):
+    """Raised when attempting to rename a lookup to an existing value."""
+
+
+class LookupNotFoundError(LookupServiceError):
+    """Raised when a lookup entry cannot be located."""
+
+
+_ENGINE_CACHE: dict[int, Engine] = {}
+_TABLE_CACHE: dict[tuple[int, str], Table] = {}
+
+
+def _engine_from_connection(conn: sqlite3.Connection) -> Engine:
+    """Return a SQLAlchemy ``Engine`` bound to ``conn``."""
+
+    if not SQLALCHEMY_AVAILABLE:
+        raise LookupServiceError("SQLAlchemy engine is unavailable")
+
+    key = id(conn)
+    if key not in _ENGINE_CACHE:
+        _ENGINE_CACHE[key] = create_engine(
+            "sqlite://",
+            creator=lambda: conn,
+            poolclass=StaticPool,
+            future=True,
+        )
+    return _ENGINE_CACHE[key]
+
+
+def _table_from_connection(conn: sqlite3.Connection, table_name: str) -> Table:
+    """Reflect ``table_name`` using SQLAlchemy metadata."""
+
+    if not SQLALCHEMY_AVAILABLE:
+        raise LookupServiceError("SQLAlchemy metadata reflection is unavailable")
+
+    cache_key = (id(conn), table_name)
+    if cache_key in _TABLE_CACHE:
+        return _TABLE_CACHE[cache_key]
+
+    engine = _engine_from_connection(conn)
+    metadata = MetaData()
+    try:
+        table = Table(table_name, metadata, autoload_with=engine)
+    except (SQLAlchemyError, TypeError):
+        raise LookupNotFoundError(f"lookup table not available: {table_name}")
+    _TABLE_CACHE[cache_key] = table
+    return table
+
+
+def list_lookup_entries(
+    conn: sqlite3.Connection,
+    table_name: str,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> list[dict[str, Any]]:
+    """Return lookup entries ordered by name for ``table_name``."""
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return []
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.connect() as sa_conn:
+                result = sa_conn.execute(
+                    select(table.c.id, table.c.name).order_by(
+                        func.lower(table.c.name), table.c.id
+                    )
+                )
+                rows = list(result)
+        except SQLAlchemyError:
+            return []
+    else:
+        try:
+            cur = conn.execute(
+                f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE, id'
+            )
+        except sqlite3.OperationalError:
+            return []
+        rows = cur.fetchall()
+
+    items: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for row in rows:
+        raw_id = row[0]
+        lookup_id = _coerce_int(raw_id)
+        if lookup_id is None or lookup_id in seen_ids:
+            continue
+        name = normalize_lookup_name(row[1])
+        if not name:
+            continue
+        seen_ids.add(lookup_id)
+        items.append({"id": lookup_id, "name": name})
+    return items
+
+
+def get_lookup_entry(
+    conn: sqlite3.Connection,
+    table_name: str,
+    lookup_id: int,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> dict[str, Any] | None:
+    """Return the lookup entry identified by ``lookup_id``."""
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return None
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.connect() as sa_conn:
+                row = sa_conn.execute(
+                    select(table.c.id, table.c.name).where(table.c.id == lookup_id)
+                ).first()
+        except SQLAlchemyError:
+            return None
+    else:
+        try:
+            cur = conn.execute(
+                f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
+            )
+        except sqlite3.OperationalError:
+            return None
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    coerced = _coerce_int(row[0])
+    if coerced is None:
+        return None
+    name = normalize_lookup_name(row[1])
+    if not name:
+        return None
+    return {"id": coerced, "name": name}
+
+
+def _lookup_by_name(
+    conn: sqlite3.Connection,
+    table_name: str,
+    normalized_name: str,
+) -> tuple[int, str] | None:
+    """Return ``(id, name)`` for an entry matching ``normalized_name``."""
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return None
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.connect() as sa_conn:
+                row = sa_conn.execute(
+                    select(table.c.id, table.c.name).where(
+                        func.lower(table.c.name) == normalized_name.casefold()
+                    )
+                ).first()
+        except SQLAlchemyError:
+            return None
+    else:
+        try:
+            cur = conn.execute(
+                f'SELECT id, name FROM {table_name} WHERE name = ? COLLATE NOCASE',
+                (normalized_name,),
+            )
+        except sqlite3.OperationalError:
+            return None
+        row = cur.fetchone()
+
+    if row is None:
+        return None
+
+    lookup_id = _coerce_int(row[0])
+    if lookup_id is None:
+        return None
+    name_value = row[1]
+    return lookup_id, str(name_value) if name_value is not None else ""
+
+
+def get_or_create_lookup_id(
+    conn: sqlite3.Connection,
+    table_name: str,
+    raw_name: str,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> int | None:
+    """Return the identifier for ``raw_name``, creating a lookup when needed."""
+
+    name = normalize_lookup_name(raw_name)
+    if not name:
+        return None
+
+    existing = _lookup_by_name(conn, table_name, name)
+    if existing is not None:
+        return existing[0]
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return None
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.begin() as sa_conn:
+                result = sa_conn.execute(insert(table).values(name=name))
+                inserted_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+                if inserted_id is None:
+                    inserted_id = sa_conn.execute(select(func.max(table.c.id))).scalar_one()
+        except SQLAlchemyError:
+            return None
+        return _coerce_int(inserted_id)
+
+    try:
+        cur = conn.execute(
+            f'INSERT INTO {table_name} (name) VALUES (?)',
+            (name,),
+        )
+    except sqlite3.OperationalError:
+        return None
+    return _coerce_int(cur.lastrowid)
+
+
+def lookup_name_for_id(
+    conn: sqlite3.Connection,
+    table_name: str,
+    lookup_id: int,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> str | None:
+    """Return the normalized name for ``lookup_id`` in ``table_name``."""
+
+    entry = get_lookup_entry(
+        conn, table_name, lookup_id, normalize_lookup_name=normalize_lookup_name
+    )
+    if entry is None:
+        return None
+    return entry["name"]
+
+
+def create_lookup_entry(
+    conn: sqlite3.Connection,
+    table_name: str,
+    raw_name: str,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> tuple[str, dict[str, Any] | None]:
+    """Create a lookup entry when missing and return its payload."""
+
+    name = normalize_lookup_name(raw_name)
+    if not name:
+        return "invalid", None
+
+    existing = _lookup_by_name(conn, table_name, name)
+    if existing is not None:
+        lookup_id, stored_name = existing
+        normalized = normalize_lookup_name(stored_name)
+        return "exists", {"id": lookup_id, "name": normalized or name}
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return "invalid", None
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.begin() as sa_conn:
+                result = sa_conn.execute(insert(table).values(name=name))
+                inserted_id = result.inserted_primary_key[0] if result.inserted_primary_key else None
+                if inserted_id is None:
+                    inserted_id = sa_conn.execute(select(func.max(table.c.id))).scalar_one()
+                row = sa_conn.execute(
+                    select(table.c.id, table.c.name).where(table.c.id == inserted_id)
+                ).first()
+        except SQLAlchemyError:
+            return "invalid", None
+
+        if row is None:
+            return "invalid", None
+
+        lookup_id = _coerce_int(row[0])
+        if lookup_id is None:
+            return "invalid", None
+        normalized = normalize_lookup_name(row[1])
+        return "created", {"id": lookup_id, "name": normalized or name}
+
+    try:
+        cur = conn.execute(
+            f'INSERT INTO {table_name} (name) VALUES (?)',
+            (name,),
+        )
+    except sqlite3.OperationalError:
+        return "invalid", None
+    lookup_id = _coerce_int(cur.lastrowid)
+    if lookup_id is None:
+        return "invalid", None
+    try:
+        row = conn.execute(
+            f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    normalized = normalize_lookup_name(row[1]) if row is not None else name
+    return "created", {"id": lookup_id, "name": normalized or name}
+
+
+def update_lookup_entry(
+    conn: sqlite3.Connection,
+    table_name: str,
+    lookup_id: int,
+    new_name: str,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> tuple[str, dict[str, Any] | None]:
+    """Update ``lookup_id`` to ``new_name`` when possible."""
+
+    name = normalize_lookup_name(new_name)
+    if not name:
+        return "invalid", None
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return "invalid", None
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.begin() as sa_conn:
+                row = sa_conn.execute(
+                    select(table.c.id, table.c.name).where(table.c.id == lookup_id)
+                ).first()
+                if row is None:
+                    return "not_found", None
+                existing_name = normalize_lookup_name(row[1])
+                if existing_name != name:
+                    conflict = sa_conn.execute(
+                        select(table.c.id).where(
+                            func.lower(table.c.name) == name.casefold(), table.c.id != lookup_id
+                        )
+                    ).first()
+                    if conflict is not None:
+                        return "conflict", None
+                    sa_conn.execute(
+                        sa_update(table)
+                        .where(table.c.id == lookup_id)
+                        .values(name=name)
+                    )
+                refreshed = sa_conn.execute(
+                    select(table.c.id, table.c.name).where(table.c.id == lookup_id)
+                ).first()
+        except SQLAlchemyError:
+            return "invalid", None
+
+        if refreshed is None:
+            return "invalid", None
+
+        final_id = _coerce_int(refreshed[0])
+        if final_id is None:
+            return "invalid", None
+        final_name = normalize_lookup_name(refreshed[1]) or name
+        return "updated", {"id": final_id, "name": final_name}
+
+    try:
+        row = conn.execute(
+            f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return "invalid", None
+    if row is None:
+        return "not_found", None
+    existing_name = normalize_lookup_name(row[1])
+    if existing_name != name:
+        try:
+            conflict = conn.execute(
+                f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE AND id != ?',
+                (name, lookup_id),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            conflict = None
+        if conflict is not None:
+            return "conflict", None
+        try:
+            conn.execute(
+                f'UPDATE {table_name} SET name = ? WHERE id = ?',
+                (name, lookup_id),
+            )
+        except sqlite3.OperationalError:
+            return "invalid", None
+    try:
+        refreshed = conn.execute(
+            f'SELECT id, name FROM {table_name} WHERE id = ?', (lookup_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return "invalid", None
+    if refreshed is None:
+        return "invalid", None
+    final_id = _coerce_int(refreshed[0])
+    if final_id is None:
+        return "invalid", None
+    final_name = normalize_lookup_name(refreshed[1]) or name
+    return "updated", {"id": final_id, "name": final_name}
+
+
+def delete_lookup_entry(
+    conn: sqlite3.Connection,
+    table_name: str,
+    lookup_id: int,
+) -> bool:
+    """Remove ``lookup_id`` from ``table_name``."""
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, table_name)
+        except LookupNotFoundError:
+            return False
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.begin() as sa_conn:
+                row = sa_conn.execute(
+                    select(table.c.id).where(table.c.id == lookup_id)
+                ).first()
+                if row is None:
+                    return False
+                sa_conn.execute(sa_delete(table).where(table.c.id == lookup_id))
+        except SQLAlchemyError:
+            return False
+        return True
+
+    try:
+        row = conn.execute(
+            f'SELECT id FROM {table_name} WHERE id = ?', (lookup_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None:
+        return False
+    try:
+        conn.execute(f'DELETE FROM {table_name} WHERE id = ?', (lookup_id,))
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+def get_related_processed_game_ids(
+    conn: sqlite3.Connection,
+    relation: Mapping[str, Any],
+    lookup_id: int,
+) -> list[int]:
+    """Return processed game identifiers linked to ``lookup_id``."""
+
+    join_table = relation.get("join_table")
+    join_column = relation.get("join_column")
+    if not join_table or not join_column:
+        return []
+
+    if SQLALCHEMY_AVAILABLE:
+        try:
+            table = _table_from_connection(conn, join_table)
+        except LookupNotFoundError:
+            return []
+
+        processed_column = table.c.get("processed_game_id")
+        lookup_column = table.c.get(join_column)
+        if processed_column is None or lookup_column is None:
+            return []
+
+        engine = _engine_from_connection(conn)
+        try:
+            with engine.connect() as sa_conn:
+                result = sa_conn.execute(
+                    select(processed_column)
+                    .where(lookup_column == lookup_id)
+                    .distinct()
+                    .order_by(processed_column)
+                )
+                rows = list(result)
+        except SQLAlchemyError:
+            return []
+    else:
+        try:
+            cur = conn.execute(
+                f'SELECT DISTINCT processed_game_id FROM {join_table} '
+                f'WHERE {join_column} = ? ORDER BY processed_game_id',
+                (lookup_id,),
+            )
+        except sqlite3.OperationalError:
+            return []
+        rows = cur.fetchall()
+
+    ids: list[int] = []
+    for row in rows:
+        coerced = _coerce_int(row[0])
+        if coerced is None:
+            continue
+        ids.append(coerced)
+    return ids
+
 
 def _coerce_int(value: Any) -> int | None:
     """Best-effort conversion of ``value`` to ``int``."""
