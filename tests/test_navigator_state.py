@@ -1,4 +1,5 @@
 import json
+import math
 import sqlite3
 
 from tests.app_helpers import load_app
@@ -193,6 +194,13 @@ def test_save_with_outdated_index_keeps_next_row_intact(tmp_path):
         )
         row = cur.fetchone()
     assert row['Name'] == 'original'
+
+
+def test_completion_percentage(tmp_path):
+    app = load_app(tmp_path)
+    populate_db(app, 5)
+    nav = app.GameNavigator(10)
+    assert math.isclose(nav.completion_percentage(), 50.0)
 
 
 def test_out_of_order_ids_are_normalized(tmp_path):

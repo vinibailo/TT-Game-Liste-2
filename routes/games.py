@@ -50,12 +50,19 @@ def api_game():
     try:
         index = navigator.current()
         if index >= _get_total_games():
-            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+            return jsonify(
+                {
+                    'done': True,
+                    'message': 'Todos os jogos foram processados.',
+                    'completion': navigator.completion_percentage(),
+                }
+            )
         data = _ctx('build_game_payload')(
             index,
             navigator.seq_index,
             navigator.processed_total + 1,
         )
+        data['completion'] = navigator.completion_percentage()
         return jsonify(data)
     except Exception as exc:  # pragma: no cover - defensive logging
         current_app.logger.exception("api_game failed")
