@@ -37,9 +37,12 @@ from config import (
     APP_PASSWORD,
     APP_SECRET_KEY,
     COVERS_DIR,
+    FIX_NAMES_BATCH_LIMIT,
+    IGDB_BATCH_SIZE,
     IGDB_USER_AGENT,
     INPUT_XLSX,
     OPENAI_API_KEY,
+    OPENAI_SUMMARY_ENABLED,
     PROCESSED_DB,
     PROCESSED_DIR,
     RUN_DB_MIGRATIONS,
@@ -223,8 +226,6 @@ LOOKUP_SOURCE_KEYS = {
     'Platforms': ['Platforms', 'Platform'],
 }
 
-FIX_NAMES_BATCH_LIMIT = 50
-
 
 def _format_lookup_label(value: str) -> str:
     text = str(value or '').replace('_', ' ').strip()
@@ -241,7 +242,7 @@ def is_processed_game_done(summary_value: Any, cover_path_value: Any) -> bool:
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET_KEY
-IGDB_BATCH_SIZE = 500
+app.config.setdefault('OPENAI_SUMMARY_ENABLED', OPENAI_SUMMARY_ENABLED)
 
 IGDB_CATEGORY_LABELS = {
     0: 'Main Game',
@@ -318,7 +319,7 @@ logging.basicConfig(level=logging.DEBUG)
 app.logger.setLevel(logging.DEBUG)
 logger.setLevel(logging.DEBUG)
 # Configure OpenAI using API key from environment
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # SQLite setup for processed games
 db_lock = db_utils.db_lock
@@ -2666,7 +2667,7 @@ def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
     if not game_name:
         raise ValueError("game_name is required")
-    if not OPENAI_API_KEY:
+    if not OPENAI_API_KEY or client is None:
         raise RuntimeError("OPENAI_API_KEY not set")
     response = client.chat.completions.create(
         model='gpt-3.5-turbo',
