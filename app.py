@@ -624,14 +624,13 @@ def _lookup_display_text(names: list[str]) -> str:
 def _lookup_name_for_id(
     conn: sqlite3.Connection, table_name: str, lookup_id: int
 ) -> str:
-    cur = conn.execute(
-        f'SELECT name FROM {table_name} WHERE id = ?',
-        (lookup_id,),
+    name = lookups_service.lookup_name_for_id(
+        conn,
+        table_name,
+        lookup_id,
+        normalize_lookup_name=_normalize_lookup_name,
     )
-    row = cur.fetchone()
-    if row is None:
-        return ''
-    return _normalize_lookup_name(_row_value(row, 'name', 0))
+    return name or ''
 
 
 def _iter_lookup_payload(raw_value: Any) -> list[dict[str, Any]]:
@@ -766,20 +765,12 @@ def _load_lookup_tables(conn: sqlite3.Connection) -> None:
 def _get_or_create_lookup_id(
     conn: sqlite3.Connection, table_name: str, raw_name: Any
 ) -> int | None:
-    name = _normalize_lookup_name(raw_name)
-    if not name:
-        return None
-    cur = conn.execute(
-        f'SELECT id FROM {table_name} WHERE name = ? COLLATE NOCASE', (name,)
+    return lookups_service.get_or_create_lookup_id(
+        conn,
+        table_name,
+        raw_name,
+        normalize_lookup_name=_normalize_lookup_name,
     )
-    row = cur.fetchone()
-    if row is not None:
-        return row[0]
-    cur = conn.execute(
-        f'INSERT INTO {table_name} (name) VALUES (?)',
-        (name,),
-    )
-    return cur.lastrowid
 
 
 def _recreate_lookup_join_tables(conn: sqlite3.Connection) -> None:
@@ -962,6 +953,44 @@ def _remove_lookup_id_from_entries(
     lookup_id: int,
 ) -> None:
     lookups_service.remove_lookup_id_from_entries(entries, relation, lookup_id)
+
+
+def _list_lookup_entries(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
+    return lookups_service.list_lookup_entries(
+        conn, table_name, normalize_lookup_name=_normalize_lookup_name
+    )
+
+
+def _create_lookup_entry(
+    conn: sqlite3.Connection, table_name: str, name: str
+) -> tuple[str, dict[str, Any] | None]:
+    return lookups_service.create_lookup_entry(
+        conn, table_name, name, normalize_lookup_name=_normalize_lookup_name
+    )
+
+
+def _update_lookup_entry(
+    conn: sqlite3.Connection, table_name: str, lookup_id: int, name: str
+) -> tuple[str, dict[str, Any] | None]:
+    return lookups_service.update_lookup_entry(
+        conn,
+        table_name,
+        lookup_id,
+        name,
+        normalize_lookup_name=_normalize_lookup_name,
+    )
+
+
+def _delete_lookup_entry(
+    conn: sqlite3.Connection, table_name: str, lookup_id: int
+) -> bool:
+    return lookups_service.delete_lookup_entry(conn, table_name, lookup_id)
+
+
+def _related_processed_game_ids(
+    conn: sqlite3.Connection, relation: Mapping[str, Any], lookup_id: int
+) -> list[int]:
+    return lookups_service.get_related_processed_game_ids(conn, relation, lookup_id)
 
 
 def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
@@ -4017,15 +4046,17 @@ def configure_blueprints(flask_app: Flask) -> None:
         'LOOKUP_RELATIONS_BY_TABLE': LOOKUP_RELATIONS_BY_TABLE,
         'db_lock': db_lock,
         'get_db': get_db,
-        '_row_value': _row_value,
         '_normalize_lookup_name': _normalize_lookup_name,
-        '_get_or_create_lookup_id': _get_or_create_lookup_id,
-        '_lookup_name_for_id': _lookup_name_for_id,
         '_fetch_lookup_entries_for_game': _fetch_lookup_entries_for_game,
         '_lookup_entries_to_selection': _lookup_entries_to_selection,
         '_persist_lookup_relations': _persist_lookup_relations,
         '_apply_lookup_entries_to_processed_game': _apply_lookup_entries_to_processed_game,
         '_remove_lookup_id_from_entries': _remove_lookup_id_from_entries,
+        '_list_lookup_entries': _list_lookup_entries,
+        '_create_lookup_entry': _create_lookup_entry,
+        '_update_lookup_entry': _update_lookup_entry,
+        '_delete_lookup_entry': _delete_lookup_entry,
+        '_related_processed_game_ids': _related_processed_game_ids,
     })
 
     routes_updates.configure({
