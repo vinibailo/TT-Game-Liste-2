@@ -1,6 +1,6 @@
 import pandas as pd
 
-from tests.app_helpers import load_app
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def test_backfill_igdb_ids_skips_rows_with_summary(tmp_path):
@@ -18,15 +18,15 @@ def test_backfill_igdb_ids_skips_rows_with_summary(tmp_path):
                 ],
             )
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': '0', 'id': 101},
-            {'Source Index': '1', 'id': 202},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': '0', 'id': 101},
+                {'Source Index': '1', 'id': 202},
+            ]
+        ),
     )
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
 
     app_module.backfill_igdb_ids()
 

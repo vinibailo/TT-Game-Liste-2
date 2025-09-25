@@ -4,7 +4,7 @@ import io
 import pandas as pd
 from PIL import Image
 
-from tests.app_helpers import load_app
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def authenticate(client):
@@ -21,7 +21,9 @@ def generate_image_data_url() -> str:
 
 def test_non_zero_source_index_flow(tmp_path):
     app = load_app(tmp_path)
-    app.games_df = pd.DataFrame(
+    set_games_dataframe(
+        app,
+        pd.DataFrame(
         [
             {
                 'Source Index': '100',
@@ -42,10 +44,9 @@ def test_non_zero_source_index_flow(tmp_path):
                 'id': 303,
             },
         ]
+        ),
     )
-    if hasattr(app, 'reset_source_index_cache'):
-        app.reset_source_index_cache()
-    app.total_games = len(app.games_df)
+    navigator = app._ensure_navigator_dataframe(rebuild_state=True)
     with app.db_lock:
         with app.db:
             app.db.execute('DELETE FROM processed_games')
@@ -65,14 +66,15 @@ def test_non_zero_source_index_flow(tmp_path):
                     '2024-01-01T00:00:00Z',
                 ),
             )
-    app.navigator = app.GameNavigator(app.total_games)
+    app.catalog_state.set_navigator(app.GameNavigator(app.catalog_state.total_games))
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
 
     assert app.get_source_index_for_position(1) == '200'
     assert app.get_position_for_source_index('200') == 1
-    assert app.navigator.processed_total == 1
+    assert navigator.processed_total == 1
 
     payload = app.build_game_payload(
-        1, app.navigator.seq_index, app.navigator.processed_total + 1
+        1, navigator.seq_index, navigator.processed_total + 1
     )
     assert payload['id'] == 5
     assert payload['game']['Name'] == 'Stored Name'
@@ -80,7 +82,7 @@ def test_non_zero_source_index_flow(tmp_path):
     client = app.app.test_client()
     authenticate(client)
 
-    app.navigator.current_index = 1
+    navigator.current_index = 1
     response = client.post(
         '/api/save',
         json={
@@ -99,10 +101,10 @@ def test_non_zero_source_index_flow(tmp_path):
     assert updated_row['Source Index'] == '200'
     assert updated_row['Name'] == 'Updated Name'
     assert updated_row['Summary'] == 'Updated Summary'
-    assert app.navigator.seq_index == 6
+    assert navigator.seq_index == 6
 
-    app.navigator.current_index = 2
-    new_id = app.navigator.seq_index
+    navigator.current_index = 2
+    new_id = navigator.seq_index
     response = client.post(
         '/api/save',
         json={
@@ -113,8 +115,9 @@ def test_non_zero_source_index_flow(tmp_path):
         },
     )
     assert response.status_code == 200
-    assert app.navigator.seq_index == new_id + 1
-    assert app.navigator.processed_total == 2
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    assert navigator.seq_index == new_id + 1
+    assert navigator.processed_total == 2
     with app.db_lock:
         new_row = app.db.execute(
             'SELECT "ID", "Source Index", "Name" '

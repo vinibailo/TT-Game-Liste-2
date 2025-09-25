@@ -1,6 +1,8 @@
 import pandas as pd
 
-from tests.app_helpers import load_app
+import pandas as pd
+
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def test_seed_processed_games_respects_existing_keys(tmp_path):
@@ -17,14 +19,16 @@ def test_seed_processed_games_respects_existing_keys(tmp_path):
                 ],
             )
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': 'A-123', 'Name': 'Alpha Updated'},
-            {'Source Index': 'B-456', 'Name': 'Beta'},
-            {'Source Index': None, 'Name': 'Should Skip'},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': 'A-123', 'Name': 'Alpha Updated'},
+                {'Source Index': 'B-456', 'Name': 'Beta'},
+                {'Source Index': None, 'Name': 'Should Skip'},
+            ]
+        ),
     )
-    app_module.total_games = len(app_module.games_df)
 
     app_module.seed_processed_games_from_source()
 
@@ -57,12 +61,12 @@ def test_seed_processed_games_skips_rows_with_summary(tmp_path):
                 ),
             )
 
-    app_module.games_df = pd.DataFrame([
-        {'Source Index': '00123', 'Name': 'Updated From IGDB'},
-    ])
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame([
+            {'Source Index': '00123', 'Name': 'Updated From IGDB'},
+        ]),
+    )
 
     app_module.seed_processed_games_from_source()
 

@@ -3,29 +3,35 @@ import pandas as pd
 import json
 from pathlib import Path
 
-from tests.app_helpers import load_app
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def seed_games(app_module):
-    app_module.games_df = pd.DataFrame(
-        [
-            {
-                "Name": "Catalogued Game",
-                "Summary": "",
-                "First Launch Date": "",
-                "Developers": "",
-                "Publishers": "",
-                "Genres": "",
-                "Game Modes": "",
-                "Category": "",
-                "Platforms": "",
-                "Large Cover Image (URL)": "",
-                "id": 987654321,
-            }
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {
+                    "Name": "Catalogued Game",
+                    "Summary": "",
+                    "First Launch Date": "",
+                    "Developers": "",
+                    "Publishers": "",
+                    "Genres": "",
+                    "Game Modes": "",
+                    "Category": "",
+                    "Platforms": "",
+                    "Large Cover Image (URL)": "",
+                    "id": 987654321,
+                }
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.total_games = len(app_module.games_df)
-    app_module.navigator.total = app_module.total_games
+    app_module.catalog_state.set_navigator(
+        app_module.GameNavigator(app_module.catalog_state.total_games)
+    )
 
 
 def authenticate(client):
@@ -77,7 +83,8 @@ def test_game_by_id_returns_payload(tmp_path):
                 'WHERE "ID"=?',
                 (json.dumps([dev_id]), json.dumps([genre_id]), 1),
             )
-    app_module.navigator.current_index = 1
+    navigator = app_module._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 1
     client = app_module.app.test_client()
     authenticate(client)
     response = client.post(
@@ -96,7 +103,7 @@ def test_game_by_id_returns_payload(tmp_path):
     assert lookups['Developers']['ids'] == [dev_id]
     assert lookups['Genres']['names'] == ['Adventure']
     assert lookups['Genres']['ids'] == [genre_id]
-    assert app_module.navigator.current_index == 0
+    assert app_module._ensure_navigator_dataframe(rebuild_state=False).current_index == 0
     assert not (upload_dir / temp_name).exists()
 
 
@@ -120,30 +127,33 @@ def test_game_by_id_invalid_input(tmp_path):
 
 
 def _setup_igdb_prefill_app(app_module, igdb_id='123'):
-    app_module.games_df = pd.DataFrame(
-        [
-            {
-                "Source Index": "0",
-                "Name": "",
-                "Summary": "",
-                "First Launch Date": "",
-                "Developers": "",
-                "Publishers": "",
-                "Genres": "",
-                "Game Modes": "",
-                "Category": "",
-                "Platforms": "",
-                "Large Cover Image (URL)": "",
-                "IGDB ID": igdb_id,
-                "igdb_id": igdb_id,
-            }
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {
+                    "Source Index": "0",
+                    "Name": "",
+                    "Summary": "",
+                    "First Launch Date": "",
+                    "Developers": "",
+                    "Publishers": "",
+                    "Genres": "",
+                    "Game Modes": "",
+                    "Category": "",
+                    "Platforms": "",
+                    "Large Cover Image (URL)": "",
+                    "IGDB ID": igdb_id,
+                    "igdb_id": igdb_id,
+                }
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.reset_source_index_cache()
-    app_module.total_games = len(app_module.games_df)
-    app_module.navigator.total = app_module.total_games
-    app_module.navigator.current_index = 0
-    app_module.navigator.seq_index = 1
+    navigator = app_module._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
+    navigator.seq_index = 1
     with app_module.db_lock:
         with app_module.db:
             app_module.db.execute('DELETE FROM processed_games')
@@ -200,7 +210,7 @@ def test_build_game_payload_prefills_from_igdb(tmp_path):
     assert game['IGDBID'] == '123'
     assert payload['cover'] == 'cover::https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
     assert captured_urls[-1] == 'https://images.igdb.com/igdb/image/upload/t_original/abc123.jpg'
-    assert 'Main Game' in app_module.categories_list
+    assert 'Main Game' in app_module.catalog_state.get_categories()
 
 
 def test_api_game_raw_prefills_from_igdb(tmp_path):

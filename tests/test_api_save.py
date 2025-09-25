@@ -2,7 +2,7 @@ import pandas as pd
 
 import json
 
-from tests.app_helpers import load_app
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def test_api_save_index_conflict(tmp_path):
@@ -10,7 +10,8 @@ def test_api_save_index_conflict(tmp_path):
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
-    app.navigator.current_index = 0
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
     resp = client.post('/api/save', json={'index': 1, 'id': '1', 'fields': {}})
     assert resp.status_code == 409
     data = resp.get_json()
@@ -25,7 +26,8 @@ def test_api_save_id_conflict(tmp_path):
                 'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
                 (1, '0'),
             )
-    app.navigator.current_index = 0
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
@@ -40,8 +42,9 @@ def test_api_save_seq_mismatch(tmp_path):
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
-    app.navigator.current_index = 0
-    app.navigator.seq_index = 1
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
+    navigator.seq_index = 1
     resp = client.post('/api/save', json={'index': 0, 'id': '2', 'fields': {}})
     assert resp.status_code == 409
     data = resp.get_json()
@@ -50,19 +53,25 @@ def test_api_save_seq_mismatch(tmp_path):
 
 def test_api_save_success_increments_seq(tmp_path):
     app = load_app(tmp_path)
-    app.games_df = pd.DataFrame([
-        {
-            'Name': 'Test Game',
-            'id': 4321,
-        }
-    ])
-    app.total_games = len(app.games_df)
-    app.navigator.total = app.total_games
+    set_games_dataframe(
+        app,
+        pd.DataFrame(
+            [
+                {
+                    'Name': 'Test Game',
+                    'id': 4321,
+                }
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
+    )
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
-    app.navigator.current_index = 0
-    app.navigator.seq_index = 1
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
+    navigator.seq_index = 1
     fields_payload = {
         'Name': 'Test Game',
         'Lookups': {
@@ -78,7 +87,8 @@ def test_api_save_success_increments_seq(tmp_path):
         json={'index': 0, 'id': '1', 'fields': fields_payload},
     )
     assert resp.status_code == 200
-    assert app.navigator.seq_index == 2
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    assert navigator.seq_index == 2
     with app.db_lock:
         cur = app.db.execute(
             'SELECT * FROM processed_games WHERE "Source Index"=?',
@@ -131,13 +141,14 @@ def test_api_save_conflict_does_not_increment_seq(tmp_path):
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
-    app.navigator.current_index = 0
-    app.navigator.seq_index = 2
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 0
+    navigator.seq_index = 2
     resp = client.post('/api/save', json={'index': 0, 'id': '2', 'fields': {}})
     assert resp.status_code == 409
     data = resp.get_json()
     assert data['error'] == 'conflict'
-    assert app.navigator.seq_index == 2
+    assert app._ensure_navigator_dataframe(rebuild_state=False).seq_index == 2
 
 
 def test_api_save_existing_id_new_index_preserves_record(tmp_path):
@@ -151,8 +162,9 @@ def test_api_save_existing_id_new_index_preserves_record(tmp_path):
     client = app.app.test_client()
     with client.session_transaction() as sess:
         sess['authenticated'] = True
-    app.navigator.current_index = 1
-    app.navigator.seq_index = 1
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index = 1
+    navigator.seq_index = 1
     resp = client.post(
         '/api/save',
         json={'index': 1, 'id': '1', 'fields': {'Name': 'Updated'}},
@@ -160,7 +172,7 @@ def test_api_save_existing_id_new_index_preserves_record(tmp_path):
     assert resp.status_code == 409
     data = resp.get_json()
     assert data['error'] == 'conflict'
-    assert app.navigator.seq_index == 1
+    assert app._ensure_navigator_dataframe(rebuild_state=False).seq_index == 1
     with app.db_lock:
         cur = app.db.execute(
             'SELECT "Source Index", "Name" FROM processed_games WHERE "ID"=?',

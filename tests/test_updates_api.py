@@ -6,7 +6,7 @@ import json
 
 import pandas as pd
 
-from tests.app_helpers import load_app
+from tests.app_helpers import load_app, set_games_dataframe
 
 
 def authenticate(client):
@@ -205,17 +205,21 @@ def test_updates_list_includes_duplicates(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
-            {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
-            {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
+                {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
+                {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
-    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+    app_module.catalog_state.set_navigator(
+        app_module.GameNavigator(app_module.catalog_state.total_games)
+    )
 
     insert_processed_game(
         app_module,
@@ -670,18 +674,22 @@ def test_remove_duplicates_merges_duplicate_entries(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
-            {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
-            {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
-            {'Source Index': '3', 'Name': 'Tail Game', 'id': 30},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
+                {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
+                {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
+                {'Source Index': '3', 'Name': 'Tail Game', 'id': 30},
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
-    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+    app_module.catalog_state.set_navigator(
+        app_module.GameNavigator(app_module.catalog_state.total_games)
+    )
 
     insert_processed_game(
         app_module,
@@ -777,28 +785,33 @@ def test_remove_duplicates_merges_duplicate_entries(tmp_path):
     assert 3 not in publisher_ids
     assert 3 not in platform_ids
 
-    assert len(app_module.games_df) == 3
-    assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
-    assert app_module.total_games == 3
-    assert app_module.navigator.total == 3
+    df = app_module.catalog_state.games_df
+    assert len(df) == 3
+    assert list(df['Source Index']) == ['0', '1', '2']
+    assert app_module.catalog_state.total_games == 3
+    assert app_module._ensure_navigator_dataframe(rebuild_state=False).total == 3
 
 
 def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
-            {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
-            {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
-            {'Source Index': '3', 'Name': 'Tail Game', 'id': 30},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': '0', 'Name': 'Unique Game', 'id': 10},
+                {'Source Index': '1', 'Name': 'Duplicated Game', 'id': 20},
+                {'Source Index': '2', 'Name': 'Duplicated Game', 'id': 20},
+                {'Source Index': '3', 'Name': 'Tail Game', 'id': 30},
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
-    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+    app_module.catalog_state.set_navigator(
+        app_module.GameNavigator(app_module.catalog_state.total_games)
+    )
 
     insert_processed_game(
         app_module,
@@ -868,24 +881,29 @@ def test_remove_duplicate_endpoint_deletes_entry(tmp_path):
     publisher_ids = {row['processed_game_id'] for row in publisher_rows}
     assert duplicate_row['ID'] in publisher_ids
     assert 3 not in publisher_ids
-    assert len(app_module.games_df) == 3
-    assert list(app_module.games_df['Source Index']) == ['0', '1', '2']
+    df = app_module.catalog_state.games_df
+    assert len(df) == 3
+    assert list(df['Source Index']) == ['0', '1', '2']
 
 
 def test_remove_duplicates_handles_all_duplicates(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
-    app_module.games_df = pd.DataFrame(
-        [
-            {'Source Index': '0', 'Name': 'Duplicate One', 'id': 50},
-            {'Source Index': '1', 'Name': 'Duplicate One', 'id': 50},
-        ]
+    set_games_dataframe(
+        app_module,
+        pd.DataFrame(
+            [
+                {'Source Index': '0', 'Name': 'Duplicate One', 'id': 50},
+                {'Source Index': '1', 'Name': 'Duplicate One', 'id': 50},
+            ]
+        ),
+        rebuild_metadata=False,
+        rebuild_navigator=True,
     )
-    app_module.total_games = len(app_module.games_df)
-    if hasattr(app_module, 'reset_source_index_cache'):
-        app_module.reset_source_index_cache()
-    app_module.navigator = app_module.GameNavigator(app_module.total_games)
+    app_module.catalog_state.set_navigator(
+        app_module.GameNavigator(app_module.catalog_state.total_games)
+    )
 
     insert_processed_game(
         app_module,
@@ -916,6 +934,7 @@ def test_remove_duplicates_handles_all_duplicates(tmp_path):
         ).fetchall()
 
     assert [row['Source Index'] for row in rows] == ['0']
-    assert len(app_module.games_df) == 1
-    assert list(app_module.games_df['Source Index']) == ['0']
-    assert app_module.total_games == 1
+    df = app_module.catalog_state.games_df
+    assert len(df) == 1
+    assert list(df['Source Index']) == ['0']
+    assert app_module.catalog_state.total_games == 1

@@ -178,7 +178,8 @@ def test_save_with_outdated_index_keeps_next_row_intact(tmp_path):
     with client.session_transaction() as sess:
         sess['authenticated'] = True
     # Simulate navigator moving to the next index while still editing index 0
-    app.navigator.current_index += 1  # now at 1
+    navigator = app._ensure_navigator_dataframe(rebuild_state=False)
+    navigator.current_index += 1  # now at 1
     resp = client.post(
         '/api/save',
         json={'index': 0, 'id': '1', 'fields': {'Name': 'changed'}},
