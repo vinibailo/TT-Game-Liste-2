@@ -18,7 +18,6 @@ from routes.api_utils import (
     NotFoundError,
     handle_api_errors,
 )
-from PIL import Image
 
 # TODO: Register endpoints for editor workflows, uploads, and navigation.
 games_blueprint = Blueprint("games", __name__)
@@ -304,15 +303,17 @@ def api_save():
         if image_b64:
             header, b64data = image_b64.split(',', 1)
             _ = header
-            img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-            img = img.convert('RGB')
-            if min(img.size) < 1080:
-                img = img.resize((1080, 1080))
-            else:
-                img = img.resize((1080, 1080))
+            try:
+                decoded = base64.b64decode(b64data)
+            except Exception as exc:
+                raise BadRequestError('invalid image upload') from exc
+            try:
+                img = _ctx('open_image_auto_rotate')(io.BytesIO(decoded))
+            except Exception as exc:
+                raise BadRequestError('invalid image upload') from exc
             cover_path = os.path.join(processed_dir, f"{seq_id}.jpg")
-            img.save(cover_path, format='JPEG', quality=90)
-            width, height = img.size
+            save_cover_image = _ctx('save_cover_image')
+            _processed_img, width, height = save_cover_image(img, cover_path)
         elif existing_cover_path:
             cover_path = str(existing_cover_path)
             try:
