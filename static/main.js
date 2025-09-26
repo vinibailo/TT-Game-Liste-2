@@ -17,7 +17,6 @@ const lookupConfigs = {
 const lookupChoicesInstances = {};
 const lookupIdToName = {};
 const lookupNameToId = {};
-const lookupOptionsCache = {};
 const imageUploadInput = document.getElementById('imageUpload');
 const placeholderImage = '/no-image.jpg';
 const saveButton = document.getElementById('save');
@@ -33,16 +32,6 @@ const jumpInput = document.getElementById('jump-input');
 const jumpSubmit = document.getElementById('jump-submit');
 const jumpMenu = document.getElementById('jump-menu');
 const jumpSummary = jumpMenu ? jumpMenu.querySelector('summary') : null;
-const searchInput = document.getElementById('game-search');
-const filterCategorySelect = document.getElementById('filter-category');
-const filterGenresSelect = document.getElementById('filter-genres');
-const searchResultsList = document.getElementById('search-results-list');
-const searchSummary = document.getElementById('search-summary');
-const DEFAULT_SEARCH_MESSAGE = 'Type at least two characters or choose a filter to search.';
-let filterGenresChoices = null;
-const searchState = { query: '', category: '', genres: [] };
-let searchDebounceTimer = null;
-let currentSearchRequestId = 0;
 const urlSearchParams = new URLSearchParams(window.location.search);
 const initialGameIdParam = (() => {
     const value = urlSearchParams.get('game_id');
@@ -90,24 +79,6 @@ function populateSelect(id, options) {
         opt.value = o;
         opt.textContent = o;
         sel.appendChild(opt);
-    });
-}
-
-function populateCategorySelects() {
-    populateSelect('category', categoriesList);
-    if (!filterCategorySelect) {
-        return;
-    }
-    filterCategorySelect.innerHTML = '';
-    const defaultOption = document.createElement('option');
-    defaultOption.value = '';
-    defaultOption.textContent = 'All categories';
-    filterCategorySelect.appendChild(defaultOption);
-    categoriesList.forEach(category => {
-        const option = document.createElement('option');
-        option.value = category;
-        option.textContent = category;
-        filterCategorySelect.appendChild(option);
     });
 }
 
@@ -333,13 +304,11 @@ async function initializeLookupControls() {
             lookupChoicesInstances[key] = null;
             lookupIdToName[key] = new Map();
             lookupNameToId[key] = new Map();
-            lookupOptionsCache[key] = items;
             return;
         }
         const { idMap, nameIndex } = populateLookupSelectElement(element, items);
         lookupIdToName[key] = idMap;
         lookupNameToId[key] = nameIndex;
-        lookupOptionsCache[key] = items;
         const choices = new Choices(element, {
             removeItemButton: true,
             shouldSort: false,
@@ -347,256 +316,6 @@ async function initializeLookupControls() {
         choices.passedElement.element.addEventListener('change', saveSession);
         lookupChoicesInstances[key] = choices;
     });
-}
-
-function readGenreFilterValues() {
-    if (filterGenresChoices && typeof filterGenresChoices.getValue === 'function') {
-        const raw = filterGenresChoices.getValue(true);
-        if (Array.isArray(raw)) {
-            return raw.map(value => String(value).trim()).filter(Boolean);
-        }
-    }
-    if (!filterGenresSelect) {
-        return [];
-    }
-    return Array.from(filterGenresSelect.selectedOptions)
-        .map(option => String(option.value).trim())
-        .filter(Boolean);
-}
-
-function updateSearchStateFromControls() {
-    searchState.query = searchInput ? searchInput.value.trim() : '';
-    searchState.category = filterCategorySelect ? filterCategorySelect.value.trim() : '';
-    searchState.genres = readGenreFilterValues();
-}
-
-function shouldRunSearch() {
-    if (searchState.category) return true;
-    if (searchState.genres.length) return true;
-    return searchState.query.length >= 2;
-}
-
-function clearSearchResults(message = DEFAULT_SEARCH_MESSAGE) {
-    if (searchResultsList) {
-        searchResultsList.innerHTML = '';
-    }
-    if (searchSummary) {
-        searchSummary.textContent = message;
-    }
-}
-
-function highlightCurrentSearchResult() {
-    if (!searchResultsList) return;
-    const buttons = searchResultsList.querySelectorAll('button.search-result');
-    buttons.forEach(button => {
-        const value = Number.parseInt(button.dataset.index, 10);
-        if (!Number.isNaN(value) && value === currentIndex) {
-            button.setAttribute('data-active', 'true');
-        } else {
-            button.removeAttribute('data-active');
-        }
-    });
-}
-
-function renderSearchResults(data) {
-    if (!searchResultsList || !searchSummary) {
-        return;
-    }
-    const results = Array.isArray(data.results) ? data.results : [];
-    const totalMatches = typeof data.matches === 'number' ? data.matches : results.length;
-    const limit = typeof data.limit === 'number' ? data.limit : results.length;
-    searchResultsList.innerHTML = '';
-    if (!results.length) {
-        searchSummary.textContent = totalMatches
-            ? 'No results available within the current limit. Refine your filters.'
-            : 'No matches found for the current search.';
-        return;
-    }
-    const summaryParts = [`Showing ${results.length} of ${totalMatches} match${totalMatches === 1 ? '' : 'es'}.`];
-    if (totalMatches > limit) {
-        summaryParts.push('Refine your search to narrow the results.');
-    }
-    searchSummary.textContent = summaryParts.join(' ');
-    results.forEach(item => {
-        const li = document.createElement('li');
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'search-result';
-        button.dataset.index = String(item.index);
-
-        const title = document.createElement('span');
-        title.className = 'search-result-title';
-        title.textContent = item.name || 'Untitled Game';
-        button.appendChild(title);
-
-        const meta = document.createElement('div');
-        meta.className = 'search-result-meta';
-
-        const sourceIndex = item.source_index ? String(item.source_index).trim() : '';
-        if (sourceIndex) {
-            const chip = document.createElement('span');
-            chip.className = 'search-result-chip';
-            chip.textContent = `Index ${sourceIndex}`;
-            meta.appendChild(chip);
-        }
-
-        if (item.category) {
-            const chip = document.createElement('span');
-            chip.className = 'search-result-chip';
-            chip.textContent = item.category;
-            meta.appendChild(chip);
-        }
-
-        if (Array.isArray(item.genres)) {
-            item.genres.forEach(genre => {
-                const trimmed = String(genre || '').trim();
-                if (!trimmed) return;
-                const chip = document.createElement('span');
-                chip.className = 'search-result-chip';
-                chip.textContent = trimmed;
-                meta.appendChild(chip);
-            });
-        }
-
-        if (item.igdb_id) {
-            const chip = document.createElement('span');
-            chip.className = 'search-result-chip';
-            chip.textContent = `IGDB ${item.igdb_id}`;
-            meta.appendChild(chip);
-        }
-
-        if (item.processed_id) {
-            const chip = document.createElement('span');
-            chip.className = 'search-result-chip';
-            chip.textContent = `ID ${item.processed_id}`;
-            meta.appendChild(chip);
-        }
-
-        if (meta.childNodes.length) {
-            button.appendChild(meta);
-        }
-
-        li.appendChild(button);
-        searchResultsList.appendChild(li);
-    });
-    highlightCurrentSearchResult();
-}
-
-async function performSearch() {
-    updateSearchStateFromControls();
-    if (!shouldRunSearch()) {
-        clearSearchResults(DEFAULT_SEARCH_MESSAGE);
-        return;
-    }
-    clearSearchResults('Searching…');
-    const requestId = ++currentSearchRequestId;
-    const payload = {
-        query: searchState.query,
-        category: searchState.category,
-        genres: searchState.genres,
-    };
-    try {
-        const response = await fetch('api/search', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await response.json();
-        if (!response.ok || data.error) {
-            throw new Error(data.error || 'search failed');
-        }
-        if (requestId !== currentSearchRequestId) {
-            return;
-        }
-        renderSearchResults(data);
-    } catch (err) {
-        if (requestId !== currentSearchRequestId) {
-            return;
-        }
-        console.error(err);
-        clearSearchResults('Search failed. Try adjusting your query.');
-    }
-}
-
-function scheduleSearch() {
-    if (searchDebounceTimer) {
-        clearTimeout(searchDebounceTimer);
-    }
-    searchDebounceTimer = setTimeout(() => {
-        performSearch();
-    }, 250);
-}
-
-async function gotoIndex(position) {
-    if (Number.isNaN(position)) {
-        return;
-    }
-    if (navigating) {
-        return;
-    }
-    navigating = true;
-    setNavDisabled(true);
-    setJumpControlsDisabled(true);
-    try {
-        const response = await fetch('api/set_index', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ index: position, upload_name: currentUpload }),
-        });
-        const data = await response.json();
-        if (!response.ok || data.error) {
-            throw new Error(data.error || 'failed to load selection');
-        }
-        localStorage.removeItem('session');
-        currentUpload = null;
-        applyGameData(data);
-    } catch (err) {
-        console.error(err);
-        showToast('Failed to load the selected game.', 'warning');
-    } finally {
-        navigating = false;
-        setNavDisabled(false);
-        setJumpControlsDisabled(false);
-    }
-}
-
-function handleSearchResultClick(event) {
-    const button = event.target.closest('button.search-result');
-    if (!button) return;
-    const value = Number.parseInt(button.dataset.index, 10);
-    if (Number.isNaN(value)) {
-        return;
-    }
-    gotoIndex(value);
-}
-
-function initializeFilterLookups() {
-    if (filterGenresSelect) {
-        filterGenresSelect.innerHTML = '';
-        const genreItems = lookupOptionsCache.Genres || [];
-        genreItems.forEach(item => {
-            if (!item || !item.name) return;
-            const option = document.createElement('option');
-            option.value = item.name;
-            option.textContent = item.name;
-            filterGenresSelect.appendChild(option);
-        });
-        if (typeof Choices === 'function') {
-            filterGenresChoices = new Choices(filterGenresSelect, {
-                removeItemButton: true,
-                shouldSort: true,
-            });
-            filterGenresChoices.passedElement.element.addEventListener('change', () => {
-                searchState.genres = readGenreFilterValues();
-                scheduleSearch();
-            });
-        } else {
-            filterGenresSelect.addEventListener('change', () => {
-                searchState.genres = readGenreFilterValues();
-                scheduleSearch();
-            });
-        }
-    }
 }
 
 function updateGameIdDisplay(idValue) {
@@ -620,118 +339,6 @@ function collectFields() {
         Category: document.getElementById('category').value,
         Lookups: lookups,
     };
-}
-
-const requiredFieldConfigs = [
-    { id: 'name', message: 'Title is required.' },
-    { id: 'summary', message: 'Summary is required.' },
-    { id: 'category', message: 'Category is required.' },
-];
-
-const fieldValidationEntries = requiredFieldConfigs
-    .map(config => createFieldValidator(config))
-    .filter(Boolean);
-
-const missingFieldMap = {
-    Name: 'name',
-    Summary: 'summary',
-    Category: 'category',
-};
-
-function createFieldValidator({ id, message }) {
-    const field = document.getElementById(id);
-    if (!field) return null;
-    const errorElement = document.querySelector(`[data-error-for="${id}"]`);
-    let touched = false;
-
-    const applyState = isValid => {
-        if (isValid) {
-            field.removeAttribute('aria-invalid');
-            field.classList.remove('is-invalid');
-            if (errorElement) {
-                errorElement.textContent = '';
-            }
-        } else {
-            field.setAttribute('aria-invalid', 'true');
-            field.classList.add('is-invalid');
-            if (errorElement) {
-                errorElement.textContent = message;
-            }
-        }
-    };
-
-    const evaluate = force => {
-        if (!touched && !force) {
-            applyState(true);
-            return true;
-        }
-        const value = field.value != null ? String(field.value).trim() : '';
-        const isValid = value.length > 0;
-        applyState(isValid);
-        return isValid;
-    };
-
-    const handleInteraction = () => {
-        touched = true;
-        evaluate(true);
-    };
-
-    field.addEventListener('input', handleInteraction);
-    field.addEventListener('blur', handleInteraction);
-    field.addEventListener('change', handleInteraction);
-
-    return {
-        id,
-        field,
-        check(force = false) {
-            if (force) {
-                touched = true;
-            }
-            return evaluate(force);
-        },
-        reset() {
-            touched = false;
-            applyState(true);
-        },
-        markInvalid() {
-            touched = true;
-            applyState(false);
-        },
-    };
-}
-
-function resetFieldValidation() {
-    fieldValidationEntries.forEach(entry => {
-        if (entry && typeof entry.reset === 'function') {
-            entry.reset();
-        }
-    });
-}
-
-function validateRequiredFields(force = false) {
-    let valid = true;
-    fieldValidationEntries.forEach(entry => {
-        if (!entry) return;
-        const result = entry.check(force);
-        if (!result) {
-            valid = false;
-        }
-    });
-    return valid;
-}
-
-function markMissingFields(missingKeys) {
-    if (!Array.isArray(missingKeys) || !missingKeys.length) {
-        return;
-    }
-    missingKeys.forEach(key => {
-        const mappedId = missingFieldMap[key];
-        if (!mappedId) return;
-        const validator = fieldValidationEntries.find(entry => entry && entry.id === mappedId);
-        if (validator && typeof validator.markInvalid === 'function') {
-            validator.markInvalid();
-        }
-    });
 }
 
 function setNavDisabled(state) {
@@ -958,10 +565,7 @@ function applyGameData(data) {
     totalGames = total;
     const safeProcessed = total ? Math.min(processed, total) : processed;
     const ratio = total ? safeProcessed / total : 0;
-    const completionValue = typeof data.completion === 'number' ? data.completion : null;
-    const progressPercent = completionValue !== null
-        ? Math.min(100, Math.max(0, completionValue))
-        : Math.min(100, Math.max(0, ratio * 100));
+    const progressPercent = Math.min(100, Math.max(0, ratio * 100));
     document.getElementById('progress').style.width = `${progressPercent}%`;
     const countLabel = `${safeProcessed}/${total || 0}`;
     const percentLabel = `${progressPercent.toFixed(2)}%`;
@@ -989,12 +593,9 @@ function applyGameData(data) {
     }
     currentUpload = null;
     restoreSession();
-    resetFieldValidation();
     if (Array.isArray(data.missing) && data.missing.length) {
-        markMissingFields(data.missing);
         showToast('Campos vazios: ' + data.missing.join(', '), 'warning');
     }
-    highlightCurrentSearchResult();
     saveSession();
 }
 
@@ -1034,10 +635,6 @@ async function loadInitialGame() {
 }
 
 async function saveGame() {
-    if (!validateRequiredFields(true)) {
-        showToast('Preencha os campos obrigatórios antes de salvar.', 'warning');
-        return;
-    }
     if (!cropper) {
         showToast('Selecione uma imagem', 'warning');
         return;
@@ -1325,7 +922,6 @@ function resetFields() {
             originalImage = null;
         }
         currentUpload = null;
-        resetFieldValidation();
         saveSession();
     }).catch(err => {
         console.error(err);
@@ -1386,27 +982,6 @@ document.getElementById('name').addEventListener('input', (event) => {
     document.getElementById('game-name').textContent = value || 'Untitled Game';
 });
 
-if (searchResultsList) {
-    searchResultsList.addEventListener('click', handleSearchResultClick);
-}
-
-if (searchInput) {
-    searchInput.addEventListener('input', () => {
-        scheduleSearch();
-    });
-    searchInput.addEventListener('keydown', event => {
-        if (event.key === 'Enter') {
-            event.preventDefault();
-        }
-    });
-}
-
-if (filterCategorySelect) {
-    filterCategorySelect.addEventListener('change', () => {
-        scheduleSearch();
-    });
-}
-
 document.addEventListener('keydown', (event) => {
     const activeElement = document.activeElement;
     const typing = isTypingElement(activeElement);
@@ -1443,14 +1018,9 @@ document.addEventListener('keydown', (event) => {
     }
 });
 
-populateCategorySelects();
-clearSearchResults(DEFAULT_SEARCH_MESSAGE);
+populateSelect('category', categoriesList);
 
 initializeLookupControls()
-    .then(() => {
-        initializeFilterLookups();
-        updateSearchStateFromControls();
-    })
     .catch(err => {
         console.error(err);
         showToast('Failed to load lookup options.', 'warning');
