@@ -13,6 +13,7 @@ from routes.api_utils import (
     UpstreamServiceError,
     handle_api_errors,
 )
+from updates import service as updates_service
 
 updates_blueprint = Blueprint("updates", __name__)
 
@@ -76,90 +77,26 @@ def api_igdb_cache_refresh():
     igdb_prefill_lock = _ctx('_igdb_prefill_lock')
     igdb_prefill_cache = _ctx('_igdb_prefill_cache')
 
-    with db_lock:
-        conn = get_db()
-        total = get_cached_total(conn)
-
-    if total is None or offset == 0:
-        try:
-            total = download_igdb_game_count(access_token, client_id)
-        except RuntimeError as exc:
-            raise UpstreamServiceError(str(exc)) from exc
-        with db_lock:
-            conn = get_db()
-            with conn:
-                set_cached_total(conn, total)
-
-    if total is None or total <= 0:
-        with db_lock:
-            conn = get_db()
-            with conn:
-                set_cached_total(conn, total)
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total or 0,
-                'processed': 0,
-                'inserted': 0,
-                'updated': 0,
-                'unchanged': 0,
-                'done': True,
-                'next_offset': 0,
-                'batch_count': 0,
-            }
-        )
-
-    if offset >= total:
-        return jsonify(
-            {
-                'status': 'ok',
-                'total': total,
-                'processed': total,
-                'inserted': 0,
-                'updated': 0,
-                'unchanged': 0,
-                'done': True,
-                'next_offset': total,
-                'batch_count': 0,
-            }
-        )
-
     try:
-        payloads = download_igdb_games(access_token, client_id, offset, limit)
+        result = updates_service.refresh_igdb_cache(
+            access_token,
+            client_id,
+            offset,
+            limit,
+            db_lock=db_lock,
+            get_db=get_db,
+            get_cached_total=get_cached_total,
+            set_cached_total=set_cached_total,
+            download_total=download_igdb_game_count,
+            download_games=download_igdb_games,
+            upsert_games=upsert_cache_entries,
+            igdb_prefill_cache=igdb_prefill_cache,
+            igdb_prefill_lock=igdb_prefill_lock,
+        )
     except RuntimeError as exc:
         raise UpstreamServiceError(str(exc)) from exc
 
-    batch_count = len(payloads)
-    with db_lock:
-        conn = get_db()
-        with conn:
-            inserted, updated, unchanged = upsert_cache_entries(conn, payloads)
-
-    with igdb_prefill_lock:
-        if batch_count:
-            igdb_prefill_cache.clear()
-
-    processed = offset + batch_count
-    if total is not None:
-        processed = min(processed, total)
-    if processed < 0:
-        processed = 0
-    done = processed >= total or batch_count == 0
-    next_offset = offset + batch_count if batch_count else processed
-
-    return jsonify(
-        {
-            'status': 'ok',
-            'total': total,
-            'processed': processed,
-            'inserted': inserted,
-            'updated': updated,
-            'unchanged': unchanged,
-            'done': done,
-            'next_offset': next_offset,
-            'batch_count': batch_count,
-        }
-    )
+    return jsonify(result)
 
 
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])
