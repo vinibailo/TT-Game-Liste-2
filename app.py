@@ -1959,106 +1959,17 @@ def _build_cache_row_from_payload(
 def _upsert_igdb_cache_entries(
     conn: sqlite3.Connection, payloads: Iterable[Mapping[str, Any]]
 ) -> tuple[int, int, int]:
-    inserted = updated = unchanged = 0
-    for payload in payloads:
-        row = _build_cache_row_from_payload(payload)
-        if row is None:
-            continue
-        igdb_id = row['igdb_id']
-        existing = conn.execute(
-            f'''SELECT name, summary, updated_at, first_release_date, category,
-                       cover_image_id, rating_count, developers, publishers, genres,
-                       platforms, game_modes
-                FROM {IGDB_CACHE_TABLE}
-                WHERE igdb_id = ?''',
-            (igdb_id,),
-        ).fetchone()
-        cached_at = now_utc_iso()
-        params = (
-            row['name'],
-            row['summary'],
-            row['updated_at'],
-            row['first_release_date'],
-            row['category'],
-            row['cover_image_id'],
-            row['rating_count'],
-            row['developers_json'],
-            row['publishers_json'],
-            row['genres_json'],
-            row['platforms_json'],
-            row['game_modes_json'],
-        )
-        if existing is None:
-            conn.execute(
-                f'''INSERT INTO {IGDB_CACHE_TABLE} (
-                        igdb_id, name, summary, updated_at, first_release_date,
-                        category, cover_image_id, rating_count, developers,
-                        publishers, genres, platforms, game_modes, cached_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (
-                    igdb_id,
-                    *params,
-                    cached_at,
-                ),
-            )
-            inserted += 1
-            continue
-
-        existing_values = (
-            existing['name'],
-            existing['summary'],
-            existing['updated_at'],
-            existing['first_release_date'],
-            existing['category'],
-            existing['cover_image_id'],
-            existing['rating_count'],
-            existing['developers'],
-            existing['publishers'],
-            existing['genres'],
-            existing['platforms'],
-            existing['game_modes'],
-        )
-        if existing_values == params:
-            unchanged += 1
-            continue
-
-        conn.execute(
-            f'''UPDATE {IGDB_CACHE_TABLE}
-                   SET name=?, summary=?, updated_at=?, first_release_date=?,
-                       category=?, cover_image_id=?, rating_count=?,
-                       developers=?, publishers=?, genres=?, platforms=?,
-                       game_modes=?, cached_at=?
-                 WHERE igdb_id=?''',
-            (*params, cached_at, igdb_id),
-        )
-        updated += 1
-    return inserted, updated, unchanged
+    return igdb_cache.upsert_igdb_games(conn, payloads)
 
 
 def _get_cached_igdb_total(conn: sqlite3.Connection) -> int | None:
-    row = conn.execute(
-        f'SELECT total_count FROM {IGDB_CACHE_STATE_TABLE} WHERE id = 1'
-    ).fetchone()
-    if row is None:
-        return None
-    try:
-        return int(row['total_count']) if row['total_count'] is not None else None
-    except (TypeError, ValueError):
-        return None
+    return igdb_cache.get_cached_total(conn)
 
 
 def _set_cached_igdb_total(
     conn: sqlite3.Connection, total: int | None, synced_at: str | None = None
 ) -> None:
-    timestamp = synced_at or now_utc_iso()
-    conn.execute(
-        f'''INSERT INTO {IGDB_CACHE_STATE_TABLE} (id, total_count, last_synced_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                total_count=excluded.total_count,
-                last_synced_at=excluded.last_synced_at''',
-        (total, timestamp),
-    )
+    igdb_cache.set_cached_total(conn, total, synced_at=synced_at)
 
 
 
