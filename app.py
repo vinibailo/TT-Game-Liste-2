@@ -2383,29 +2383,46 @@ def generate_pt_summary(game_name: str) -> str:
     """Generate a simple spoiler-free Portuguese summary for a game by name."""
     if not game_name:
         raise ValueError("game_name is required")
-    if not OPENAI_API_KEY or client is None:
-        raise RuntimeError("OPENAI_API_KEY not set")
-    response = client.chat.completions.create(
-        model='gpt-3.5-turbo',
-        messages=[
-            {
-                'role': 'system',
-                'content': (
-                    'Você é um assistente que cria sinopses curtas de jogos '
-                    'em português do Brasil sem revelar spoilers.'
-                ),
-            },
-            {
-                'role': 'user',
-                'content': (
-                    f"Escreva uma sinopse um pouco mais longa (3 a 5 frases) para o jogo '{game_name}'."
-                ),
-            },
-        ],
-        temperature=0.7,
-        max_tokens=200,
+    placeholder = (
+        "Sinopse temporariamente indisponível. Preencha manualmente ou tente novamente"
+        f" para '{game_name}'."
     )
-    return response.choices[0].message.content.strip()
+    if not OPENAI_SUMMARY_ENABLED or client is None:
+        return placeholder
+
+    try:
+        response = client.chat.completions.create(
+            model='gpt-3.5-turbo',
+            messages=[
+                {
+                    'role': 'system',
+                    'content': (
+                        'Você é um assistente que cria sinopses curtas de jogos '
+                        'em português do Brasil sem revelar spoilers.'
+                    ),
+                },
+                {
+                    'role': 'user',
+                    'content': (
+                        "Escreva uma sinopse um pouco mais longa (3 a 5 frases) para o jogo "
+                        f"'{game_name}'."
+                    ),
+                },
+            ],
+            temperature=0.7,
+            max_tokens=200,
+        )
+    except Exception as exc:  # pragma: no cover - relies on external service
+        logger.warning("OpenAI summary generation failed: %s", exc)
+        return placeholder
+
+    message = (response.choices or [None])[0]
+    content = getattr(message, 'message', getattr(message, 'text', None))
+    if content:
+        return getattr(content, 'content', content).strip()
+
+    logger.warning("OpenAI response missing content for game '%s'", game_name)
+    return placeholder
 
 
 # initial load
