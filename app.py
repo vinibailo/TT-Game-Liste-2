@@ -1113,6 +1113,12 @@ def handle_file_too_large(e):
     return jsonify({'error': 'file too large'}), 413
 
 
+try:  # Pillow >= 9.1
+    _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+except AttributeError:  # pragma: no cover - fallback for older Pillow
+    _RESAMPLE_LANCZOS = Image.LANCZOS
+
+
 def open_image_auto_rotate(source: Any) -> Image.Image:
     """Open image from path or file-like and auto-rotate using EXIF."""
     img = Image.open(source) if not isinstance(source, Image.Image) else source
@@ -1132,6 +1138,43 @@ def open_image_auto_rotate(source: Any) -> Image.Image:
     except Exception:
         pass
     return img.convert('RGB')
+
+
+def _prepare_cover_image(img: Image.Image, *, min_size: int = 1080) -> Image.Image:
+    """Ensure ``img`` is RGB and meets the minimum cover size."""
+
+    prepared = img.convert('RGB')
+    width, height = prepared.size
+    shortest = min(width, height)
+    if shortest <= 0:
+        return prepared
+    if shortest >= min_size:
+        return prepared
+
+    scale = min_size / shortest
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    if (new_width, new_height) == prepared.size:
+        return prepared
+    return prepared.resize((new_width, new_height), _RESAMPLE_LANCZOS)
+
+
+def save_cover_image(
+    img: Image.Image,
+    dest_path: str,
+    *,
+    min_size: int = 1080,
+    quality: int = 90,
+) -> tuple[Image.Image, int, int]:
+    """Persist ``img`` to ``dest_path`` ensuring minimum dimensions."""
+
+    prepared = _prepare_cover_image(img, min_size=min_size)
+    directory = os.path.dirname(dest_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    prepared.save(dest_path, format='JPEG', quality=quality)
+    width, height = prepared.size
+    return prepared, width, height
 
 
 def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
@@ -1433,8 +1476,9 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
 
 
 def _encode_cover_image(img: Image.Image) -> str:
+    prepared = _prepare_cover_image(img)
     buf = io.BytesIO()
-    img.save(buf, format='JPEG')
+    prepared.save(buf, format='JPEG')
     return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
 
 
@@ -3329,6 +3373,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         'build_game_payload': build_game_payload,
         'generate_pt_summary': generate_pt_summary,
         'open_image_auto_rotate': open_image_auto_rotate,
+        'save_cover_image': save_cover_image,
         'upload_dir': UPLOAD_DIR,
         'processed_dir': PROCESSED_DIR,
         'db_lock': db_lock,
