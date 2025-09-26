@@ -44,22 +44,8 @@ def updates_page():
 @handle_api_errors
 def api_igdb_cache_refresh():
     payload = request.get_json(silent=True) or {}
-    try:
-        offset = int(payload.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    try:
-        limit = int(payload.get('limit', _ctx('IGDB_BATCH_SIZE')))
-    except (TypeError, ValueError):
-        limit = _ctx('IGDB_BATCH_SIZE')
-
-    if offset < 0:
-        offset = 0
-    if not isinstance(limit, int) or limit <= 0:
-        limit = _ctx('IGDB_BATCH_SIZE')
-    if not isinstance(limit, int) or limit <= 0:
-        limit = 500
-    limit = min(limit, 500)
+    offset = payload.get('offset', 0)
+    limit = payload.get('limit', _ctx('IGDB_BATCH_SIZE'))
 
     exchange_twitch_credentials = _ctx('exchange_twitch_credentials')()
     try:
@@ -96,7 +82,38 @@ def api_igdb_cache_refresh():
     except RuntimeError as exc:
         raise UpstreamServiceError(str(exc)) from exc
 
-    return jsonify(result)
+    total = result.get('total') or 0
+    processed = result.get('processed') or 0
+    try:
+        total_value = max(int(total), 0)
+    except (TypeError, ValueError):
+        total_value = 0
+    try:
+        processed_value = max(int(processed), 0)
+    except (TypeError, ValueError):
+        processed_value = 0
+
+    progress_total = total_value if total_value > 0 else processed_value
+    progress_current = (
+        min(processed_value, progress_total)
+        if progress_total > 0
+        else processed_value
+    )
+    progress_percent = 0.0
+    if progress_total > 0:
+        progress_percent = min(
+            100.0,
+            max(0.0, (progress_current / progress_total) * 100),
+        )
+
+    response_payload = {
+        **result,
+        'progress_total': progress_total,
+        'progress_current': progress_current,
+        'progress_percent': progress_percent,
+    }
+
+    return jsonify(response_payload)
 
 
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])
