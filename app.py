@@ -6,11 +6,13 @@ import sqlite3
 import numbers
 import re
 import math
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional
 from threading import Lock
 import logging
+import logging.config
 from bisect import bisect_left
 
 from flask import (
@@ -49,6 +51,7 @@ from config import (
     SQLITE_TIMEOUT_SECONDS,
     UPLOAD_DIR,
     get_lookup_data_dir,
+    LOG_FILE,
 )
 from helpers import (
     _collect_company_names,
@@ -116,6 +119,67 @@ _PLACEHOLDER_IMPORTS = (
 logger = logging.getLogger(__name__)
 
 igdb_api_client = IGDBClient()
+
+
+def _determine_log_level(flask_app: Flask) -> int:
+    if flask_app.debug:
+        return logging.DEBUG
+    env_value = str(flask_app.config.get('ENV', '')).lower()
+    if env_value == 'development':
+        return logging.DEBUG
+    if os.environ.get('FLASK_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}:
+        return logging.DEBUG
+    return logging.INFO
+
+
+def _configure_logging(flask_app: Flask) -> None:
+    log_level = _determine_log_level(flask_app)
+    log_path = Path(LOG_FILE)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    for handler in list(flask_app.logger.handlers):
+        flask_app.logger.removeHandler(handler)
+
+    logging.config.dictConfig(
+        {
+            'version': 1,
+            'disable_existing_loggers': False,
+            'formatters': {
+                'standard': {
+                    'format': '%(asctime)s %(levelname)s [%(name)s] %(message)s',
+                    'datefmt': '%Y-%m-%d %H:%M:%S',
+                }
+            },
+            'handlers': {
+                'console': {
+                    'class': 'logging.StreamHandler',
+                    'formatter': 'standard',
+                    'level': log_level,
+                    'stream': 'ext://sys.stdout',
+                },
+                'file': {
+                    'class': 'logging.handlers.RotatingFileHandler',
+                    'formatter': 'standard',
+                    'level': logging.DEBUG,
+                    'filename': os.fspath(log_path),
+                    'maxBytes': 5 * 1024 * 1024,
+                    'backupCount': 5,
+                    'encoding': 'utf-8',
+                },
+            },
+            'root': {
+                'level': log_level,
+                'handlers': ['console', 'file'],
+            },
+        }
+    )
+
+    flask_app.logger = logging.getLogger(flask_app.import_name)
+    flask_app.logger.setLevel(log_level)
+    logger.setLevel(log_level)
 
 def _db_connection_factory() -> sqlite3.Connection:
     return db_utils._create_sqlite_connection(
@@ -246,9 +310,10 @@ app = Flask(__name__)
 app.secret_key = APP_SECRET_KEY
 app.config.setdefault('OPENAI_SUMMARY_ENABLED', OPENAI_SUMMARY_ENABLED)
 
+_configure_logging(app)
+
 IGDB_CACHE_TABLE = 'igdb_games'
 IGDB_CACHE_STATE_TABLE = 'igdb_cache_state'
-
 
 def _igdb_category_display(value: Any) -> str:
     return IGDBClient.translate_category(value)
@@ -290,11 +355,6 @@ def _read_http_error(exc: HTTPError) -> str:
     if message:
         return f"{exc.code} {message}".strip()
     return str(exc)
-
-
-logging.basicConfig(level=logging.DEBUG)
-app.logger.setLevel(logging.DEBUG)
-logger.setLevel(logging.DEBUG)
 # Configure OpenAI using API key from environment
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 

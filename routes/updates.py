@@ -7,6 +7,13 @@ from typing import Any, Mapping
 
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
+from routes.api_utils import (
+    BadRequestError,
+    NotFoundError,
+    UpstreamServiceError,
+    handle_api_errors,
+)
+
 updates_blueprint = Blueprint("updates", __name__)
 
 _context: dict[str, Any] = {}
@@ -33,6 +40,7 @@ def updates_page():
 
 
 @updates_blueprint.route('/api/igdb/cache', methods=['POST'])
+@handle_api_errors
 def api_igdb_cache_refresh():
     payload = request.get_json(silent=True) or {}
     try:
@@ -56,7 +64,7 @@ def api_igdb_cache_refresh():
     try:
         access_token, client_id = exchange_twitch_credentials()
     except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 400
+        raise BadRequestError(str(exc)) from exc
 
     db_lock = _ctx('db_lock')
     get_db = _ctx('get_db')
@@ -76,7 +84,7 @@ def api_igdb_cache_refresh():
         try:
             total = download_igdb_game_count(access_token, client_id)
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 502
+            raise UpstreamServiceError(str(exc)) from exc
         with db_lock:
             conn = get_db()
             with conn:
@@ -119,7 +127,7 @@ def api_igdb_cache_refresh():
     try:
         payloads = download_igdb_games(access_token, client_id, offset, limit)
     except RuntimeError as exc:
-        return jsonify({'error': str(exc)}), 502
+        raise UpstreamServiceError(str(exc)) from exc
 
     batch_count = len(payloads)
     with db_lock:
@@ -155,6 +163,7 @@ def api_igdb_cache_refresh():
 
 
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])
+@handle_api_errors
 def api_updates_refresh():
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     execute_refresh_job = _ctx('_execute_refresh_job')
@@ -164,7 +173,7 @@ def api_updates_refresh():
         try:
             result = execute_refresh_job(lambda **_kwargs: None)
         except RuntimeError as exc:
-            return jsonify({'error': str(exc)}), 502
+            raise UpstreamServiceError(str(exc)) from exc
         return jsonify(result)
 
     job, created = job_manager.enqueue_job(
@@ -182,6 +191,7 @@ def api_updates_refresh():
 
 
 @updates_blueprint.route('/api/updates/fix-names', methods=['POST'])
+@handle_api_errors
 def api_updates_fix_names():
     payload = request.get_json(silent=True) or {}
     limit_default = _ctx('FIX_NAMES_BATCH_LIMIT')
@@ -225,6 +235,7 @@ def api_updates_fix_names():
 
 
 @updates_blueprint.route('/api/updates/remove-duplicates', methods=['POST'])
+@handle_api_errors
 def api_updates_remove_duplicates():
     job_manager = _ctx('job_manager')
     execute_remove_duplicates_job = _ctx('_execute_remove_duplicates_job')
@@ -248,6 +259,7 @@ def api_updates_remove_duplicates():
 
 
 @updates_blueprint.route('/api/updates/remove-duplicate/<int:processed_game_id>', methods=['POST'])
+@handle_api_errors
 def api_updates_remove_duplicate(processed_game_id: int):
     db_lock = _ctx('db_lock')
     get_db = _ctx('get_db')
@@ -302,15 +314,15 @@ def api_updates_remove_duplicate(processed_game_id: int):
             break
 
     if target_resolution is None:
-        return jsonify({'error': 'Duplicate not found or already processed.'}), 404
+        raise NotFoundError('Duplicate not found or already processed.')
 
     ids_to_delete = merge_duplicate_resolutions([target_resolution])
     if processed_game_id not in ids_to_delete:
-        return jsonify({'error': 'Unable to remove duplicate entry.'}), 400
+        raise BadRequestError('Unable to remove duplicate entry.')
 
     removed_count, remaining_total = remove_processed_games(ids_to_delete)
     if removed_count <= 0:
-        return jsonify({'error': 'Unable to remove duplicate entry.'}), 400
+        raise BadRequestError('Unable to remove duplicate entry.')
 
     name_value = normalize_text(target_resolution.duplicates[0]['Name']) or f'ID {processed_game_id}'
     message = f'Removed duplicate entry for {name_value}.'
@@ -329,27 +341,31 @@ def api_updates_remove_duplicate(processed_game_id: int):
 
 
 @updates_blueprint.route('/api/updates/jobs', methods=['GET'])
+@handle_api_errors
 def api_updates_job_list():
     job_manager = _ctx('job_manager')
     return jsonify({'jobs': job_manager.list_jobs()})
 
 
 @updates_blueprint.route('/api/updates/jobs/<job_id>', methods=['GET'])
+@handle_api_errors
 def api_updates_job_detail(job_id: str):
     job_manager = _ctx('job_manager')
     job = job_manager.get_job(job_id)
     if job is None:
-        return jsonify({'error': 'job not found'}), 404
+        raise NotFoundError('job not found')
     return jsonify(job)
 
 
 @updates_blueprint.route('/api/updates', methods=['GET'])
+@handle_api_errors
 def api_updates_list():
     fetch_cached_updates = _ctx('fetch_cached_updates')
     return jsonify({'updates': fetch_cached_updates()})
 
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])
+@handle_api_errors
 def api_updates_detail(processed_game_id: int):
     db_lock = _ctx('db_lock')
     get_db = _ctx('get_db')
@@ -384,7 +400,7 @@ def api_updates_detail(processed_game_id: int):
         row = cur.fetchone()
 
     if row is None:
-        return jsonify({'error': 'not found'}), 404
+        raise NotFoundError('not found')
 
     payload = json.loads(row['igdb_payload']) if row['igdb_payload'] else None
     diff = json.loads(row['diff']) if row['diff'] else {}

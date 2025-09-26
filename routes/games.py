@@ -9,7 +9,15 @@ import sqlite3
 import uuid
 from typing import Any, Callable, Mapping
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
+
+from routes.api_utils import (
+    APIError,
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    handle_api_errors,
+)
 from PIL import Image
 
 # TODO: Register endpoints for editor workflows, uploads, and navigation.
@@ -45,41 +53,38 @@ def _get_navigator():
 
 
 @games_blueprint.route('/api/game')
+@handle_api_errors
 def api_game():
     navigator = _get_navigator()
-    try:
-        index = navigator.current()
-        if index >= _get_total_games():
-            return jsonify(
-                {
-                    'done': True,
-                    'message': 'Todos os jogos foram processados.',
-                    'completion': navigator.completion_percentage(),
-                }
-            )
-        data = _ctx('build_game_payload')(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
+    index = navigator.current()
+    if index >= _get_total_games():
+        return jsonify(
+            {
+                'done': True,
+                'message': 'Todos os jogos foram processados.',
+                'completion': navigator.completion_percentage(),
+            }
         )
-        data['completion'] = navigator.completion_percentage()
-        return jsonify(data)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_game failed")
-        return jsonify({'error': str(exc)}), 500
+    data = _ctx('build_game_payload')(
+        index,
+        navigator.seq_index,
+        navigator.processed_total + 1,
+    )
+    data['completion'] = navigator.completion_percentage()
+    return jsonify(data)
 
 
 @games_blueprint.route('/api/game/<int:index>/raw')
+@handle_api_errors
 def api_game_raw(index: int):
     total_games = _get_total_games()
     if index < 0 or index >= total_games:
-        return jsonify({'error': 'invalid index'}), 404
+        raise NotFoundError('invalid index')
     games_df = _get_games_df()
     try:
         row = games_df.iloc[index]
-    except Exception:  # pragma: no cover - mirrors existing defensive behaviour
-        current_app.logger.exception("api_game_raw failed")
-        return jsonify({'error': 'invalid index'}), 404
+    except Exception as exc:  # pragma: no cover - mirrors existing defensive behaviour
+        raise NotFoundError('invalid index') from exc
 
     extract_igdb_id = _ctx('extract_igdb_id')
     get_igdb_prefill_for_id = _ctx('get_igdb_prefill_for_id')
@@ -132,23 +137,27 @@ def api_game_raw(index: int):
 
 
 @games_blueprint.route('/api/summary', methods=['POST'])
+@handle_api_errors
 def api_summary():
     data = request.get_json(force=True)
     game_name = data.get('game_name', '')
     try:
         summary_pt = _ctx('generate_pt_summary')(game_name)
-        return jsonify({'summary': summary_pt})
     except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("Summary generation failed")
-        return jsonify({'error': str(exc)}), 500
+        raise APIError('Failed to generate summary') from exc
+    return jsonify({'summary': summary_pt})
 
 
 @games_blueprint.route('/api/upload', methods=['POST'])
+@handle_api_errors
 def api_upload():
     file = request.files.get('file')
     if not file:
-        return jsonify({'error': 'no file'}), 400
-    img = _ctx('open_image_auto_rotate')(file.stream)
+        raise BadRequestError('no file')
+    try:
+        img = _ctx('open_image_auto_rotate')(file.stream)
+    except Exception as exc:
+        raise BadRequestError('invalid image upload') from exc
     filename = f"{uuid.uuid4().hex}.jpg"
     upload_dir = _ctx('upload_dir')
     path = os.path.join(upload_dir, filename)
@@ -160,21 +169,31 @@ def api_upload():
 
 
 @games_blueprint.route('/api/save', methods=['POST'])
+@handle_api_errors
 def api_save():
     data = request.get_json(force=True)
-    index = int(data.get('index', 0))
+    try:
+        index = int(data.get('index', 0))
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid index') from exc
     expected_id = data.get('id')
     fields = data.get('fields', {})
     image_b64 = data.get('image')
     upload_name = data.get('upload_name')
+
     if expected_id is None:
-        return jsonify({'error': 'missing id'}), 400
-    expected_id = int(expected_id)
+        raise BadRequestError('missing id')
+    try:
+        expected_id = int(expected_id)
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid id') from exc
+
     games_df = _get_games_df()
     try:
         total_rows = len(games_df)
     except Exception:
         total_rows = 0
+
     get_source_index_for_position = _ctx('get_source_index_for_position')
     navigator = _get_navigator()
     db_lock = _ctx('db_lock')
@@ -198,273 +217,281 @@ def api_save():
             source_index = str(index)
     else:
         source_index = str(index)
-    try:
-        with navigator.lock:
-            if index != navigator.current_index:
-                expected_index = navigator.current_index
-                expected_seq_id = navigator.seq_index
-                if 0 <= expected_index < total_rows:
-                    try:
-                        expected_source_index = get_source_index_for_position(
-                            expected_index
-                        )
-                    except IndexError:
-                        expected_source_index = str(expected_index)
-                else:
+
+    with navigator.lock:
+        if index != navigator.current_index:
+            expected_index = navigator.current_index
+            expected_seq_id = navigator.seq_index
+            if 0 <= expected_index < total_rows:
+                try:
+                    expected_source_index = get_source_index_for_position(expected_index)
+                except IndexError:
                     expected_source_index = str(expected_index)
-                with db_lock:
-                    conn = get_db()
-                    cur = conn.execute(
-                        'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
-                        (expected_source_index,),
-                    )
-                    row = cur.fetchone()
-                    if row is not None:
-                        expected_seq_id = row['ID']
-                return (
-                    jsonify(
-                        {
-                            'error': 'index mismatch',
-                            'expected': expected_index,
-                            'actual': index,
-                            'expected_id': expected_seq_id,
-                        }
-                    ),
-                    409,
-                )
-            was_processed_before = False
-            existing_summary = None
-            existing_cover_path = None
-            existing_width = None
-            existing_height = None
+            else:
+                expected_source_index = str(expected_index)
             with db_lock:
                 conn = get_db()
                 cur = conn.execute(
-                    'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
-                    'FROM processed_games WHERE "Source Index"=?',
-                    (source_index,),
+                    'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                    (expected_source_index,),
                 )
-                existing = cur.fetchone()
-                if existing:
-                    existing_id = existing['ID']
-                    if existing_id != expected_id:
-                        return (
-                            jsonify(
-                                {
-                                    'error': 'id mismatch',
-                                    'expected': existing_id,
-                                    'actual': expected_id,
-                                }
-                            ),
-                            409,
-                        )
-                    seq_id = existing_id
-                    new_record = False
-                    try:
-                        existing_summary = existing['Summary']
-                    except (KeyError, IndexError, TypeError):
-                        existing_summary = None
-                    try:
-                        existing_cover_path = existing['Cover Path']
-                    except (KeyError, IndexError, TypeError):
-                        existing_cover_path = None
-                    try:
-                        existing_width = existing['Width']
-                    except (KeyError, IndexError, TypeError):
-                        existing_width = None
-                    try:
-                        existing_height = existing['Height']
-                    except (KeyError, IndexError, TypeError):
-                        existing_height = None
-                    was_processed_before = is_processed_game_done(
-                        existing_summary, existing_cover_path
+                row = cur.fetchone()
+                if row is not None:
+                    expected_seq_id = row['ID']
+            raise ConflictError(
+                'index mismatch',
+                payload={
+                    'expected': expected_index,
+                    'actual': index,
+                    'expected_id': expected_seq_id,
+                },
+            )
+
+        was_processed_before = False
+        existing_summary = None
+        existing_cover_path = None
+        existing_width = None
+        existing_height = None
+        new_record = False
+        existing: Mapping[str, Any] | None = None
+
+        with db_lock:
+            conn = get_db()
+            cur = conn.execute(
+                'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
+                'FROM processed_games WHERE "Source Index"=?',
+                (source_index,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                existing_id = existing['ID']
+                if existing_id != expected_id:
+                    raise ConflictError(
+                        'id mismatch',
+                        payload={'expected': existing_id, 'actual': expected_id},
                     )
-                else:
-                    seq_id = navigator.seq_index
-                    if expected_id != seq_id:
-                        return (
-                            jsonify(
-                                {
-                                    'error': 'id mismatch',
-                                    'expected': seq_id,
-                                    'actual': expected_id,
-                                }
-                            ),
-                            409,
-                        )
-                    new_record = True
-
-            cover_path = ''
-            width = height = 0
-            if image_b64:
-                header, b64data = image_b64.split(',', 1)
-                _ = header  # header kept for parity with original implementation
-                img = Image.open(io.BytesIO(base64.b64decode(b64data)))
-                img = img.convert('RGB')
-                if min(img.size) < 1080:
-                    img = img.resize((1080, 1080))
-                else:
-                    img = img.resize((1080, 1080))
-                cover_path = os.path.join(processed_dir, f"{seq_id}.jpg")
-                img.save(cover_path, format='JPEG', quality=90)
-                width, height = img.size
-            elif existing_cover_path:
-                cover_path = str(existing_cover_path)
+                seq_id = existing_id
                 try:
-                    width = int(existing_width)
-                except (TypeError, ValueError):
-                    width = 0
+                    existing_summary = existing['Summary']
+                except (KeyError, IndexError, TypeError):
+                    existing_summary = None
                 try:
-                    height = int(existing_height)
-                except (TypeError, ValueError):
-                    height = 0
-
-            igdb_id_value = None
-            if existing is not None:
+                    existing_cover_path = existing['Cover Path']
+                except (KeyError, IndexError, TypeError):
+                    existing_cover_path = None
                 try:
-                    existing_raw = existing['igdb_id']
-                except (KeyError, IndexError):
-                    existing_raw = None
-                existing_coerced = coerce_igdb_id(existing_raw)
-                if existing_coerced:
-                    igdb_id_value = existing_coerced
-            if igdb_id_value is None and 0 <= index < len(games_df):
-                igdb_candidate = extract_igdb_id(
-                    games_df.iloc[index], allow_generic_id=True
+                    existing_width = existing['Width']
+                except (KeyError, IndexError, TypeError):
+                    existing_width = None
+                try:
+                    existing_height = existing['Height']
+                except (KeyError, IndexError, TypeError):
+                    existing_height = None
+                was_processed_before = is_processed_game_done(
+                    existing_summary, existing_cover_path
                 )
-                if igdb_candidate:
-                    igdb_id_value = igdb_candidate
+            else:
+                seq_id = navigator.seq_index
+                if expected_id != seq_id:
+                    raise ConflictError(
+                        'id mismatch',
+                        payload={'expected': seq_id, 'actual': expected_id},
+                    )
+                new_record = True
 
-            last_edit_ts = now_utc_iso()
-            row = {
-                "ID": seq_id,
-                "Source Index": source_index,
-                "Name": fields.get('Name', ''),
-                "Summary": fields.get('Summary', ''),
-                "First Launch Date": fields.get('FirstLaunchDate', ''),
-                "Category": fields.get('Category', ''),
-                "igdb_id": igdb_id_value,
-                "Cover Path": cover_path,
-                "Width": width,
-                "Height": height,
-                'last_edited_at': last_edit_ts,
-            }
+        cover_path = ''
+        width = height = 0
+        if image_b64:
+            header, b64data = image_b64.split(',', 1)
+            _ = header
+            img = Image.open(io.BytesIO(base64.b64decode(b64data)))
+            img = img.convert('RGB')
+            if min(img.size) < 1080:
+                img = img.resize((1080, 1080))
+            else:
+                img = img.resize((1080, 1080))
+            cover_path = os.path.join(processed_dir, f"{seq_id}.jpg")
+            img.save(cover_path, format='JPEG', quality=90)
+            width, height = img.size
+        elif existing_cover_path:
+            cover_path = str(existing_cover_path)
+            try:
+                width = int(existing_width)
+            except (TypeError, ValueError):
+                width = 0
+            try:
+                height = int(existing_height)
+            except (TypeError, ValueError):
+                height = 0
 
-            for relation in lookups:
-                id_column = relation.get('id_column')
-                if id_column:
-                    row[id_column] = ''
+        igdb_id_value = None
+        if existing is not None:
+            try:
+                existing_raw = existing['igdb_id']
+            except (KeyError, IndexError):
+                existing_raw = None
+            existing_coerced = coerce_igdb_id(existing_raw)
+            if existing_coerced:
+                igdb_id_value = existing_coerced
+        if igdb_id_value is None and 0 <= index < len(games_df):
+            igdb_candidate = extract_igdb_id(
+                games_df.iloc[index], allow_generic_id=True
+            )
+            if igdb_candidate:
+                igdb_id_value = igdb_candidate
 
-            lookups_input = fields.get('Lookups') if isinstance(fields, Mapping) else {}
+        last_edit_ts = now_utc_iso()
+        row = {
+            'ID': seq_id,
+            'Source Index': source_index,
+            'Name': fields.get('Name', ''),
+            'Summary': fields.get('Summary', ''),
+            'First Launch Date': fields.get('FirstLaunchDate', ''),
+            'Category': fields.get('Category', ''),
+            'igdb_id': igdb_id_value,
+            'Cover Path': cover_path,
+            'Width': width,
+            'Height': height,
+            'last_edited_at': last_edit_ts,
+        }
 
-            with db_lock:
-                conn = get_db()
-                try:
-                    normalized_lookups: dict[str, dict[str, Any]] = {}
-                    for relation in lookups:
-                        response_key = relation['response_key']
-                        processed_column = relation['processed_column']
-                        raw_value: Any = None
-                        if isinstance(lookups_input, Mapping):
-                            raw_value = lookups_input.get(response_key)
-                            if raw_value is None:
-                                raw_value = lookups_input.get(processed_column)
+        for relation in lookups:
+            id_column = relation.get('id_column')
+            if id_column:
+                row[id_column] = ''
+
+        lookups_input = fields.get('Lookups') if isinstance(fields, Mapping) else {}
+
+        with db_lock:
+            conn = get_db()
+            try:
+                normalized_lookups: dict[str, dict[str, Any]] = {}
+                for relation in lookups:
+                    response_key = relation['response_key']
+                    processed_column = relation['processed_column']
+                    raw_value: Any = None
+                    if isinstance(lookups_input, Mapping):
+                        raw_value = lookups_input.get(response_key)
                         if raw_value is None:
-                            raw_value = fields.get(response_key)
-                            if raw_value is None:
-                                raw_value = fields.get(processed_column)
-                        selection = resolve_lookup_selection(conn, relation, raw_value)
-                        normalized_lookups[response_key] = selection
-                        row[processed_column] = lookup_display_text(selection['names'])
-                        id_column = relation.get('id_column')
-                        if id_column:
-                            row[id_column] = encode_lookup_id_list(selection['ids'])
+                            raw_value = lookups_input.get(processed_column)
+                    if raw_value is None:
+                        raw_value = fields.get(response_key)
+                        if raw_value is None:
+                            raw_value = fields.get(processed_column)
+                    selection = resolve_lookup_selection(conn, relation, raw_value)
+                    normalized_lookups[response_key] = selection
+                    row[processed_column] = lookup_display_text(selection['names'])
+                    id_column = relation.get('id_column')
+                    if id_column:
+                        row[id_column] = encode_lookup_id_list(selection['ids'])
 
-                    if existing:
-                        conn.execute(
-                            '''UPDATE processed_games SET
-                                "Name"=?, "Summary"=?, "First Launch Date"=?,
-                                "Developers"=?, "developers_ids"=?,
-                                "Publishers"=?, "publishers_ids"=?,
-                                "Genres"=?, "genres_ids"=?,
-                                "Game Modes"=?, "game_modes_ids"=?,
-                                "Category"=?, "Platforms"=?, "platforms_ids"=?,
-                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
-                                last_edited_at=?
-                               WHERE "ID"=?''',
-                            (
-                                row['Name'], row['Summary'], row['First Launch Date'],
-                                row.get('Developers', ''), row.get('developers_ids', ''),
-                                row.get('Publishers', ''), row.get('publishers_ids', ''),
-                                row.get('Genres', ''), row.get('genres_ids', ''),
-                                row.get('Game Modes', ''), row.get('game_modes_ids', ''),
-                                row['Category'], row.get('Platforms', ''), row.get('platforms_ids', ''),
-                                row['igdb_id'], row['Cover Path'], row['Width'], row['Height'],
-                                row['last_edited_at'],
-                                seq_id,
-                            ),
-                        )
-                    else:
-                        conn.execute(
-                            '''INSERT INTO processed_games (
-                                "ID", "Source Index", "Name", "Summary",
-                                "First Launch Date", "Developers", "developers_ids",
-                                "Publishers", "publishers_ids",
-                                "Genres", "genres_ids", "Game Modes", "game_modes_ids",
-                                "Category", "Platforms", "platforms_ids",
-                                "igdb_id", "Cover Path", "Width", "Height", last_edited_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                            (
-                                seq_id,
-                                row['Source Index'], row['Name'], row['Summary'],
-                                row['First Launch Date'], row.get('Developers', ''),
-                                row.get('developers_ids', ''), row.get('Publishers', ''),
-                                row.get('publishers_ids', ''), row.get('Genres', ''),
-                                row.get('genres_ids', ''), row.get('Game Modes', ''),
-                                row.get('game_modes_ids', ''), row['Category'],
-                                row.get('Platforms', ''), row.get('platforms_ids', ''),
-                                row['igdb_id'], row['Cover Path'],
-                                row['Width'], row['Height'], row['last_edited_at'],
-                            ),
-                        )
-
-                    persist_lookup_relations(conn, seq_id, normalized_lookups)
-                    conn.commit()
-                    if new_record:
-                        navigator.seq_index += 1
-                    new_is_done = is_processed_game_done(
-                        row['Summary'], row['Cover Path']
+                if existing:
+                    conn.execute(
+                        '''UPDATE processed_games SET
+                            "Name"=?, "Summary"=?, "First Launch Date"=?,
+                            "Developers"=?, "developers_ids"=?,
+                            "Publishers"=?, "publishers_ids"=?,
+                            "Genres"=?, "genres_ids"=?,
+                            "Game Modes"=?, "game_modes_ids"=?,
+                            "Category"=?, "Platforms"=?, "platforms_ids"=?,
+                            "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
+                            last_edited_at=?
+                           WHERE "ID"=?''',
+                        (
+                            row['Name'],
+                            row['Summary'],
+                            row['First Launch Date'],
+                            row.get('Developers', ''),
+                            row.get('developers_ids', ''),
+                            row.get('Publishers', ''),
+                            row.get('publishers_ids', ''),
+                            row.get('Genres', ''),
+                            row.get('genres_ids', ''),
+                            row.get('Game Modes', ''),
+                            row.get('game_modes_ids', ''),
+                            row['Category'],
+                            row.get('Platforms', ''),
+                            row.get('platforms_ids', ''),
+                            row['igdb_id'],
+                            row['Cover Path'],
+                            row['Width'],
+                            row['Height'],
+                            row['last_edited_at'],
+                            seq_id,
+                        ),
                     )
-                    if new_is_done and not was_processed_before:
-                        navigator.processed_total = min(
-                            navigator.total,
-                            navigator.processed_total + 1,
-                        )
-                    elif was_processed_before and not new_is_done:
-                        navigator.processed_total = max(
-                            0,
-                            navigator.processed_total - 1,
-                        )
-                except sqlite3.IntegrityError:
-                    conn.rollback()
-                    return jsonify({'error': 'conflict'}), 409
+                else:
+                    conn.execute(
+                        '''INSERT INTO processed_games (
+                            "ID", "Source Index", "Name", "Summary",
+                            "First Launch Date", "Developers", "developers_ids",
+                            "Publishers", "publishers_ids",
+                            "Genres", "genres_ids", "Game Modes", "game_modes_ids",
+                            "Category", "Platforms", "platforms_ids",
+                            "igdb_id", "Cover Path", "Width", "Height", last_edited_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        (
+                            seq_id,
+                            row['Source Index'],
+                            row['Name'],
+                            row['Summary'],
+                            row['First Launch Date'],
+                            row.get('Developers', ''),
+                            row.get('developers_ids', ''),
+                            row.get('Publishers', ''),
+                            row.get('publishers_ids', ''),
+                            row.get('Genres', ''),
+                            row.get('genres_ids', ''),
+                            row.get('Game Modes', ''),
+                            row.get('game_modes_ids', ''),
+                            row['Category'],
+                            row.get('Platforms', ''),
+                            row.get('platforms_ids', ''),
+                            row['igdb_id'],
+                            row['Cover Path'],
+                            row['Width'],
+                            row['Height'],
+                            row['last_edited_at'],
+                        ),
+                    )
 
-            if upload_name:
-                up_path = os.path.join(upload_dir, upload_name)
-                if os.path.exists(up_path):
-                    os.remove(up_path)
-            navigator.skip_queue = [s for s in navigator.skip_queue if s['index'] != index]
-            navigator._save()
-        return jsonify({'status': 'ok'})
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_save failed")
-        return jsonify({'error': str(exc)}), 500
+                persist_lookup_relations(conn, seq_id, normalized_lookups)
+                conn.commit()
+            except sqlite3.IntegrityError as exc:
+                conn.rollback()
+                raise ConflictError('conflict') from exc
+
+        if new_record:
+            navigator.seq_index += 1
+        new_is_done = is_processed_game_done(row['Summary'], row['Cover Path'])
+        if new_is_done and not was_processed_before:
+            navigator.processed_total = min(
+                navigator.total,
+                navigator.processed_total + 1,
+            )
+        elif was_processed_before and not new_is_done:
+            navigator.processed_total = max(
+                0,
+                navigator.processed_total - 1,
+            )
+
+        if upload_name:
+            up_path = os.path.join(upload_dir, upload_name)
+            if os.path.exists(up_path):
+                os.remove(up_path)
+        navigator.skip_queue = [s for s in navigator.skip_queue if s['index'] != index]
+        navigator._save()
+    return jsonify({'status': 'ok'})
 
 
 @games_blueprint.route('/api/skip', methods=['POST'])
+@handle_api_errors
 def api_skip():
     data = request.get_json(force=True)
-    index = int(data.get('index', 0))
+    try:
+        index = int(data.get('index', 0))
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid index') from exc
     upload_name = data.get('upload_name')
     upload_dir = _ctx('upload_dir')
 
@@ -475,16 +502,19 @@ def api_skip():
     navigator = _get_navigator()
     try:
         navigator.skip(index)
-        return jsonify({'status': 'ok'})
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_skip failed")
-        return jsonify({'error': str(exc)}), 500
+    except IndexError as exc:
+        raise BadRequestError('invalid index') from exc
+    return jsonify({'status': 'ok'})
 
 
 @games_blueprint.route('/api/set_index', methods=['POST'])
+@handle_api_errors
 def api_set_index():
     data = request.get_json(silent=True) or {}
-    index = int(data.get('index', 0))
+    try:
+        index = int(data.get('index', 0))
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid index') from exc
     upload_name = data.get('upload_name')
     upload_dir = _ctx('upload_dir')
     if upload_name:
@@ -494,22 +524,22 @@ def api_set_index():
     navigator = _get_navigator()
     try:
         navigator.set_index(index)
-        return jsonify({'status': 'ok'})
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_set_index failed")
-        return jsonify({'error': str(exc)}), 500
+    except IndexError as exc:
+        raise BadRequestError('invalid index') from exc
+    return jsonify({'status': 'ok'})
 
 
 @games_blueprint.route('/api/game_by_id', methods=['POST'])
+@handle_api_errors
 def api_game_by_id():
     data = request.get_json(silent=True) or {}
     raw_id = data.get('id')
     if raw_id is None:
-        return jsonify({'error': 'missing id'}), 400
+        raise BadRequestError('missing id')
     try:
         game_id = int(str(raw_id).strip())
-    except (TypeError, ValueError):
-        return jsonify({'error': 'invalid id'}), 400
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid id') from exc
 
     upload_name = data.get('upload_name')
     upload_dir = _ctx('upload_dir')
@@ -529,34 +559,31 @@ def api_game_by_id():
         row = cur.fetchone()
 
     if row is None:
-        return jsonify({'error': 'id not found'}), 404
+        raise NotFoundError('id not found')
 
     get_position_for_source_index = _ctx('get_position_for_source_index')
     index = get_position_for_source_index(row['Source Index'])
     if index is None:
-        current_app.logger.error(
-            "Invalid source index for ID %s: %s", game_id, row['Source Index']
+        raise APIError(
+            'invalid source index', payload={'id': game_id, 'source_index': row['Source Index']}
         )
-        return jsonify({'error': 'invalid source index'}), 500
 
     navigator = _get_navigator()
     build_game_payload = _ctx('build_game_payload')
     try:
         navigator.set_index(index)
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except IndexError:
-        return jsonify({'error': 'invalid index'}), 404
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_game_by_id failed")
-        return jsonify({'error': str(exc)}), 500
+    except IndexError as exc:
+        raise NotFoundError('invalid index') from exc
+    payload = build_game_payload(
+        index,
+        navigator.seq_index,
+        navigator.processed_total + 1,
+    )
+    return jsonify(payload)
 
 
 @games_blueprint.route('/api/next', methods=['POST'])
+@handle_api_errors
 def api_next():
     data = request.get_json(silent=True) or {}
     upload_name = data.get('upload_name')
@@ -567,22 +594,19 @@ def api_next():
             os.remove(up_path)
     navigator = _get_navigator()
     build_game_payload = _ctx('build_game_payload')
-    try:
-        index = navigator.next()
-        if index >= _get_total_games():
-            return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_next failed")
-        return jsonify({'error': str(exc)}), 500
+    index = navigator.next()
+    if index >= _get_total_games():
+        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+    payload = build_game_payload(
+        index,
+        navigator.seq_index,
+        navigator.processed_total + 1,
+    )
+    return jsonify(payload)
 
 
 @games_blueprint.route('/api/back', methods=['POST'])
+@handle_api_errors
 def api_back():
     data = request.get_json(silent=True) or {}
     upload_name = data.get('upload_name')
@@ -593,14 +617,10 @@ def api_back():
             os.remove(up_path)
     navigator = _get_navigator()
     build_game_payload = _ctx('build_game_payload')
-    try:
-        index = navigator.back()
-        payload = build_game_payload(
-            index,
-            navigator.seq_index,
-            navigator.processed_total + 1,
-        )
-        return jsonify(payload)
-    except Exception as exc:  # pragma: no cover - defensive logging
-        current_app.logger.exception("api_back failed")
-        return jsonify({'error': str(exc)}), 500
+    index = navigator.back()
+    payload = build_game_payload(
+        index,
+        navigator.seq_index,
+        navigator.processed_total + 1,
+    )
+    return jsonify(payload)

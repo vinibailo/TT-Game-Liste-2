@@ -6,6 +6,14 @@ from typing import Any, Mapping
 
 from flask import Blueprint, jsonify, render_template, request
 
+from routes.api_utils import (
+    BadRequestError,
+    ConflictError,
+    MethodNotAllowedError,
+    NotFoundError,
+    handle_api_errors,
+)
+
 lookups_blueprint = Blueprint("lookups", __name__)
 
 _context: dict[str, Any] = {}
@@ -46,6 +54,7 @@ def lookups_page():
 
 
 @lookups_blueprint.route('/api/lookups/<lookup_type>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@handle_api_errors
 def api_lookup_options(lookup_type: str):
     lookup_endpoint_map = _ctx('LOOKUP_ENDPOINT_MAP')
     lookup_tables_by_name = _ctx('LOOKUP_TABLES_BY_NAME')
@@ -53,7 +62,7 @@ def api_lookup_options(lookup_type: str):
     normalized = lookup_type.strip().lower().replace('-', '_').replace(' ', '_')
     table_name = lookup_endpoint_map.get(normalized)
     if not table_name or table_name not in lookup_tables_by_name:
-        return jsonify({'error': 'unknown lookup type'}), 404
+        raise NotFoundError('unknown lookup type')
 
     db_lock = _ctx('db_lock')
     get_db = _ctx('get_db')
@@ -76,7 +85,7 @@ def api_lookup_options(lookup_type: str):
 
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, Mapping):
-        return jsonify({'error': 'invalid payload'}), 400
+        raise BadRequestError('invalid payload')
 
     if request.method == 'POST':
         raw_name = payload.get('name')
@@ -90,14 +99,14 @@ def api_lookup_options(lookup_type: str):
             if status == 'created':
                 conn.commit()
         if created_item is None or status == 'invalid':
-            return jsonify({'error': 'invalid name'}), 400
+            raise BadRequestError('invalid name')
         status_code = 201 if status == 'created' else 200
         return jsonify({'item': created_item, 'type': table_name}), status_code
 
     try:
         lookup_id = int(payload.get('id'))
-    except (TypeError, ValueError):
-        return jsonify({'error': 'invalid lookup id'}), 400
+    except (TypeError, ValueError) as exc:
+        raise BadRequestError('invalid lookup id') from exc
 
     relation = table_relations.get(table_name)
 
@@ -132,11 +141,11 @@ def api_lookup_options(lookup_type: str):
                     apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
                 conn.commit()
         if error_status == 'invalid':
-            return jsonify({'error': 'invalid name'}), 400
+            raise BadRequestError('invalid name')
         if error_status == 'not_found':
-            return jsonify({'error': 'lookup not found'}), 404
+            raise NotFoundError('lookup not found')
         if error_status == 'conflict':
-            return jsonify({'error': 'name conflict'}), 409
+            raise ConflictError('name conflict')
         return jsonify({'item': updated_item, 'type': table_name})
 
     if request.method == 'DELETE':
@@ -160,7 +169,7 @@ def api_lookup_options(lookup_type: str):
             if deleted_successfully:
                 conn.commit()
         if not deleted_successfully:
-            return jsonify({'error': 'lookup not found'}), 404
+            raise NotFoundError('lookup not found')
         return jsonify({'status': 'deleted', 'type': table_name, 'id': lookup_id})
 
-    return jsonify({'error': 'unsupported method'}), 405
+    raise MethodNotAllowedError('unsupported method')

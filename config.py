@@ -87,6 +87,13 @@ PROCESSED_DIR_PATH: Final[Path] = _path_from(
 )
 COVERS_DIR_PATH: Final[Path] = _path_from(os.environ.get("COVERS_DIR"), "covers_out")
 
+LOG_DIR_PATH: Final[Path] = _path_from(os.environ.get("LOG_DIR"), BASE_DIR / "logs")
+LOG_DIR: Final[str] = os.fspath(LOG_DIR_PATH)
+LOG_FILE_PATH: Final[Path] = _path_from(
+    os.environ.get("LOG_FILE"), LOG_DIR_PATH / "app.log"
+)
+LOG_FILE: Final[str] = os.fspath(LOG_FILE_PATH)
+
 INPUT_XLSX: Final[str] = os.fspath(INPUT_XLSX_PATH)
 PROCESSED_DB: Final[str] = os.fspath(PROCESSED_DB_PATH)
 UPLOAD_DIR: Final[str] = os.fspath(UPLOAD_DIR_PATH)
@@ -157,6 +164,10 @@ __all__ = [
     "IGDB_USER_AGENT",
     "INPUT_XLSX",
     "INPUT_XLSX_PATH",
+    "LOG_DIR",
+    "LOG_DIR_PATH",
+    "LOG_FILE",
+    "LOG_FILE_PATH",
     "OPENAI_API_KEY",
     "OPENAI_SUMMARY_ENABLED",
     "PROCESSED_DB",

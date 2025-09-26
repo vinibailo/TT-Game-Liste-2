@@ -9,3 +9,4 @@ covers_out/*
 !uploaded_sources/.gitkeep
 !processed_covers/.gitkeep
 !covers_out/.gitkeep
+logs/
