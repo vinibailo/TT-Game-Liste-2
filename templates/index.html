@@ -110,28 +110,6 @@
                     </div>
                     <div class="progress-bar"><div id="progress"></div></div>
                 </div>
-                <section class="filter-search-panel" aria-label="Search and filters">
-                    <div class="filters-grid">
-                        <label for="game-search" class="filter-field">Search
-                            <input
-                                type="search"
-                                id="game-search"
-                                autocomplete="off"
-                                placeholder="Title, summary, or ID"
-                            />
-                        </label>
-                        <label for="filter-category" class="filter-field">Category
-                            <select id="filter-category"></select>
-                        </label>
-                        <label for="filter-genres" class="filter-field">Genres
-                            <select id="filter-genres" multiple aria-label="Filter by genres"></select>
-                        </label>
-                    </div>
-                    <div class="search-results" aria-live="polite">
-                        <p id="search-summary" class="search-summary">Type at least two characters or choose a filter to search.</p>
-                        <ul id="search-results-list" class="search-results-list" role="list"></ul>
-                    </div>
-                </section>
             </div>
         </div>
     </header>
@@ -140,14 +118,7 @@
             <form id="game-form">
                 <div class="field-grid">
                     <label>Title
-                        <input
-                            type="text"
-                            id="name"
-                            autocomplete="off"
-                            required
-                            aria-describedby="name-error"
-                        />
-                        <span class="field-error" id="name-error" data-error-for="name" aria-live="polite"></span>
+                        <input type="text" id="name" autocomplete="off" />
                     </label>
                     <label>First Launch Date
                         <input type="text" id="first-launch" autocomplete="off" />
@@ -158,8 +129,7 @@
                         <label for="summary">Summary</label>
                         <button type="button" id="generate-summary" class="btn btn-outline">Gerar Resumo</button>
                     </div>
-                    <textarea id="summary" required aria-describedby="summary-error"></textarea>
-                    <span class="field-error" id="summary-error" data-error-for="summary" aria-live="polite"></span>
+                    <textarea id="summary"></textarea>
                 </div>
                 <div class="chip-field">
                     <label for="platforms">Platforms</label>
@@ -179,8 +149,7 @@
                     <summary>Additional metadata</summary>
                     <div class="field-accordion-content">
                         <label>Category
-                            <select id="category" required aria-describedby="category-error"></select>
-                            <span class="field-error" id="category-error" data-error-for="category" aria-live="polite"></span>
+                            <select id="category"></select>
                         </label>
                         <div class="chip-field">
                             <label for="developers">Developers</label>
