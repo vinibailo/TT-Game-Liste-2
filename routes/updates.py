@@ -208,7 +208,7 @@ def api_updates_fix_names():
     if limit <= 0:
         limit = limit_default
     job_manager = _ctx('job_manager')
-    execute_fix_names_job = _ctx('_execute_fix_names_job')
+    execute_fix_names_job = _ctx('fix_names_job')
 
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
@@ -238,7 +238,7 @@ def api_updates_fix_names():
 @handle_api_errors
 def api_updates_remove_duplicates():
     job_manager = _ctx('job_manager')
-    execute_remove_duplicates_job = _ctx('_execute_remove_duplicates_job')
+    execute_remove_duplicates_job = _ctx('remove_duplicates_job')
 
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
