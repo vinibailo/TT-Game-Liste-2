@@ -5,16 +5,13 @@ import io
 import sqlite3
 import numbers
 import re
-import math
 from functools import partial
 from pathlib import Path
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional
 from threading import Lock
 import logging
 import logging.config
-from bisect import bisect_left
 
 from flask import (
     Flask,
@@ -267,9 +264,83 @@ LOOKUP_RELATIONS_BY_KEY = {
     relation['response_key']: relation for relation in LOOKUP_RELATIONS
 }
 
+
 LOOKUP_RELATIONS_BY_TABLE = {
     relation['lookup_table']: relation for relation in LOOKUP_RELATIONS
 }
+
+
+def _row_value(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[key]
+    return row[index]
+
+
+def _decode_lookup_id_list(raw_value: Any) -> list[int]:
+    if raw_value is None:
+        return []
+
+    candidates: list[Any] = []
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            candidates.extend(part.strip() for part in stripped.split(',') if part.strip())
+        else:
+            if isinstance(parsed, list):
+                candidates.extend(parsed)
+            else:
+                candidates.append(parsed)
+    elif isinstance(raw_value, numbers.Number):
+        candidates.append(raw_value)
+    elif isinstance(raw_value, (list, tuple, set)):
+        candidates.extend(raw_value)
+    else:
+        candidates.append(raw_value)
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            try:
+                coerced = int(candidate.strip())
+            except (TypeError, ValueError):
+                continue
+        else:
+            try:
+                coerced = int(candidate)
+            except (TypeError, ValueError):
+                continue
+        if coerced in seen:
+            continue
+        seen.add(coerced)
+        normalized.append(coerced)
+    return normalized
+
+
+def _encode_lookup_id_list(values: Iterable[int]) -> str:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            continue
+        if coerced in seen:
+            continue
+        seen.add(coerced)
+        normalized.append(coerced)
+    if not normalized:
+        return ''
+    return json.dumps(normalized)
+
+
+DuplicateGroupResolution = processed_duplicates.DuplicateGroupResolution
+_coerce_int = processed_duplicates.coerce_int
+_RELATION_COUNT_COLUMNS = tuple(f"{relation['join_table']}_count" for relation in LOOKUP_RELATIONS)
 
 
 _fetch_lookup_entries_for_game = partial(
@@ -486,72 +557,14 @@ def _quote_identifier(identifier: str) -> str:
 
 
 
-def _row_value(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> Any:
-    if isinstance(row, sqlite3.Row):
-        return row[key]
-    return row[index]
+LOOKUP_RELATIONS_BY_TABLE = {
+    relation['lookup_table']: relation for relation in LOOKUP_RELATIONS
+}
 
 
-def _decode_lookup_id_list(raw_value: Any) -> list[int]:
-    if raw_value is None:
-        return []
-
-    candidates: list[Any] = []
-    if isinstance(raw_value, str):
-        stripped = raw_value.strip()
-        if not stripped:
-            return []
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            candidates.extend(part.strip() for part in stripped.split(',') if part.strip())
-        else:
-            if isinstance(parsed, list):
-                candidates.extend(parsed)
-            else:
-                candidates.append(parsed)
-    elif isinstance(raw_value, numbers.Number):
-        candidates.append(raw_value)
-    elif isinstance(raw_value, (list, tuple, set)):
-        candidates.extend(raw_value)
-    else:
-        candidates.append(raw_value)
-
-    normalized: list[int] = []
-    seen: set[int] = set()
-    for candidate in candidates:
-        if isinstance(candidate, str):
-            try:
-                coerced = int(candidate.strip())
-            except (TypeError, ValueError):
-                continue
-        else:
-            try:
-                coerced = int(candidate)
-            except (TypeError, ValueError):
-                continue
-        if coerced in seen:
-            continue
-        seen.add(coerced)
-        normalized.append(coerced)
-    return normalized
-
-
-def _encode_lookup_id_list(values: Iterable[int]) -> str:
-    normalized: list[int] = []
-    seen: set[int] = set()
-    for value in values:
-        try:
-            coerced = int(value)
-        except (TypeError, ValueError):
-            continue
-        if coerced in seen:
-            continue
-        seen.add(coerced)
-        normalized.append(coerced)
-    if not normalized:
-        return ''
-    return json.dumps(normalized)
+DuplicateGroupResolution = processed_duplicates.DuplicateGroupResolution
+_coerce_int = processed_duplicates.coerce_int
+_RELATION_COUNT_COLUMNS = tuple(f"{relation['join_table']}_count" for relation in LOOKUP_RELATIONS)
 
 
 def _parse_lookup_entries_from_source(
@@ -2558,129 +2571,10 @@ def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
     return results
 
 
-@dataclass
-class DuplicateGroupResolution:
-    canonical: sqlite3.Row
-    duplicates: list[sqlite3.Row] = field(default_factory=list)
-    metadata_updates: dict[str, Any] = field(default_factory=dict)
-
-
-def _coerce_int(value: Any) -> int | None:
-    try:
-        if isinstance(value, numbers.Integral):
-            return int(value)
-        if isinstance(value, numbers.Real):
-            float_value = float(value)
-            if math.isnan(float_value):
-                return None
-            if float_value.is_integer():
-                return int(float_value)
-            return None
-        text = str(value).strip()
-        if not text:
-            return None
-        return int(text)
-    except (TypeError, ValueError):
-        return None
-
-
-def _row_get(row: sqlite3.Row, column: str) -> Any:
-    try:
-        return row[column]
-    except (KeyError, IndexError):
-        return None
-
-
-def _metadata_value_score(column: str, value: Any) -> float:
-    if column in {'Summary', 'First Launch Date', 'Category'}:
-        normalized = _normalize_text(value)
-        return float(len(normalized)) if normalized else 0.0
-    if column == 'Cover Path':
-        text = str(value).strip() if value is not None else ''
-        return 1.0 if text else 0.0
-    if column in {'Width', 'Height'}:
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return 0.0
-        return numeric if numeric > 0 else 0.0
-    if column == 'last_edited_at':
-        if not value:
-            return 0.0
-        try:
-            parsed = datetime.fromisoformat(str(value))
-        except ValueError:
-            return 0.0
-        return parsed.timestamp()
-    return 0.0
-
-
 def _compute_metadata_updates(
     canonical: sqlite3.Row, duplicates: Iterable[sqlite3.Row]
 ) -> dict[str, Any]:
-    duplicate_list = list(duplicates)
-    if not duplicate_list:
-        return {}
-    updates: dict[str, Any] = {}
-    metadata_columns = ['Summary', 'Cover Path', 'First Launch Date', 'Category', 'Width', 'Height', 'last_edited_at']
-    for column in metadata_columns:
-        canonical_value = _row_get(canonical, column)
-        canonical_score = _metadata_value_score(column, canonical_value)
-        best_value = canonical_value
-        best_score = canonical_score
-        for entry in duplicate_list:
-            candidate_value = _row_get(entry, column)
-            candidate_score = _metadata_value_score(column, candidate_value)
-            if candidate_score > best_score:
-                best_score = candidate_score
-                best_value = candidate_value
-        if best_score > canonical_score:
-            updates[column] = best_value
-    return updates
-
-
-def _relation_count_from_row(row: sqlite3.Row) -> int:
-    total = 0
-    for relation in LOOKUP_RELATIONS:
-        column_name = f"{relation['join_table']}_count"
-        try:
-            value = row[column_name]
-        except (KeyError, IndexError):
-            value = None
-        count = _coerce_int(value)
-        if count:
-            total += count
-    return total
-
-
-def _choose_canonical_duplicate(group: list[sqlite3.Row]) -> sqlite3.Row | None:
-    best_row: sqlite3.Row | None = None
-    best_score: tuple[Any, ...] | None = None
-    for entry in group:
-        entry_id = _coerce_int(entry['ID'])
-        if entry_id is None:
-            continue
-        relation_score = _relation_count_from_row(entry)
-        metadata_presence = sum(
-            1
-            for column in ('Summary', 'Cover Path', 'First Launch Date', 'Category')
-            if _metadata_value_score(column, _row_get(entry, column)) > 0
-        )
-        cover_score = _metadata_value_score('Cover Path', _row_get(entry, 'Cover Path'))
-        summary_score = _metadata_value_score('Summary', _row_get(entry, 'Summary'))
-        edited_score = _metadata_value_score('last_edited_at', _row_get(entry, 'last_edited_at'))
-        score = (
-            relation_score,
-            metadata_presence,
-            cover_score,
-            summary_score,
-            edited_score,
-            -entry_id,
-        )
-        if best_score is None or score > best_score:
-            best_score = score
-            best_row = entry
-    return best_row
+    return processed_duplicates.compute_metadata_updates(canonical, duplicates)
 
 
 def _scan_duplicate_candidates(
@@ -2688,55 +2582,11 @@ def _scan_duplicate_candidates(
     *,
     progress_callback: Callable[[int, int, int, int], None] | None = None,
 ) -> tuple[list[DuplicateGroupResolution], int, int, int]:
-    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
-    for row in rows:
-        name_value = _normalize_text(row['Name']).casefold()
-        igdb_value = coerce_igdb_id(row['igdb_id'])
-        if not name_value or not igdb_value:
-            continue
-        groups.setdefault((name_value, igdb_value), []).append(row)
-
-    group_values = list(groups.values())
-    total_groups = len(group_values)
-
-    duplicate_groups = 0
-    skipped_groups = 0
-    resolutions: list[DuplicateGroupResolution] = []
-    for index, group in enumerate(group_values, start=1):
-        if len(group) <= 1:
-            continue
-        duplicate_groups += 1
-        canonical_row = _choose_canonical_duplicate(group)
-        if canonical_row is None:
-            skipped_groups += 1
-            continue
-        canonical_id = _coerce_int(canonical_row['ID'])
-        if canonical_id is None:
-            skipped_groups += 1
-            continue
-        duplicate_rows: list[sqlite3.Row] = []
-        for entry in group:
-            if entry is canonical_row:
-                continue
-            entry_id = _coerce_int(entry['ID'])
-            if entry_id is None:
-                continue
-            duplicate_rows.append(entry)
-        if not duplicate_rows:
-            skipped_groups += 1
-            continue
-        metadata_updates = _compute_metadata_updates(canonical_row, duplicate_rows)
-        resolutions.append(
-            DuplicateGroupResolution(
-                canonical=canonical_row,
-                duplicates=duplicate_rows,
-                metadata_updates=metadata_updates,
-            )
-        )
-        if progress_callback is not None:
-            progress_callback(index, total_groups or len(group_values) or 1, duplicate_groups, skipped_groups)
-
-    return resolutions, duplicate_groups, skipped_groups, total_groups
+    return processed_duplicates.scan_duplicate_candidates(
+        rows,
+        progress_callback=progress_callback,
+        relation_count_columns=_RELATION_COUNT_COLUMNS,
+    )
 
 
 def _apply_metadata_updates(
@@ -2779,185 +2629,27 @@ def _refresh_lookup_columns_for_games(
 def _merge_duplicate_resolutions(
     resolutions: Iterable[DuplicateGroupResolution],
 ) -> set[int]:
-    resolution_list = [resolution for resolution in resolutions if resolution.duplicates]
-    if not resolution_list:
-        return set()
-
-    ids_to_delete: set[int] = set()
-    canonical_ids: set[int] = set()
-
-    with db_lock:
-        conn = get_db()
-        with conn:
-            for resolution in resolution_list:
-                canonical_id = _coerce_int(resolution.canonical['ID'])
-                if canonical_id is None:
-                    continue
-                duplicate_ids: list[int] = []
-                for duplicate_row in resolution.duplicates:
-                    duplicate_id = _coerce_int(duplicate_row['ID'])
-                    if duplicate_id is None:
-                        continue
-                    duplicate_ids.append(duplicate_id)
-                    for relation in LOOKUP_RELATIONS:
-                        join_table = relation['join_table']
-                        join_column = relation['join_column']
-                        conn.execute(
-                            f'''
-                                INSERT OR IGNORE INTO {join_table} (processed_game_id, {join_column})
-                                SELECT ?, {join_column}
-                                FROM {join_table}
-                                WHERE processed_game_id = ?
-                            ''',
-                            (canonical_id, duplicate_id),
-                        )
-                        conn.execute(
-                            f'DELETE FROM {join_table} WHERE processed_game_id = ?',
-                            (duplicate_id,),
-                        )
-                if not duplicate_ids:
-                    continue
-                ids_to_delete.update(duplicate_ids)
-                canonical_ids.add(canonical_id)
-                if resolution.metadata_updates:
-                    _apply_metadata_updates(conn, canonical_id, resolution.metadata_updates)
-            if canonical_ids:
-                _refresh_lookup_columns_for_games(conn, canonical_ids)
-
-    return ids_to_delete
+    return processed_duplicates.merge_duplicate_resolutions(
+        resolutions,
+        db_lock=db_lock,
+        get_db=get_db,
+        lookup_relations=LOOKUP_RELATIONS,
+        apply_metadata_updates=_apply_metadata_updates,
+        fetch_lookup_entries_for_game=_fetch_lookup_entries_for_game,
+        apply_lookup_entries_to_processed_game=_apply_lookup_entries_to_processed_game,
+    )
 
 
 def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
-    games_df = catalog_state.games_df
-
-    unique_ids = sorted(
-        {int(game_id) for game_id in ids_to_delete if str(game_id).strip()}
+    return processed_duplicates.remove_processed_games(
+        ids_to_delete,
+        catalog_state=catalog_state,
+        db_lock=db_lock,
+        get_db=get_db,
+        navigator_canonical=processed_navigator.GameNavigator.canonical_source_index,
+        get_position_for_source_index=get_position_for_source_index,
+        normalize_processed_games=normalize_processed_games,
     )
-    if not unique_ids:
-        return 0, len(games_df)
-
-    placeholders = ','.join('?' for _ in unique_ids)
-    with db_lock:
-        conn = get_db()
-        cur = conn.execute(
-            f'SELECT "ID", "Source Index" FROM processed_games WHERE "ID" IN ({placeholders})',
-            tuple(unique_ids),
-        )
-        rows = cur.fetchall()
-
-    if not rows:
-        return 0, len(games_df)
-
-    delete_params = [(row['ID'],) for row in rows]
-    raw_source_indices = [row['Source Index'] for row in rows if row['Source Index'] is not None]
-
-    with db_lock:
-        conn = get_db()
-        with conn:
-            conn.executemany(
-                'DELETE FROM igdb_updates WHERE processed_game_id=?',
-                delete_params,
-            )
-            conn.executemany(
-                'DELETE FROM processed_games WHERE "ID"=?',
-                delete_params,
-            )
-
-    canonical_indices: set[str] = set()
-    for value in raw_source_indices:
-        canonical = processed_navigator.GameNavigator.canonical_source_index(value)
-        if canonical is not None:
-            canonical_indices.add(canonical)
-
-    removed_numeric = sorted(
-        {int(candidate) for candidate in canonical_indices if candidate.isdigit()}
-    )
-
-    positions_to_remove: set[int] = set()
-    for value in raw_source_indices:
-        position = get_position_for_source_index(value)
-        if position is None:
-            canonical = processed_navigator.GameNavigator.canonical_source_index(value)
-            if canonical is not None and canonical != value:
-                position = get_position_for_source_index(canonical)
-        if position is not None:
-            positions_to_remove.add(position)
-
-    updated_df = games_df
-    if not updated_df.empty and positions_to_remove:
-        drop_indices = sorted(positions_to_remove)
-        updated_df = updated_df.drop(updated_df.index[drop_indices]).reset_index(drop=True)
-
-    if not updated_df.empty:
-        if 'Source Index' in updated_df.columns:
-            current_values = updated_df['Source Index'].tolist()
-        else:
-            current_values = [str(idx) for idx in range(len(updated_df))]
-        new_values: list[str] = []
-        for idx, value in enumerate(current_values):
-            canonical = processed_navigator.GameNavigator.canonical_source_index(value)
-            if canonical is None:
-                new_values.append(str(idx))
-                continue
-            if canonical.isdigit():
-                numeric_value = int(canonical)
-                shift = bisect_left(removed_numeric, numeric_value)
-                new_numeric = numeric_value - shift
-                stripped = str(value).strip()
-                if stripped.isdigit():
-                    formatted = str(new_numeric).zfill(len(stripped))
-                else:
-                    formatted = str(new_numeric)
-                new_values.append(formatted)
-            else:
-                new_values.append(canonical)
-        updated_df = updated_df.copy()
-        updated_df['Source Index'] = new_values
-
-    if removed_numeric:
-        with db_lock:
-            conn = get_db()
-            with conn:
-                cur = conn.execute(
-                    'SELECT "ID", "Source Index" FROM processed_games'
-                )
-                stored_rows = cur.fetchall()
-                for entry in stored_rows:
-                    canonical = processed_navigator.GameNavigator.canonical_source_index(
-                        entry['Source Index']
-                    )
-                    if canonical is None or not canonical.isdigit():
-                        continue
-                    numeric_value = int(canonical)
-                    shift = bisect_left(removed_numeric, numeric_value)
-                    if shift <= 0:
-                        continue
-                    new_numeric = numeric_value - shift
-                    stored_text = str(entry['Source Index'])
-                    stripped = stored_text.strip()
-                    if stripped.isdigit():
-                        new_value = str(new_numeric).zfill(len(stripped))
-                    else:
-                        new_value = str(new_numeric)
-                    conn.execute(
-                        'UPDATE processed_games SET "Source Index"=? WHERE "ID"=?',
-                        (new_value, entry['ID']),
-                    )
-
-    normalize_processed_games()
-
-    try:
-        catalog_state.set_games_dataframe(
-            updated_df,
-            rebuild_metadata=False,
-            rebuild_navigator=True,
-        )
-    except Exception:
-        pass
-
-    remaining_total = catalog_state.total_games
-    removed_count = len(delete_params)
-    return removed_count, remaining_total
 
 
 def fetch_cached_updates() -> list[dict[str, Any]]:
