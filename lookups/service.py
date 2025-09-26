@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+import numbers
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 import sqlite3
 
+import pandas as pd
+
 from db import utils as db_utils
+
+logger = logging.getLogger(__name__)
 
 SQLALCHEMY_AVAILABLE = True
 try:  # pragma: no cover - import guard for optional dependency during bootstrap
@@ -278,6 +285,193 @@ def lookup_name_for_id(
     if entry is None:
         return None
     return entry["name"]
+
+
+def iter_lookup_payload(
+    raw_value: Any,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> list[dict[str, Any]]:
+    """Normalize lookup selections from user-provided payloads."""
+
+    if raw_value is None:
+        return []
+
+    if isinstance(raw_value, Mapping):
+        if "selected" in raw_value:
+            return iter_lookup_payload(
+                raw_value["selected"], normalize_lookup_name=normalize_lookup_name
+            )
+        if "entries" in raw_value:
+            return iter_lookup_payload(
+                raw_value["entries"], normalize_lookup_name=normalize_lookup_name
+            )
+
+        ids_value = raw_value.get("ids")
+        names_value = raw_value.get("names")
+        results: list[dict[str, Any]] = []
+
+        if isinstance(ids_value, (list, tuple)):
+            for idx, entry_id in enumerate(ids_value):
+                entry_name = None
+                if isinstance(names_value, (list, tuple)) and idx < len(names_value):
+                    entry_name = names_value[idx]
+                results.append({"id": entry_id, "name": entry_name})
+            return results
+
+        if isinstance(names_value, (list, tuple)):
+            for name in names_value:
+                results.append({"id": None, "name": name})
+            return results
+
+        entry_id = raw_value.get("id")
+        entry_name = raw_value.get("name")
+        if entry_id is not None or entry_name is not None:
+            return [{"id": entry_id, "name": entry_name}]
+        return []
+
+    if isinstance(raw_value, str):
+        text = normalize_lookup_name(raw_value)
+        return [{"id": None, "name": text}] if text else []
+
+    if isinstance(raw_value, numbers.Number) and not isinstance(raw_value, bool):
+        try:
+            return [{"id": int(raw_value), "name": None}]
+        except (TypeError, ValueError):
+            return []
+
+    try:
+        iterator = iter(raw_value)
+    except TypeError:
+        text = normalize_lookup_name(raw_value)
+        return [{"id": None, "name": text}] if text else []
+
+    results: list[dict[str, Any]] = []
+    for item in iterator:
+        results.extend(
+            iter_lookup_payload(item, normalize_lookup_name=normalize_lookup_name)
+        )
+    return results
+
+
+def format_lookup_response(
+    entries: list[dict[str, Any]],
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> dict[str, Any]:
+    """Return a formatted payload for lookup selections."""
+
+    formatted: list[dict[str, Any]] = []
+    names: list[str] = []
+    ids: list[int] = []
+    seen_ids: set[int] = set()
+    seen_names: set[str] = set()
+
+    for entry in entries:
+        entry_id = entry.get("id")
+        if entry_id is not None:
+            try:
+                entry_id = int(entry_id)
+            except (TypeError, ValueError):
+                entry_id = None
+
+        entry_name = normalize_lookup_name(entry.get("name"))
+        if entry_id is None and not entry_name:
+            continue
+
+        if entry_id is not None:
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            ids.append(entry_id)
+        else:
+            fingerprint = entry_name.casefold()
+            if fingerprint in seen_names:
+                continue
+            seen_names.add(fingerprint)
+
+        if entry_name:
+            names.append(entry_name)
+        formatted.append({"id": entry_id, "name": entry_name})
+
+    return {
+        "selected": formatted,
+        "names": names,
+        "ids": ids,
+    }
+
+
+def resolve_lookup_selection(
+    conn: sqlite3.Connection,
+    relation: Mapping[str, Any],
+    raw_value: Any,
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+) -> dict[str, Any]:
+    """Resolve selection payload into lookup IDs and names."""
+
+    lookup_table = relation["lookup_table"]
+    entries = iter_lookup_payload(raw_value, normalize_lookup_name=normalize_lookup_name)
+    resolved: list[dict[str, Any]] = []
+
+    for entry in entries:
+        entry_id = entry.get("id")
+        entry_name = normalize_lookup_name(entry.get("name"))
+        coerced_id = _coerce_int(entry_id)
+
+        if coerced_id is not None:
+            lookup_name = lookup_name_for_id(
+                conn,
+                lookup_table,
+                coerced_id,
+                normalize_lookup_name=normalize_lookup_name,
+            )
+            if lookup_name:
+                resolved.append({"id": coerced_id, "name": lookup_name})
+                continue
+            coerced_id = None
+
+        if not entry_name:
+            continue
+
+        lookup_id = get_or_create_lookup_id(
+            conn,
+            lookup_table,
+            entry_name,
+            normalize_lookup_name=normalize_lookup_name,
+        )
+        if lookup_id is None:
+            continue
+
+        lookup_name = (
+            lookup_name_for_id(
+                conn,
+                lookup_table,
+                lookup_id,
+                normalize_lookup_name=normalize_lookup_name,
+            )
+            or entry_name
+        )
+        resolved.append({"id": lookup_id, "name": lookup_name})
+
+    deduped: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for entry in resolved:
+        entry_id = entry["id"]
+        if entry_id in seen_ids:
+            continue
+        seen_ids.add(entry_id)
+        deduped.append(entry)
+
+    names = [entry["name"] for entry in deduped if entry["name"]]
+    ids: list[int] = []
+    for entry in deduped:
+        coerced = _coerce_int(entry.get("id"))
+        if coerced is None:
+            continue
+        ids.append(coerced)
+
+    return {"entries": deduped, "names": names, "ids": ids}
 
 
 def create_lookup_entry(
@@ -716,6 +910,289 @@ def remove_lookup_id_from_entries(
         filtered.append(entry)
 
     entries[response_key] = filtered
+
+
+def fetch_lookup_entries_for_game(
+    conn: sqlite3.Connection,
+    processed_game_id: int,
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    normalize_lookup_name: Callable[[Any], str],
+    decode_lookup_id_list: Callable[[Any], Iterable[int]],
+    parse_iterable: Callable[[Any], Iterable[str]],
+    row_value: Callable[[sqlite3.Row | Sequence[Any], str, int], Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Return lookup entries associated with ``processed_game_id``."""
+
+    selections: dict[str, list[dict[str, Any]]] = {}
+
+    try:
+        cur = conn.execute('SELECT * FROM processed_games WHERE "ID"=?', (processed_game_id,))
+        processed_row = cur.fetchone()
+    except sqlite3.OperationalError:
+        processed_row = None
+
+    processed_mapping = dict(processed_row) if processed_row is not None else {}
+
+    for relation in relations:
+        response_key = relation["response_key"]
+        lookup_table = relation["lookup_table"]
+        join_table = relation["join_table"]
+        join_column = relation["join_column"]
+        id_column = relation.get("id_column")
+
+        stored_ids: list[int] = []
+        if id_column and processed_mapping:
+            stored_ids = list(decode_lookup_id_list(processed_mapping.get(id_column)))
+
+        entries: list[dict[str, Any]] = []
+
+        try:
+            cur_lookup = conn.execute(
+                f"""
+                    SELECT j.{join_column} AS lookup_id, l.name
+                    FROM {join_table} j
+                    LEFT JOIN {lookup_table} l ON l.id = j.{join_column}
+                    WHERE j.processed_game_id = ?
+                    ORDER BY j.rowid
+                """,
+                (processed_game_id,),
+            )
+            join_rows = cur_lookup.fetchall()
+        except sqlite3.OperationalError:
+            join_rows = []
+
+        join_id_to_name: dict[int, str] = {}
+        join_order: list[int] = []
+
+        for join_row in join_rows:
+            raw_id = row_value(join_row, "lookup_id", 0)
+            lookup_id = _coerce_int(raw_id)
+            if lookup_id is None or lookup_id in join_id_to_name:
+                continue
+
+            lookup_name = normalize_lookup_name(row_value(join_row, "name", 1))
+            if not lookup_name:
+                lookup_name = lookup_name_for_id(
+                    conn,
+                    lookup_table,
+                    lookup_id,
+                    normalize_lookup_name=normalize_lookup_name,
+                )
+
+            join_id_to_name[lookup_id] = normalize_lookup_name(lookup_name)
+            join_order.append(lookup_id)
+
+        id_sequence = stored_ids if stored_ids else join_order
+        seen_ids: set[int] = set()
+
+        for lookup_id in id_sequence:
+            coerced = _coerce_int(lookup_id)
+            if coerced is None or coerced in seen_ids:
+                continue
+
+            seen_ids.add(coerced)
+            lookup_name = join_id_to_name.get(coerced)
+            if not lookup_name:
+                lookup_name = lookup_name_for_id(
+                    conn,
+                    lookup_table,
+                    coerced,
+                    normalize_lookup_name=normalize_lookup_name,
+                )
+
+            entries.append({"id": coerced, "name": normalize_lookup_name(lookup_name)})
+
+        if not entries and processed_mapping:
+            raw_value = processed_mapping.get(relation["processed_column"])
+            for name in parse_iterable(raw_value):
+                normalized = normalize_lookup_name(name)
+                if normalized:
+                    entries.append({"id": None, "name": normalized})
+
+        selections[response_key] = entries
+
+    return selections
+
+
+def load_lookup_tables(
+    conn: sqlite3.Connection,
+    tables: Sequence[Mapping[str, Any]],
+    *,
+    data_dir: Path,
+    normalize_lookup_name: Callable[[Any], str],
+    log: logging.Logger | None = None,
+) -> None:
+    """Populate lookup tables using static workbooks when available."""
+
+    logger_ref = log or logger
+
+    for table_config in tables:
+        path = data_dir / table_config["filename"]
+        if not path.exists():
+            continue
+
+        try:
+            df = pd.read_excel(path)
+        except Exception:  # pragma: no cover - defensive logging path
+            logger_ref.exception("Failed to load lookup workbook %s", path)
+            continue
+
+        column_name = table_config["column"]
+        if column_name not in df.columns:
+            logger_ref.warning(
+                "Workbook %s missing expected column %s", path, column_name
+            )
+            continue
+
+        series = df[column_name].dropna()
+        for raw_value in series:
+            name = normalize_lookup_name(raw_value)
+            if not name:
+                continue
+            conn.execute(
+                f"""
+                INSERT INTO {table_config['table']} (name)
+                VALUES (?)
+                ON CONFLICT(name) DO UPDATE SET name=excluded.name
+                """,
+                (name,),
+            )
+
+
+def _backfill_lookup_id_columns(
+    conn: sqlite3.Connection,
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    encode_lookup_id_list: Callable[[Iterable[int]], str],
+    decode_lookup_id_list: Callable[[Any], Iterable[int]],
+    row_value: Callable[[sqlite3.Row | Sequence[Any], str, int], Any],
+) -> None:
+    """Synchronize lookup ID columns with join tables."""
+
+    try:
+        cur = conn.execute("SELECT * FROM processed_games")
+    except sqlite3.OperationalError:
+        return
+
+    rows = cur.fetchall()
+    column_names = [desc[0] for desc in cur.description] if cur.description else []
+
+    for row in rows:
+        if isinstance(row, sqlite3.Row):
+            row_dict = dict(row)
+        else:
+            row_dict = {
+                column_names[idx]: value
+                for idx, value in enumerate(row)
+                if idx < len(column_names)
+            }
+
+        try:
+            game_id = int(row_dict.get("ID"))
+        except (TypeError, ValueError):
+            continue
+
+        updates: dict[str, str] = {}
+
+        for relation in relations:
+            id_column = relation.get("id_column")
+            if not id_column:
+                continue
+
+            join_table = relation["join_table"]
+            join_column = relation["join_column"]
+            stored_value = row_dict.get(id_column)
+            existing_serialized = stored_value if isinstance(stored_value, str) else ""
+
+            join_ids: list[int] = []
+            try:
+                cur_join = conn.execute(
+                    f"SELECT {join_column} FROM {join_table} "
+                    "WHERE processed_game_id = ? ORDER BY rowid",
+                    (game_id,),
+                )
+                join_rows = cur_join.fetchall()
+            except sqlite3.OperationalError:
+                join_rows = []
+
+            seen: set[int] = set()
+            for join_row in join_rows:
+                raw_val = row_value(join_row, join_column, 0)
+                coerced = _coerce_int(raw_val)
+                if coerced is None or coerced in seen:
+                    continue
+                seen.add(coerced)
+                join_ids.append(coerced)
+
+            serialized = encode_lookup_id_list(join_ids)
+            if serialized != (existing_serialized or ""):
+                updates[id_column] = serialized
+
+        if updates:
+            assignments = ", ".join(
+                f"{db_utils._quote_identifier(column)}=?" for column in updates
+            )
+            params = list(updates.values()) + [game_id]
+            conn.execute(
+                f'UPDATE processed_games SET {assignments} WHERE "ID"=?',
+                params,
+            )
+
+
+def ensure_lookup_id_columns(
+    conn: sqlite3.Connection,
+    relations: Sequence[Mapping[str, Any]],
+    *,
+    encode_lookup_id_list: Callable[[Iterable[int]], str],
+    decode_lookup_id_list: Callable[[Any], Iterable[int]],
+    row_value: Callable[[sqlite3.Row | Sequence[Any], str, int], Any],
+) -> None:
+    """Ensure processed-game tables include serialized lookup ID columns."""
+
+    try:
+        cur = conn.execute("PRAGMA table_info(processed_games)")
+    except sqlite3.OperationalError:
+        return
+
+    rows = cur.fetchall()
+    existing_columns = {row[1] for row in rows}
+    added = False
+
+    for relation in relations:
+        id_column = relation.get("id_column")
+        if not id_column or id_column in existing_columns:
+            continue
+        try:
+            conn.execute(
+                f"ALTER TABLE processed_games ADD COLUMN {db_utils._quote_identifier(id_column)} TEXT"
+            )
+            added = True
+        except sqlite3.OperationalError:
+            continue
+
+    if added:
+        try:
+            cur = conn.execute("PRAGMA table_info(processed_games)")
+        except sqlite3.OperationalError:
+            return
+        rows = cur.fetchall()
+        existing_columns = {row[1] for row in rows}
+
+    expected_columns = {
+        relation["id_column"]
+        for relation in relations
+        if relation.get("id_column")
+    }
+
+    if expected_columns & existing_columns:
+        _backfill_lookup_id_columns(
+            conn,
+            relations,
+            encode_lookup_id_list=encode_lookup_id_list,
+            decode_lookup_id_list=decode_lookup_id_list,
+            row_value=row_value,
+        )
 
 
 def backfill_relations(
