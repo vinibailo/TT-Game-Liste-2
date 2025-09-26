@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>IGDB Updates</title>
+    <title>Update</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,400,0,0" />
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
@@ -15,7 +15,7 @@
             <a class="topbar-brand" href="{{ url_for('web.index') }}">Game Editor</a>
             <nav class="topbar-nav" aria-label="Global">
                 <a class="topbar-link" href="{{ url_for('web.index') }}">Editor</a>
-                <a class="topbar-link is-active" href="{{ url_for('updates.updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link is-active" href="{{ url_for('updates.updates_page') }}">Update</a>
                 <a class="topbar-link" href="{{ url_for('lookups.lookups_page') }}">Lookups</a>
                 <a class="topbar-link" href="{{ url_for('web.logout') }}">Logout</a>
             </nav>
@@ -24,18 +24,18 @@
     <main class="updates-page">
         <header class="updates-header">
             <div class="updates-title">
-                <h1>IGDB Updates</h1>
+                <h1>Update</h1>
                 <p>Monitor pending changes from IGDB before applying them to the local catalog.</p>
             </div>
             <div class="updates-actions">
-                <label class="updates-search" for="updates-search">
+                <label class="updates-search search-field" for="updates-search">
                     <span class="sr-only">Search updates</span>
-                    <span class="material-symbols-rounded" aria-hidden="true">search</span>
                     <input
                         type="search"
                         id="updates-search"
                         placeholder="Search by game, ID or IGDB ID"
                         autocomplete="off"
+                        class="search-input"
                         data-search
                     />
                 </label>

@@ -15,7 +15,7 @@
             <a class="topbar-brand" href="{{ url_for('web.index') }}">Game Editor</a>
             <nav class="topbar-nav" aria-label="Global">
                 <a class="topbar-link" href="{{ url_for('web.index') }}">Editor</a>
-                <a class="topbar-link" href="{{ url_for('updates.updates_page') }}">IGDB Updates</a>
+                <a class="topbar-link" href="{{ url_for('updates.updates_page') }}">Update</a>
                 <a class="topbar-link is-active" href="{{ url_for('lookups.lookups_page') }}">Lookups</a>
                 <a class="topbar-link" href="{{ url_for('web.logout') }}">Logout</a>
             </nav>
@@ -36,14 +36,14 @@
                         {% endfor %}
                     </select>
                 </label>
-                <label class="lookups-search" for="lookup-search">
+                <label class="lookups-search search-field" for="lookup-search">
                     <span class="sr-only">Search entries</span>
-                    <span class="material-symbols-rounded" aria-hidden="true">search</span>
                     <input
                         type="search"
                         id="lookup-search"
                         placeholder="Search entries"
                         autocomplete="off"
+                        class="search-input"
                         data-search
                     />
                 </label>
