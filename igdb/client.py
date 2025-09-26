@@ -370,15 +370,24 @@ class IGDBClient:
     ) -> tuple[str, str]:
         """Return a Twitch access token paired with the resolved client id."""
 
-        resolved_client_id = (client_id or self._client_id or self._env.get("TWITCH_CLIENT_ID") or "").strip()
+        resolved_client_id = (
+            client_id
+            or self._client_id
+            or self._env.get("IGDB_CLIENT_ID")
+            or self._env.get("TWITCH_CLIENT_ID")
+            or ""
+        ).strip()
         resolved_client_secret = (
             client_secret
             or self._client_secret
+            or self._env.get("IGDB_CLIENT_SECRET")
             or self._env.get("TWITCH_CLIENT_SECRET")
             or ""
         ).strip()
         if not resolved_client_id or not resolved_client_secret:
-            raise RuntimeError("missing twitch client credentials")
+            raise RuntimeError(
+                "Missing IGDB client credentials; set IGDB_CLIENT_ID and IGDB_CLIENT_SECRET"
+            )
 
         payload = urlencode(
             {
@@ -398,13 +407,18 @@ class IGDBClient:
         )
         request.add_header("Content-Type", "application/x-www-form-urlencoded")
 
-        data = self._request_json(
-            request,
-            open_request,
-            error_prefix="failed to obtain twitch token",
-            generic_error="failed to obtain twitch token",
-            allow_rate_limit=False,
-        )
+        try:
+            data = self._request_json(
+                request,
+                open_request,
+                error_prefix="failed to obtain twitch token",
+                generic_error="failed to obtain twitch token",
+                allow_rate_limit=False,
+            )
+        except RuntimeError as exc:
+            if _is_authentication_error(exc):
+                raise RuntimeError("Invalid IGDB client credentials") from exc
+            raise
 
         token = data.get("access_token") if isinstance(data, Mapping) else None
         if not token:
@@ -801,10 +815,11 @@ def exchange_twitch_credentials(
     *,
     request_factory: Callable[..., Any] | None = None,
     opener: Callable[[Any], Any] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Compatibility wrapper that proxies to :class:`IGDBClient`."""
 
-    client = IGDBClient(client_id=client_id, client_secret=client_secret)
+    client = IGDBClient(client_id=client_id, client_secret=client_secret, env=env)
     return client.exchange_twitch_credentials(
         client_id=client_id,
         client_secret=client_secret,
@@ -814,43 +829,81 @@ def exchange_twitch_credentials(
 
 
 def download_igdb_game_count(
-    access_token: str,
-    client_id: str,
+    access_token: str | None,
+    client_id: str | None,
     *,
     user_agent: str,
     request_factory: Callable[..., Any] | None = None,
     opener: Callable[[Any], Any] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> int:
-    client = IGDBClient(user_agent=user_agent, request_factory=request_factory, opener=opener)
-    return client.fetch_game_count(
-        access_token,
-        client_id,
+    resolved_access_token = (access_token or "").strip()
+    if not resolved_access_token:
+        raise RuntimeError("Missing IGDB access token; call exchange_twitch_credentials first")
+
+    resolved_client_id = _resolve_client_id(client_id, env)
+    if not resolved_client_id:
+        raise RuntimeError("Missing IGDB client identifier; set IGDB_CLIENT_ID")
+
+    client = IGDBClient(
         user_agent=user_agent,
         request_factory=request_factory,
         opener=opener,
+        env=env,
     )
+    try:
+        return client.fetch_game_count(
+            resolved_access_token,
+            resolved_client_id,
+            user_agent=user_agent,
+            request_factory=request_factory,
+            opener=opener,
+        )
+    except RuntimeError as exc:
+        if _is_authentication_error(exc):
+            raise RuntimeError("Invalid IGDB credentials") from exc
+        raise
 
 
 def download_igdb_games(
-    access_token: str,
-    client_id: str,
+    access_token: str | None,
+    client_id: str | None,
     offset: int,
     limit: int,
     *,
     user_agent: str,
     request_factory: Callable[..., Any] | None = None,
     opener: Callable[[Any], Any] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    client = IGDBClient(user_agent=user_agent, request_factory=request_factory, opener=opener)
-    return client.fetch_games(
-        access_token,
-        client_id,
-        offset,
-        limit,
+    resolved_access_token = (access_token or "").strip()
+    if not resolved_access_token:
+        raise RuntimeError("Missing IGDB access token; call exchange_twitch_credentials first")
+
+    resolved_client_id = _resolve_client_id(client_id, env)
+    if not resolved_client_id:
+        raise RuntimeError("Missing IGDB client identifier; set IGDB_CLIENT_ID")
+
+    client = IGDBClient(
         user_agent=user_agent,
         request_factory=request_factory,
         opener=opener,
+        env=env,
     )
+    try:
+        return client.fetch_games(
+            resolved_access_token,
+            resolved_client_id,
+            offset,
+            limit,
+            user_agent=user_agent,
+            request_factory=request_factory,
+            opener=opener,
+        )
+    except RuntimeError as exc:
+        if _is_authentication_error(exc):
+            raise RuntimeError("Invalid IGDB credentials") from exc
+        raise
 
 
 def download_igdb_metadata(
@@ -873,6 +926,37 @@ def download_igdb_metadata(
         request_factory=request_factory,
         opener=opener,
     )
+
+
+def _resolve_client_id(client_id: str | None, env: Mapping[str, str] | None) -> str:
+    candidates: list[str | None] = [client_id]
+    mapping = env or os.environ
+    if mapping:
+        candidates.extend(mapping.get(key) for key in ("IGDB_CLIENT_ID", "TWITCH_CLIENT_ID"))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        text = str(candidate).strip()
+        if text:
+            return text
+    return ""
+
+
+def _is_authentication_error(error: BaseException) -> bool:
+    message = str(error).strip().casefold()
+    if not message:
+        return False
+    indicators = (
+        "401",
+        "403",
+        "invalid client",
+        "invalid token",
+        "invalid credentials",
+        "unauthorized",
+        "forbidden",
+        "access token",
+    )
+    return any(token in message for token in indicators)
 
 
 def _format_http_error(prefix: str, error: HTTPError) -> str:
