@@ -9,6 +9,8 @@ from typing import Any, Callable
 import pandas as pd
 import sqlite3
 
+from . import source_index_cache
+
 
 class GameNavigator:
     """Thread-safe helper to navigate game list and track progress."""
@@ -35,10 +37,6 @@ class GameNavigator:
         self.processed_total: int = 0
         self.skip_queue: list[dict[str, int]] = []
 
-        self._source_index_by_position: dict[int, str] | None = None
-        self._position_by_source_index: dict[str, int] | None = None
-        self._source_index_cache_df_id: int | None = None
-
     @property
     def games_df(self) -> pd.DataFrame:
         """Return the currently loaded games dataframe."""
@@ -53,10 +51,13 @@ class GameNavigator:
     ) -> None:
         """Assign a new games dataframe and optionally rebuild persisted state."""
 
+        old_df = self._games_df
+
         if games_df is None:
             games_df = pd.DataFrame()
         self._games_df = games_df
         self.total = len(games_df)
+        source_index_cache.invalidate_cache(old_df)
         self.reset_source_index_cache()
         if rebuild_state:
             self._load_initial()
@@ -86,9 +87,7 @@ class GameNavigator:
         """Clear cached mappings between navigator positions and ``Source Index`` values."""
 
         with self._cache_lock:
-            self._source_index_by_position = None
-            self._position_by_source_index = None
-            self._source_index_cache_df_id = None
+            source_index_cache.invalidate_cache(self._games_df)
 
     def _ensure_source_index_cache(self) -> tuple[dict[int, str], dict[str, int]]:
         """Build and return cached lookup tables for ``Source Index`` values."""
@@ -98,34 +97,11 @@ class GameNavigator:
             raise RuntimeError('games_df is not loaded')
 
         with self._cache_lock:
-            df_id = id(df)
-            if (
-                self._source_index_by_position is None
-                or self._position_by_source_index is None
-                or self._source_index_cache_df_id != df_id
-                or len(self._source_index_by_position) != len(df)
-            ):
-                mapping: dict[int, str] = {}
-                reverse: dict[str, int] = {}
-                if len(df) > 0:
-                    source_values: list[Any] | None = None
-                    if 'Source Index' in df.columns:
-                        source_values = df['Source Index'].tolist()
-                    for position in range(len(df)):
-                        if source_values is not None and position < len(source_values):
-                            raw_value = source_values[position]
-                        else:
-                            raw_value = position
-                        canonical = self.canonical_source_index(raw_value)
-                        if canonical is None:
-                            canonical = str(position)
-                        mapping[position] = canonical
-                        reverse.setdefault(canonical, position)
-                self._source_index_by_position = mapping
-                self._position_by_source_index = reverse
-                self._source_index_cache_df_id = df_id
+            mapping, reverse = source_index_cache.build_source_index_mappings(
+                df, canonicalize=self.canonical_source_index
+            )
 
-            return self._source_index_by_position, self._position_by_source_index
+        return mapping, reverse
 
     def get_source_index_for_position(self, position: int) -> str:
         """Return the normalized ``Source Index`` string for a DataFrame position."""
