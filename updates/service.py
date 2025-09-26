@@ -2,10 +2,142 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from functools import partial
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
+
+from config import IGDB_USER_AGENT
+from igdb.cache import (
+    get_cached_total as cache_get_cached_total,
+    set_cached_total as cache_set_cached_total,
+    upsert_igdb_games,
+)
+from igdb.client import (
+    download_igdb_game_count as client_download_igdb_game_count,
+    download_igdb_games as client_download_igdb_games,
+)
 
 
 ProgressCallback = Callable[..., None]
+
+
+def refresh_igdb_cache(
+    access_token: str,
+    client_id: str,
+    offset: Any,
+    limit: Any,
+    *,
+    db_lock: Any,
+    get_db: Callable[[], Any],
+    get_cached_total: Callable[[Any], int | None] = cache_get_cached_total,
+    set_cached_total: Callable[[Any, int | None], None] = cache_set_cached_total,
+    download_total: Callable[[str, str], int] | None = None,
+    download_games: Callable[[str, str, int, int], Sequence[Mapping[str, Any]]] | None = None,
+    upsert_games: Callable[[Any, Iterable[Mapping[str, Any]]], tuple[int, int, int]] = upsert_igdb_games,
+    igdb_prefill_cache: MutableMapping[str, Any] | None = None,
+    igdb_prefill_lock: Any | None = None,
+) -> dict[str, Any]:
+    """Synchronise the local IGDB cache with the remote catalogue."""
+
+    try:
+        offset_value = int(offset)
+    except (TypeError, ValueError):
+        offset_value = 0
+    if offset_value < 0:
+        offset_value = 0
+
+    try:
+        limit_value = int(limit)
+    except (TypeError, ValueError):
+        limit_value = 0
+    if limit_value <= 0:
+        limit_value = 500
+    limit_value = max(1, min(limit_value, 500))
+
+    download_total_fn = download_total or partial(
+        client_download_igdb_game_count, user_agent=IGDB_USER_AGENT
+    )
+    download_games_fn = download_games or partial(
+        client_download_igdb_games, user_agent=IGDB_USER_AGENT
+    )
+
+    with db_lock:
+        conn = get_db()
+        cached_total = get_cached_total(conn) if get_cached_total else None
+
+    should_refresh_total = cached_total is None or offset_value == 0
+    total = cached_total
+    if should_refresh_total:
+        total = download_total_fn(access_token, client_id)
+        if set_cached_total:
+            with db_lock:
+                conn = get_db()
+                with conn:
+                    set_cached_total(conn, total)
+
+    if total is None or total <= 0:
+        if set_cached_total:
+            with db_lock:
+                conn = get_db()
+                with conn:
+                    set_cached_total(conn, total)
+        return {
+            'status': 'ok',
+            'total': total or 0,
+            'processed': 0,
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'done': True,
+            'next_offset': 0,
+            'batch_count': 0,
+        }
+
+    if offset_value >= total:
+        return {
+            'status': 'ok',
+            'total': total,
+            'processed': total,
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'done': True,
+            'next_offset': total,
+            'batch_count': 0,
+        }
+
+    payloads = download_games_fn(access_token, client_id, offset_value, limit_value)
+    batch_count = len(payloads)
+
+    inserted = updated = unchanged = 0
+    if batch_count:
+        with db_lock:
+            conn = get_db()
+            with conn:
+                inserted, updated, unchanged = upsert_games(conn, payloads)
+        if igdb_prefill_lock is not None and igdb_prefill_cache is not None:
+            with igdb_prefill_lock:
+                igdb_prefill_cache.clear()
+
+    processed = offset_value + batch_count
+    if processed < 0:
+        processed = 0
+    if total is not None:
+        processed = min(processed, total)
+
+    done = processed >= total or batch_count == 0
+    next_offset = offset_value + batch_count if batch_count else processed
+
+    return {
+        'status': 'ok',
+        'total': total,
+        'processed': processed,
+        'inserted': inserted,
+        'updated': updated,
+        'unchanged': unchanged,
+        'done': done,
+        'next_offset': next_offset,
+        'batch_count': batch_count,
+    }
 
 
 def fix_names_job(
