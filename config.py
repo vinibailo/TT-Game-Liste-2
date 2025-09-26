@@ -5,13 +5,15 @@ import os
 from pathlib import Path
 from typing import Final
 
+BASE_DIR: Final[Path] = Path(__file__).resolve().parent
+
 try:  # pragma: no cover - optional dependency for local development
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - python-dotenv is optional
     load_dotenv = None  # type: ignore[assignment]
 
 if load_dotenv is not None:
-    load_dotenv()
+    load_dotenv(BASE_DIR / ".env")
 
 
 def _clean_text(value: str | None) -> str:
@@ -70,8 +72,6 @@ def _coerce_truthy_env(value: str | None) -> bool:
     text = value.strip().lower()
     return text in {"1", "true", "yes", "on"}
 
-
-BASE_DIR: Final[Path] = Path(__file__).resolve().parent
 
 INPUT_XLSX_PATH: Final[Path] = _path_from(
     os.environ.get("INPUT_XLSX"), "igdb_all_games.xlsx"

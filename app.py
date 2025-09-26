@@ -62,9 +62,10 @@ from helpers import (
 )
 from db import utils as db_utils
 from igdb import cache as igdb_cache
-from igdb import client as igdb_client
 from igdb import diff as igdb_diff
 from igdb.client import (
+    IGDBClient,
+    IGDB_CATEGORY_LABELS,
     coerce_igdb_id,
     cover_url_from_cover,
     extract_igdb_id,
@@ -94,7 +95,6 @@ _PLACEHOLDER_IMPORTS = (
     app_config,
     db_utils,
     igdb_cache,
-    igdb_client,
     igdb_diff,
     ingestion_data_loader,
     jobs_manager,
@@ -114,6 +114,8 @@ _PLACEHOLDER_IMPORTS = (
 )
 
 logger = logging.getLogger(__name__)
+
+igdb_api_client = IGDBClient()
 
 def _db_connection_factory() -> sqlite3.Connection:
     return db_utils._create_sqlite_connection(
@@ -244,37 +246,12 @@ app = Flask(__name__)
 app.secret_key = APP_SECRET_KEY
 app.config.setdefault('OPENAI_SUMMARY_ENABLED', OPENAI_SUMMARY_ENABLED)
 
-IGDB_CATEGORY_LABELS = {
-    0: 'Main Game',
-    1: 'DLC / Add-on',
-    2: 'Expansion',
-    3: 'Bundle',
-    4: 'Standalone Expansion',
-    5: 'Mod',
-    6: 'Episode',
-    7: 'Season',
-    8: 'Remake',
-    9: 'Remaster',
-    10: 'Expanded Game',
-    11: 'Port',
-    12: 'Fork',
-    13: 'Pack',
-    14: 'Update',
-}
-
-
 IGDB_CACHE_TABLE = 'igdb_games'
 IGDB_CACHE_STATE_TABLE = 'igdb_cache_state'
 
 
 def _igdb_category_display(value: Any) -> str:
-    if value in (None, ''):
-        return ''
-    try:
-        key = int(value)
-    except (TypeError, ValueError):
-        return str(value).strip()
-    return IGDB_CATEGORY_LABELS.get(key, 'Other')
+    return IGDBClient.translate_category(value)
 
 
 def _coerce_rating_count(primary: Any, secondary: Any) -> int | None:
@@ -1968,92 +1945,7 @@ def now_utc_iso() -> str:
 
 
 def _normalize_igdb_payload(item: Mapping[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(item, Mapping):
-        return None
-
-    raw_id = item.get('id')
-    try:
-        igdb_id = int(str(raw_id).strip())
-    except (TypeError, ValueError):
-        logger.warning('Skipping IGDB entry with invalid id %s', raw_id)
-        return None
-
-    name_value = item.get('name')
-    name = name_value.strip() if isinstance(name_value, str) else ''
-
-    summary_value = item.get('summary')
-    summary = summary_value.strip() if isinstance(summary_value, str) else ''
-
-    cover_obj = item.get('cover')
-    cover: dict[str, Any] | None = None
-    if isinstance(cover_obj, Mapping):
-        image_id_value = cover_obj.get('image_id') or cover_obj.get('imageId')
-        if image_id_value:
-            cover = {'image_id': str(image_id_value)}
-    elif isinstance(cover_obj, str):
-        image_id = cover_obj.strip()
-        if image_id:
-            cover = {'image_id': image_id}
-
-    rating_count = _coerce_rating_count(
-        item.get('total_rating_count'), item.get('rating_count')
-    )
-
-    involved_companies = item.get('involved_companies')
-    developer_names: list[str] = []
-    publisher_names: list[str] = []
-    if isinstance(involved_companies, list):
-        seen_dev: set[str] = set()
-        seen_pub: set[str] = set()
-        for company in involved_companies:
-            if not isinstance(company, Mapping):
-                continue
-            company_obj = company.get('company')
-            company_name: str | None = None
-            if isinstance(company_obj, Mapping):
-                name_candidate = company_obj.get('name')
-                if isinstance(name_candidate, str):
-                    company_name = name_candidate.strip()
-            elif isinstance(company_obj, str):
-                company_name = company_obj.strip()
-            if not company_name:
-                name_candidate = company.get('name')
-                if isinstance(name_candidate, str):
-                    company_name = name_candidate.strip()
-            if not company_name:
-                continue
-            fingerprint = company_name.casefold()
-            if company.get('developer') and fingerprint not in seen_dev:
-                seen_dev.add(fingerprint)
-                developer_names.append(company_name)
-            if company.get('publisher') and fingerprint not in seen_pub:
-                seen_pub.add(fingerprint)
-                publisher_names.append(company_name)
-
-    if not developer_names:
-        developer_names = _parse_company_names(item.get('developers'))
-    if not publisher_names:
-        publisher_names = _parse_company_names(item.get('publishers'))
-
-    genres = _parse_iterable(item.get('genres'))
-    platforms = _parse_iterable(item.get('platforms'))
-    game_modes = _parse_iterable(item.get('game_modes'))
-
-    return {
-        'id': igdb_id,
-        'name': name,
-        'summary': summary,
-        'updated_at': item.get('updated_at'),
-        'first_release_date': item.get('first_release_date'),
-        'category': item.get('category'),
-        'cover': cover,
-        'rating_count': rating_count,
-        'developers': developer_names,
-        'publishers': publisher_names,
-        'genres': genres,
-        'platforms': platforms,
-        'game_modes': game_modes,
-    }
+    return igdb_api_client.normalize_game(item)
 
 
 def _serialize_cache_list(values: Iterable[Any]) -> str:
@@ -2150,7 +2042,10 @@ def fetch_igdb_metadata(
 def exchange_twitch_credentials() -> tuple[str, str]:
     """Compatibility wrapper that proxies to :mod:`igdb.client`."""
 
-    return igdb_client.exchange_twitch_credentials()
+    return igdb_api_client.exchange_twitch_credentials(
+        request_factory=Request,
+        opener=urlopen,
+    )
 
 
 def download_igdb_metadata(
@@ -2163,14 +2058,12 @@ def download_igdb_metadata(
         if isinstance(IGDB_BATCH_SIZE, int) and IGDB_BATCH_SIZE > 0
         else 500
     )
-    return igdb_client.download_igdb_metadata(
+    return igdb_api_client.fetch_metadata_by_ids(
         access_token,
         client_id,
         igdb_ids,
         batch_size=batch_size,
         user_agent=IGDB_USER_AGENT,
-        normalize=_normalize_igdb_payload,
-        coerce_id=coerce_igdb_id,
         request_factory=Request,
         opener=urlopen,
     )
@@ -2179,7 +2072,7 @@ def download_igdb_metadata(
 def download_igdb_game_count(access_token: str, client_id: str) -> int:
     """Return the IGDB game count via the shared client module."""
 
-    return igdb_client.download_igdb_game_count(
+    return igdb_api_client.fetch_game_count(
         access_token,
         client_id,
         user_agent=IGDB_USER_AGENT,
@@ -2193,13 +2086,12 @@ def download_igdb_games(
 ) -> list[dict[str, Any]]:
     """Download and normalize a page of IGDB games."""
 
-    return igdb_client.download_igdb_games(
+    return igdb_api_client.fetch_games(
         access_token,
         client_id,
         offset,
         limit,
         user_agent=IGDB_USER_AGENT,
-        normalize=_normalize_igdb_payload,
         request_factory=Request,
         opener=urlopen,
     )
