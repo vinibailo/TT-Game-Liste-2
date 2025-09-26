@@ -69,9 +69,6 @@
     const toast = document.getElementById('toast');
     let toastTimer = null;
     let lastFocusedElement = null;
-    let fixHideTimer = null;
-    let refreshHideTimer = null;
-    let dedupeHideTimer = null;
 
     function showToast(message, type = 'success') {
         if (!toast) {
@@ -711,20 +708,24 @@
                 state.fixingNames = active;
                 setFixButtonLoading(active);
                 if (active) {
-                    clearTimeout(fixHideTimer);
                     setFixProgressVisible(true);
+                    updateFixProgress(job.progress_current || 0, job.progress_total || 0);
+                } else {
+                    updateFixProgress(0, 0);
+                    setFixProgressVisible(false);
                 }
-                updateFixProgress(job.progress_current || 0, job.progress_total || 0);
                 break;
             }
             case JOB_TYPES.refresh: {
                 state.refreshing = active;
                 setRefreshButtonLoading(active);
                 if (active) {
-                    clearTimeout(refreshHideTimer);
                     setRefreshProgressVisible(true);
+                    updateRefreshProgress(job.progress_current || 0, job.progress_total || 0);
+                } else {
+                    updateRefreshProgress(0, 0);
+                    setRefreshProgressVisible(false);
                 }
-                updateRefreshProgress(job.progress_current || 0, job.progress_total || 0);
                 if (elements.statusLabel && job.message) {
                     elements.statusLabel.textContent = job.message;
                 }
@@ -734,10 +735,12 @@
                 state.deduping = active;
                 setDedupeButtonLoading(active);
                 if (active) {
-                    clearTimeout(dedupeHideTimer);
                     setDedupeProgressVisible(true);
+                    updateDedupeProgress(job.progress_current || 0, job.progress_total || 0);
+                } else {
+                    updateDedupeProgress(0, 0);
+                    setDedupeProgressVisible(false);
                 }
-                updateDedupeProgress(job.progress_current || 0, job.progress_total || 0);
                 break;
             }
             default:
@@ -757,11 +760,8 @@
         if (type === JOB_TYPES.fix) {
             state.fixingNames = false;
             setFixButtonLoading(false);
-            clearTimeout(fixHideTimer);
-            fixHideTimer = window.setTimeout(() => {
-                updateFixProgress(0, 0);
-                setFixProgressVisible(false);
-            }, 1200);
+            updateFixProgress(0, 0);
+            setFixProgressVisible(false);
             if (status === 'success') {
                 state.detailCache.clear();
                 loadUpdates();
@@ -769,11 +769,8 @@
         } else if (type === JOB_TYPES.refresh) {
             state.refreshing = false;
             setRefreshButtonLoading(false);
-            clearTimeout(refreshHideTimer);
-            refreshHideTimer = window.setTimeout(() => {
-                updateRefreshProgress(0, 0);
-                setRefreshProgressVisible(false);
-            }, 1200);
+            updateRefreshProgress(0, 0);
+            setRefreshProgressVisible(false);
             if (status === 'success') {
                 state.detailCache.clear();
                 loadUpdates();
@@ -781,11 +778,8 @@
         } else if (type === JOB_TYPES.dedupe) {
             state.deduping = false;
             setDedupeButtonLoading(false);
-            clearTimeout(dedupeHideTimer);
-            dedupeHideTimer = window.setTimeout(() => {
-                updateDedupeProgress(0, 0);
-                setDedupeProgressVisible(false);
-            }, 1200);
+            updateDedupeProgress(0, 0);
+            setDedupeProgressVisible(false);
             if (status === 'success' && Number(result.removed) > 0) {
                 state.detailCache.clear();
                 loadUpdates();
@@ -889,7 +883,6 @@
             return;
         }
         state.fixingNames = true;
-        clearTimeout(fixHideTimer);
         setFixButtonLoading(true);
         setFixProgressVisible(true);
         updateFixProgress(0, 0);
@@ -901,10 +894,8 @@
             showToast(error.message, 'warning');
             state.fixingNames = false;
             setFixButtonLoading(false);
-            fixHideTimer = window.setTimeout(() => {
-                updateFixProgress(0, 0);
-                setFixProgressVisible(false);
-            }, 1200);
+            updateFixProgress(0, 0);
+            setFixProgressVisible(false);
         } finally {
             // Loading state will be reset when the job completes or fails.
         }
@@ -920,7 +911,6 @@
         }
         state.deduping = true;
         setDedupeButtonLoading(true);
-        clearTimeout(dedupeHideTimer);
         setDedupeProgressVisible(true);
         updateDedupeProgress(0, 0);
         try {
@@ -930,12 +920,9 @@
             console.error(error);
             showToast(error.message, 'warning');
             state.deduping = false;
-            state.deduping = false;
             setDedupeButtonLoading(false);
-            dedupeHideTimer = window.setTimeout(() => {
-                updateDedupeProgress(0, 0);
-                setDedupeProgressVisible(false);
-            }, 1200);
+            updateDedupeProgress(0, 0);
+            setDedupeProgressVisible(false);
         }
     }
 
@@ -1140,7 +1127,6 @@
             return;
         }
         state.refreshing = true;
-        clearTimeout(refreshHideTimer);
         setRefreshProgressVisible(true);
         updateRefreshProgress(0, 0);
         setRefreshButtonLoading(true);
@@ -1152,10 +1138,8 @@
             showToast(error.message, 'warning');
             state.refreshing = false;
             setRefreshButtonLoading(false);
-            refreshHideTimer = window.setTimeout(() => {
-                updateRefreshProgress(0, 0);
-                setRefreshProgressVisible(false);
-            }, 1200);
+            updateRefreshProgress(0, 0);
+            setRefreshProgressVisible(false);
         } finally {
             // Button state resets when job completes.
         }
