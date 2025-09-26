@@ -523,11 +523,155 @@ def api_set_index():
         if os.path.exists(up_path):
             os.remove(up_path)
     navigator = _get_navigator()
+    total_games = _get_total_games()
+    if index < 0 or index >= total_games:
+        raise BadRequestError('invalid index')
+    build_game_payload = _ctx('build_game_payload')
     try:
         navigator.set_index(index)
     except IndexError as exc:
         raise BadRequestError('invalid index') from exc
-    return jsonify({'status': 'ok'})
+    current_index = navigator.current()
+    payload = build_game_payload(
+        current_index,
+        navigator.seq_index,
+        navigator.processed_total + 1,
+    )
+    payload['completion'] = navigator.completion_percentage()
+    return jsonify(payload)
+
+
+@games_blueprint.route('/api/search', methods=['POST'])
+@handle_api_errors
+def api_search():
+    payload = request.get_json(force=True) or {}
+    raw_query = payload.get('query')
+    query = str(raw_query).strip() if raw_query is not None else ''
+    raw_category = payload.get('category')
+    category_filters: list[str] = []
+    if isinstance(raw_category, (list, tuple)):
+        category_filters = [str(value).strip().lower() for value in raw_category if str(value).strip()]
+    elif isinstance(raw_category, str):
+        normalized = raw_category.strip().lower()
+        if normalized:
+            category_filters = [normalized]
+
+    raw_genres = payload.get('genres')
+    genres: list[str]
+    if isinstance(raw_genres, (list, tuple)):
+        genres = [str(value).strip().lower() for value in raw_genres if str(value).strip()]
+    elif isinstance(raw_genres, str):
+        cleaned = raw_genres.strip().lower()
+        genres = [cleaned] if cleaned else []
+    else:
+        genres = []
+
+    limit = payload.get('limit', 25)
+    try:
+        limit_value = int(limit)
+    except (TypeError, ValueError):
+        limit_value = 25
+    limit_value = max(1, min(limit_value, 100))
+
+    games_df = _get_games_df()
+    if games_df is None:
+        return jsonify({'results': [], 'matches': 0, 'limit': limit_value})
+
+    try:
+        total_rows = len(games_df)
+    except Exception:
+        total_rows = 0
+
+    if total_rows <= 0:
+        return jsonify({'results': [], 'matches': 0, 'limit': limit_value})
+
+    extract_list = _ctx('extract_list')
+    get_source_index_for_position = _ctx('get_source_index_for_position')
+
+    results: list[dict[str, Any]] = []
+    matches = 0
+    query_lower = query.lower()
+
+    for position in range(total_rows):
+        try:
+            row = games_df.iloc[position]
+        except Exception:
+            continue
+
+        name_value = str(row.get('Name', '') or '')
+        summary_value = str(row.get('Summary', '') or '')
+        category_value = str(row.get('Category', '') or '')
+
+        if category_filters:
+            if category_value.strip().lower() not in category_filters:
+                continue
+
+        row_genres = extract_list(row, ['Genres', 'Genre'])
+        if genres:
+            genre_set = {str(g).strip().lower() for g in row_genres if str(g).strip()}
+            if not set(genres).issubset(genre_set):
+                continue
+
+        if query_lower:
+            name_lower = name_value.lower()
+            summary_lower = summary_value.lower()
+            matches_query = query_lower in name_lower or query_lower in summary_lower
+            if not matches_query:
+                candidates = []
+                candidates.append(str(row.get('Source Index', '') or '').strip())
+                candidates.append(str(row.get('IGDB ID', '') or '').strip())
+                candidates.append(str(row.get('igdb_id', '') or '').strip())
+                candidates.append(str(row.get('ID', '') or '').strip())
+                candidates.append(str(row.get('id', '') or '').strip())
+                for candidate in candidates:
+                    if candidate and query_lower in candidate.lower():
+                        matches_query = True
+                        break
+            if not matches_query:
+                continue
+
+        matches += 1
+        if len(results) >= limit_value:
+            continue
+
+        try:
+            source_index_value = get_source_index_for_position(position)
+        except Exception:
+            source_index_value = str(row.get('Source Index', position))
+
+        igdb_id_value = row.get('IGDB ID') or row.get('igdb_id') or ''
+        entry = {
+            'index': int(position),
+            'name': name_value,
+            'category': category_value,
+            'genres': row_genres,
+            'source_index': source_index_value,
+        }
+        igdb_id_text = str(igdb_id_value).strip()
+        if igdb_id_text:
+            entry['igdb_id'] = igdb_id_text
+        results.append(entry)
+
+    source_indices = [entry['source_index'] for entry in results if entry.get('source_index')]
+    if source_indices:
+        unique_indices = list(dict.fromkeys(str(value) for value in source_indices))
+        placeholders = ','.join('?' for _ in unique_indices)
+        db_lock = _ctx('db_lock')
+        get_db = _ctx('get_db')
+        with db_lock:
+            conn = get_db()
+            cur = conn.execute(
+                f'SELECT "Source Index", "ID" FROM processed_games WHERE "Source Index" IN ({placeholders})',
+                tuple(unique_indices),
+            )
+            rows = cur.fetchall()
+        processed_map = {str(row['Source Index']): row['ID'] for row in rows}
+        for entry in results:
+            source_index_text = str(entry.get('source_index'))
+            if source_index_text in processed_map:
+                entry['processed_id'] = processed_map[source_index_text]
+
+    return jsonify({'results': results, 'matches': matches, 'limit': limit_value})
 
 
 @games_blueprint.route('/api/game_by_id', methods=['POST'])
@@ -580,6 +724,7 @@ def api_game_by_id():
         navigator.seq_index,
         navigator.processed_total + 1,
     )
+    payload['completion'] = navigator.completion_percentage()
     return jsonify(payload)
 
 
@@ -597,12 +742,17 @@ def api_next():
     build_game_payload = _ctx('build_game_payload')
     index = navigator.next()
     if index >= _get_total_games():
-        return jsonify({'done': True, 'message': 'Todos os jogos foram processados.'})
+        return jsonify({
+            'done': True,
+            'message': 'Todos os jogos foram processados.',
+            'completion': navigator.completion_percentage(),
+        })
     payload = build_game_payload(
         index,
         navigator.seq_index,
         navigator.processed_total + 1,
     )
+    payload['completion'] = navigator.completion_percentage()
     return jsonify(payload)
 
 
@@ -624,4 +774,5 @@ def api_back():
         navigator.seq_index,
         navigator.processed_total + 1,
     )
+    payload['completion'] = navigator.completion_percentage()
     return jsonify(payload)
