@@ -9,7 +9,7 @@ import os
 import time
 from typing import Any, Callable, Iterable, Mapping
 
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -730,7 +730,20 @@ class IGDBClient:
         return request_factory or self._request_factory or Request
 
     def _resolve_opener(self, opener: Callable[[Any], Any] | None):
-        return opener or self._opener or urlopen
+        if opener is not None:
+            return opener
+        if self._opener is not None:
+            return self._opener
+
+        def _default_opener(request: Any):
+            try:
+                return urlopen(request, timeout=10)
+            except HTTPError:
+                raise
+            except Exception as exc:  # pragma: no cover - network errors handled at runtime
+                raise RuntimeError("IGDB request failed or timed out") from exc
+
+        return _default_opener
 
     def _request_json(
         self,
@@ -754,6 +767,10 @@ class IGDBClient:
                     continue
                 message = _format_http_error(error_prefix, exc)
                 raise RuntimeError(message) from exc
+            except RuntimeError:
+                raise
+            except (TimeoutError, URLError, OSError) as exc:
+                raise RuntimeError("IGDB request failed or timed out") from exc
             except Exception as exc:  # pragma: no cover - network failures surfaced
                 raise RuntimeError(f"{generic_error}: {exc}") from exc
             try:
