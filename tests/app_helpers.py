@@ -48,6 +48,25 @@ def load_app(tmp_path: Path) -> object:
         module.app.config['TESTING'] = True
         module.app.testing = True
 
+    if hasattr(module, "routes_updates"):
+        module.routes_updates._context['validate_igdb_credentials'] = lambda: True
+
+    if hasattr(module, "exchange_twitch_credentials"):
+        module.exchange_twitch_credentials = lambda: ('token', 'client')
+
+    if hasattr(module, "igdb_api_client"):
+        module.igdb_api_client.exchange_twitch_credentials = (
+            lambda **_kwargs: ('token', 'client')
+        )
+
+    if hasattr(module, "_recreate_lookup_join_tables") and hasattr(module, "db"):
+        with module.db_lock:
+            module._recreate_lookup_join_tables(module.db)
+
+    if hasattr(module, "_ensure_lookup_id_columns") and hasattr(module, "db"):
+        with module.db_lock:
+            module._ensure_lookup_id_columns(module.db)
+
     return module
 
 
