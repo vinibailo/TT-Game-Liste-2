@@ -3039,6 +3039,7 @@ def configure_blueprints(flask_app: Flask) -> None:
     routes_updates.configure({
         'IGDB_BATCH_SIZE': IGDB_BATCH_SIZE,
         'FIX_NAMES_BATCH_LIMIT': FIX_NAMES_BATCH_LIMIT,
+        'validate_igdb_credentials': app_config.validate_igdb_credentials,
         'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
         'db_lock': db_lock,
         'get_db': get_db,
