@@ -1,6 +1,7 @@
 """Application-wide configuration helpers and constants."""
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Final
@@ -14,6 +15,9 @@ except ImportError:  # pragma: no cover - python-dotenv is optional
 
 if load_dotenv is not None:
     load_dotenv(BASE_DIR / ".env")
+
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_text(value: str | None) -> str:
@@ -105,6 +109,10 @@ IGDB_USER_AGENT: Final[str] = (
     _clean_text(os.environ.get("IGDB_USER_AGENT")) or DEFAULT_IGDB_USER_AGENT
 )
 
+IGDB_CLIENT_ID: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_ID"))
+IGDB_CLIENT_SECRET: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_SECRET"))
+IGDB_ENABLED: bool = True
+
 SQLITE_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
     os.environ.get("SQLITE_TIMEOUT"), 120.0
 )
@@ -139,6 +147,29 @@ def get_lookup_data_dir() -> Path:
     return _path_from(os.environ.get("LOOKUP_DATA_DIR"), DEFAULT_LOOKUP_DATA_DIR)
 
 
+def validate_igdb_credentials() -> bool:
+    """Ensure IGDB credentials are configured and update ``IGDB_ENABLED``."""
+
+    global IGDB_ENABLED
+
+    missing = [
+        name
+        for name, value in (
+            ("IGDB_CLIENT_ID", IGDB_CLIENT_ID),
+            ("IGDB_CLIENT_SECRET", IGDB_CLIENT_SECRET),
+        )
+        if not value
+    ]
+
+    IGDB_ENABLED = not missing
+    if missing:
+        logger.error(
+            "Missing required IGDB credentials; set %s.", " and ".join(missing)
+        )
+
+    return IGDB_ENABLED
+
+
 def _validate_settings() -> None:
     """Sanity-check critical configuration values."""
 
@@ -161,6 +192,9 @@ __all__ = [
     "DEFAULT_LOOKUP_DATA_DIR",
     "FIX_NAMES_BATCH_LIMIT",
     "IGDB_BATCH_SIZE",
+    "IGDB_CLIENT_ID",
+    "IGDB_CLIENT_SECRET",
+    "IGDB_ENABLED",
     "IGDB_USER_AGENT",
     "INPUT_XLSX",
     "INPUT_XLSX_PATH",
@@ -178,5 +212,6 @@ __all__ = [
     "SQLITE_TIMEOUT_SECONDS",
     "UPLOAD_DIR",
     "UPLOAD_DIR_PATH",
+    "validate_igdb_credentials",
     "get_lookup_data_dir",
 ]

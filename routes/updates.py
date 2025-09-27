@@ -43,6 +43,9 @@ def updates_page():
 @updates_blueprint.route('/api/igdb/cache', methods=['POST'])
 @handle_api_errors
 def api_igdb_cache_refresh():
+    if not _ctx('validate_igdb_credentials')():
+        return jsonify({'error': 'IGDB credentials missing'}), 503
+
     payload = request.get_json(silent=True) or {}
     offset = payload.get('offset', 0)
     limit = payload.get('limit', _ctx('IGDB_BATCH_SIZE'))
@@ -119,6 +122,9 @@ def api_igdb_cache_refresh():
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])
 @handle_api_errors
 def api_updates_refresh():
+    if not _ctx('validate_igdb_credentials')():
+        return jsonify({'error': 'IGDB credentials missing'}), 503
+
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     execute_refresh_job = _ctx('_execute_refresh_job')
     job_manager = _ctx('job_manager')
