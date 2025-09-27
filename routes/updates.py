@@ -8,13 +8,10 @@ from typing import Any, Mapping
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
 from routes.api_utils import (
-    BadRequestError,
     NotFoundError,
     UpstreamServiceError,
     handle_api_errors,
 )
-from updates import service as updates_service
-
 updates_blueprint = Blueprint("updates", __name__)
 
 _context: dict[str, Any] = {}
@@ -47,79 +44,58 @@ def api_igdb_cache_refresh():
         return jsonify({'error': 'IGDB credentials missing'}), 503
 
     payload = request.get_json(silent=True) or {}
-    offset = payload.get('offset', 0)
-    limit = payload.get('limit', _ctx('IGDB_BATCH_SIZE'))
-
-    exchange_twitch_credentials = _ctx('exchange_twitch_credentials')()
     try:
-        access_token, client_id = exchange_twitch_credentials()
-    except RuntimeError as exc:
-        raise BadRequestError(str(exc)) from exc
-
-    db_lock = _ctx('db_lock')
-    get_db = _ctx('get_db')
-    get_cached_total = _ctx('_get_cached_igdb_total')
-    set_cached_total = _ctx('_set_cached_igdb_total')
-    download_igdb_game_count = _ctx('download_igdb_game_count')()
-    download_igdb_games = _ctx('download_igdb_games')()
-    upsert_cache_entries = _ctx('_upsert_igdb_cache_entries')
-    igdb_prefill_lock = _ctx('_igdb_prefill_lock')
-    igdb_prefill_cache = _ctx('_igdb_prefill_cache')
-
-    try:
-        result = updates_service.refresh_igdb_cache(
-            access_token,
-            client_id,
-            offset,
-            limit,
-            db_lock=db_lock,
-            get_db=get_db,
-            get_cached_total=get_cached_total,
-            set_cached_total=set_cached_total,
-            download_total=download_igdb_game_count,
-            download_games=download_igdb_games,
-            upsert_games=upsert_cache_entries,
-            igdb_prefill_cache=igdb_prefill_cache,
-            igdb_prefill_lock=igdb_prefill_lock,
-        )
-    except RuntimeError as exc:
-        raise UpstreamServiceError(str(exc)) from exc
-
-    if 'error' in result:
-        return jsonify(result), 502
-
-    total = result.get('total') or 0
-    processed = result.get('processed') or 0
-    try:
-        total_value = max(int(total), 0)
+        offset = int(payload.get('offset', 0))
     except (TypeError, ValueError):
-        total_value = 0
-    try:
-        processed_value = max(int(processed), 0)
-    except (TypeError, ValueError):
-        processed_value = 0
+        offset = 0
+    if offset < 0:
+        offset = 0
 
-    progress_total = total_value if total_value > 0 else processed_value
-    progress_current = (
-        min(processed_value, progress_total)
-        if progress_total > 0
-        else processed_value
+    default_limit = _ctx('IGDB_BATCH_SIZE')
+    try:
+        limit = int(payload.get('limit', default_limit))
+    except (TypeError, ValueError):
+        limit = default_limit
+    if not isinstance(limit, int):
+        limit = default_limit if isinstance(default_limit, int) else 0
+    if limit <= 0:
+        limit = default_limit if isinstance(default_limit, int) and default_limit > 0 else 500
+    limit = min(max(int(limit), 1), 500)
+
+    job_manager = _ctx('job_manager')
+    refresh_cache_job = _ctx('refresh_cache_job')
+
+    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
+    if run_sync:
+        try:
+            result = refresh_cache_job(
+                lambda **_kwargs: None,
+                offset=offset,
+                limit=limit,
+            )
+        except RuntimeError as exc:
+            raise UpstreamServiceError(str(exc)) from exc
+        return jsonify(result)
+
+    job, created = job_manager.enqueue_job(
+        'refresh_igdb_cache',
+        'app._execute_refresh_cache_job',
+        description='Refreshing IGDB cache…',
+        kwargs={'offset': offset, 'limit': limit},
     )
-    progress_percent = 0.0
-    if progress_total > 0:
-        progress_percent = min(
-            100.0,
-            max(0.0, (progress_current / progress_total) * 100),
-        )
 
-    response_payload = {
-        **result,
-        'progress_total': progress_total,
-        'progress_current': progress_current,
-        'progress_percent': progress_percent,
+    payload = {
+        'status': 'accepted',
+        'job_id': job.get('id') if job else None,
+        'created': created,
     }
-
-    return jsonify(response_payload)
+    response = jsonify(payload)
+    if job:
+        response.headers['Location'] = url_for(
+            'updates.api_updates_job_detail', job_id=job['id']
+        )
+    status_code = 202 if created else 200
+    return response, status_code
 
 
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])

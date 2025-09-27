@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 import json
 from typing import Any
 from unittest.mock import patch
-
-import json
 
 import pandas as pd
 
@@ -261,7 +261,7 @@ def test_cache_refresh_creates_entries(tmp_path):
     def fake_count(token, client_id):
         assert token == 'token'
         assert client_id == 'client'
-        return 2
+        return 3
 
     app_module.download_igdb_game_count = fake_count
 
@@ -293,15 +293,22 @@ def test_cache_refresh_creates_entries(tmp_path):
 
     app_module.download_igdb_games = fake_download
 
-    response = client.post('/api/igdb/cache', json={'offset': 0, 'limit': 5})
+    response = client.post('/api/igdb/cache?sync=1', json={'offset': 0, 'limit': 5})
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload['status'] == 'ok'
-    assert payload['total'] == 2
-    assert payload['processed'] == 2
-    assert payload['inserted'] == 2
-    assert payload['updated'] == 0
-    assert payload['done'] is True
+    assert payload == {
+        'status': 'ok',
+        'total': 3,
+        'processed': 2,
+        'inserted': 2,
+        'updated': 0,
+        'unchanged': 0,
+        'done': True,
+        'next_offset': 2,
+        'batch_count': 0,
+        'message': 'IGDB cache refresh complete.',
+        'toast_type': 'success',
+    }
 
     with app_module.db_lock:
         rows = app_module.db.execute(
