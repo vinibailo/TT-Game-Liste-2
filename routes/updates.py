@@ -85,6 +85,9 @@ def api_igdb_cache_refresh():
     except RuntimeError as exc:
         raise UpstreamServiceError(str(exc)) from exc
 
+    if 'error' in result:
+        return jsonify(result), 502
+
     total = result.get('total') or 0
     processed = result.get('processed') or 0
     try:

@@ -67,7 +67,21 @@ def refresh_igdb_cache(
     should_refresh_total = cached_total is None or offset_value == 0
     total = cached_total
     if should_refresh_total:
-        total = download_total_fn(access_token, client_id)
+        try:
+            total = download_total_fn(access_token, client_id)
+        except RuntimeError as exc:
+            return {
+                'status': 'error',
+                'error': str(exc),
+                'total': cached_total or 0,
+                'processed': max(offset_value, 0),
+                'inserted': 0,
+                'updated': 0,
+                'unchanged': 0,
+                'done': True,
+                'next_offset': max(offset_value, 0),
+                'batch_count': 0,
+            }
         if set_cached_total:
             with db_lock:
                 conn = get_db()
@@ -105,7 +119,21 @@ def refresh_igdb_cache(
             'batch_count': 0,
         }
 
-    payloads = download_games_fn(access_token, client_id, offset_value, limit_value)
+    try:
+        payloads = download_games_fn(access_token, client_id, offset_value, limit_value)
+    except RuntimeError as exc:
+        return {
+            'status': 'error',
+            'error': str(exc),
+            'total': total or 0,
+            'processed': max(offset_value, 0),
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'done': True,
+            'next_offset': max(offset_value, 0),
+            'batch_count': 0,
+        }
     batch_count = len(payloads)
 
     inserted = updated = unchanged = 0
