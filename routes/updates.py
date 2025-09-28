@@ -485,6 +485,8 @@ def api_updates_detail(processed_game_id: int):
 
     payload = json.loads(row['igdb_payload']) if row['igdb_payload'] else None
     diff = json.loads(row['diff']) if row['diff'] else {}
+    cover_available = bool(row['cover_path'] or row['cover_url'])
+    cover_data = load_cover_data(row['cover_path'], row['cover_url'])
 
     return jsonify(
         {
@@ -496,6 +498,43 @@ def api_updates_detail(processed_game_id: int):
             'local_last_edited_at': row['local_last_edited_at'],
             'refreshed_at': row['refreshed_at'],
             'name': row['game_name'],
-            'cover': load_cover_data(row['cover_path'], row['cover_url']),
+            'cover': cover_data,
+            'cover_available': cover_available,
         }
     )
+
+
+@updates_blueprint.route('/api/updates/<int:processed_game_id>/cover', methods=['GET'])
+@handle_api_errors
+def api_updates_cover(processed_game_id: int):
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+    get_processed_games_columns = _ctx('get_processed_games_columns')
+    load_cover_data = _ctx('load_cover_data')
+
+    with db_lock:
+        conn = get_db()
+        processed_columns = get_processed_games_columns(conn)
+        cover_url_select = (
+            'p."Large Cover Image (URL)" AS cover_url'
+            if 'Large Cover Image (URL)' in processed_columns
+            else 'NULL AS cover_url'
+        )
+        cur = conn.execute(
+            f'''SELECT
+                   p."Cover Path" AS cover_path,
+                   {cover_url_select}
+               FROM processed_games p
+               WHERE p."ID"=?''',
+            (processed_game_id,),
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        raise NotFoundError('not found')
+
+    cover_data = load_cover_data(row['cover_path'], row['cover_url'])
+    if not cover_data:
+        raise NotFoundError('not found')
+
+    return jsonify({'cover': cover_data})

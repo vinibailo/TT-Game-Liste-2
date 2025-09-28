@@ -10,6 +10,7 @@
         searchTerm: '',
         detailCache: new Map(),
         updateMap: new Map(),
+        coverCache: new Map(),
         fixingNames: false,
         deduping: false,
         refreshing: false,
@@ -39,6 +40,14 @@
     const REFRESH_PENDING_MAX_POLLS = 5;
 
     const placeholderImage = '/no-image.jpg';
+    const COVER_FETCH_CONCURRENCY = 4;
+
+    const coverFetchState = {
+        active: 0,
+        queue: [],
+        enqueued: new Set(),
+        targets: new Map(),
+    };
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -120,6 +129,25 @@
             return options.max;
         }
         return truncated;
+    }
+
+    function normalizeId(value) {
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isNaN(parsed)) {
+            return null;
+        }
+        return parsed;
+    }
+
+    function getUpdateById(value) {
+        const normalized = normalizeId(value);
+        if (normalized !== null && state.updateMap.has(normalized)) {
+            return state.updateMap.get(normalized) || null;
+        }
+        if (state.updateMap.has(value)) {
+            return state.updateMap.get(value) || null;
+        }
+        return null;
     }
 
     function clearRefreshStatusTimer() {
@@ -495,7 +523,7 @@
             coverImage.loading = 'lazy';
             coverImage.decoding = 'async';
             coverImage.alt = '';
-            coverImage.src = resolveCoverSource(item.cover);
+            ensureCoverImageById(item.processed_game_id, coverImage, item);
             coverWrapper.appendChild(coverImage);
             const infoWrapper = document.createElement('div');
             infoWrapper.className = 'game-info';
@@ -1096,6 +1124,182 @@
         return `/api/updates/${encodeURIComponent(id)}`;
     }
 
+    function buildCoverUrl(id) {
+        if (config.coverUrlTemplate) {
+            return config.coverUrlTemplate.replace('{id}', encodeURIComponent(id));
+        }
+        return `/api/updates/${encodeURIComponent(id)}/cover`;
+    }
+
+    async function fetchCoverData(id) {
+        const response = await fetch(buildCoverUrl(id), {
+            headers: { Accept: 'application/json' },
+        });
+        if (response.status === 404) {
+            const error = new Error('Cover not found.');
+            error.status = 404;
+            throw error;
+        }
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (err) {
+            payload = null;
+        }
+        if (!response.ok || !payload || !payload.cover) {
+            const message = payload && payload.error ? payload.error : 'Failed to load cover image.';
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+        return payload.cover;
+    }
+
+    function registerCoverTarget(id, target) {
+        if (!(target instanceof HTMLImageElement)) {
+            return;
+        }
+        let targets = coverFetchState.targets.get(id);
+        if (!targets) {
+            targets = new Set();
+            coverFetchState.targets.set(id, targets);
+        }
+        targets.add(target);
+    }
+
+    function updateCoverTargets(id, cover) {
+        const targets = coverFetchState.targets.get(id);
+        if (!targets) {
+            return;
+        }
+        targets.forEach((target) => {
+            if (!(target instanceof HTMLImageElement)) {
+                return;
+            }
+            if (target.dataset.coverId !== String(id)) {
+                return;
+            }
+            target.src = cover ? resolveCoverSource(cover) : placeholderImage;
+        });
+    }
+
+    function processCoverQueue() {
+        while (
+            coverFetchState.active < COVER_FETCH_CONCURRENCY &&
+            coverFetchState.queue.length > 0
+        ) {
+            const nextId = coverFetchState.queue.shift();
+            if (typeof nextId === 'undefined') {
+                break;
+            }
+            coverFetchState.active += 1;
+            runCoverFetch(nextId);
+        }
+    }
+
+    async function runCoverFetch(id) {
+        try {
+            const cover = await fetchCoverData(id);
+            state.coverCache.set(id, cover);
+            const update = getUpdateById(id);
+            if (update) {
+                update.cover = cover;
+                update.cover_available = true;
+            }
+            updateCoverTargets(id, cover);
+        } catch (error) {
+            const status = error && typeof error === 'object' ? error.status : undefined;
+            if (status === 404) {
+                state.coverCache.set(id, null);
+                const update = getUpdateById(id);
+                if (update) {
+                    update.cover = null;
+                    update.cover_available = false;
+                }
+            } else {
+                console.error('Failed to fetch cover image', error);
+            }
+            updateCoverTargets(id, null);
+        } finally {
+            coverFetchState.enqueued.delete(id);
+            coverFetchState.targets.delete(id);
+            coverFetchState.active = Math.max(coverFetchState.active - 1, 0);
+            if (coverFetchState.queue.length > 0) {
+                processCoverQueue();
+            }
+        }
+    }
+
+    function queueCoverFetch(id, target) {
+        if (!Number.isFinite(id)) {
+            return;
+        }
+        if (target instanceof HTMLImageElement) {
+            registerCoverTarget(id, target);
+        }
+        if (coverFetchState.enqueued.has(id)) {
+            return;
+        }
+        coverFetchState.queue.push(id);
+        coverFetchState.enqueued.add(id);
+        processCoverQueue();
+    }
+
+    function ensureCoverImageById(id, imgElement, fallbackItem) {
+        if (!imgElement) {
+            return;
+        }
+        const normalizedId = normalizeId(id);
+        if (normalizedId === null) {
+            imgElement.src = placeholderImage;
+            return;
+        }
+        imgElement.dataset.coverId = String(normalizedId);
+        const update = getUpdateById(normalizedId) || fallbackItem || null;
+        let cached = update && update.cover ? update.cover : null;
+        if (!cached && state.coverCache.has(normalizedId)) {
+            cached = state.coverCache.get(normalizedId);
+        }
+        if (cached) {
+            state.coverCache.set(normalizedId, cached);
+            if (update) {
+                update.cover = cached;
+                update.cover_available = true;
+            }
+            imgElement.src = resolveCoverSource(cached);
+            return;
+        }
+        if (state.coverCache.has(normalizedId) && !state.coverCache.get(normalizedId)) {
+            imgElement.src = placeholderImage;
+            if (update) {
+                update.cover = null;
+                update.cover_available = false;
+            }
+            return;
+        }
+        imgElement.src = placeholderImage;
+        let available = true;
+        if (update && Object.prototype.hasOwnProperty.call(update, 'cover_available')) {
+            available = update.cover_available !== false;
+        } else if (
+            fallbackItem &&
+            Object.prototype.hasOwnProperty.call(fallbackItem, 'cover_available')
+        ) {
+            available = fallbackItem.cover_available !== false;
+        }
+        if (!available) {
+            state.coverCache.set(normalizedId, null);
+            if (update) {
+                update.cover_available = false;
+            }
+            return;
+        }
+        if (!state.updateMap.has(normalizedId) && update) {
+            state.updateMap.set(normalizedId, update);
+        }
+        queueCoverFetch(normalizedId, imgElement);
+    }
+
     async function fetchDiffDetail(id) {
         if (state.detailCache.has(id)) {
             return state.detailCache.get(id);
@@ -1314,13 +1518,14 @@
     }
 
     async function openDiffModal(id) {
-        const update = state.updateMap.get(id);
+        const update = getUpdateById(id);
         if (!update) {
             showToast('Unable to find update details for that game.', 'warning');
             return;
         }
         showModalShell();
         setModalCover(update.cover, update.name);
+        ensureCoverImageById(id, modal.cover, update);
         if (modal.empty) {
             modal.empty.textContent = 'Loading changes…';
             modal.empty.hidden = false;
@@ -1337,11 +1542,30 @@
         }
         try {
             const detail = await fetchDiffDetail(id);
+            const normalizedId = normalizeId(id);
+            if (detail && typeof detail === 'object') {
+                if (update) {
+                    if (detail.cover) {
+                        update.cover = detail.cover;
+                    }
+                    if (Object.prototype.hasOwnProperty.call(detail, 'cover_available')) {
+                        update.cover_available = detail.cover_available !== false;
+                    }
+                }
+                if (normalizedId !== null) {
+                    if (detail.cover) {
+                        state.coverCache.set(normalizedId, detail.cover);
+                    } else if (detail.cover_available === false) {
+                        state.coverCache.set(normalizedId, null);
+                    }
+                }
+            }
             setMetaValue(modal.gameId, detail.processed_game_id);
             setMetaValue(modal.igdbId, detail.igdb_id);
             setMetaValue(modal.igdbUpdated, formatDate(detail.igdb_updated_at));
             setMetaValue(modal.localEdited, formatDate(detail.local_last_edited_at));
             setModalCover(detail.cover || update.cover, detail.name || update.name);
+            ensureCoverImageById(id, modal.cover, update || detail);
             if (modal.subtitle) {
                 const refreshed = formatDate(detail.refreshed_at);
                 modal.subtitle.textContent = detail.name
@@ -1496,9 +1720,34 @@
 
             state.updates = aggregated;
             state.totalAvailable = total || aggregated.length;
-            state.updateMap = new Map(
-                state.updates.map((item) => [item.processed_game_id, item])
-            );
+            const previousCoverCache = state.coverCache instanceof Map ? state.coverCache : new Map();
+            const newCoverCache = new Map();
+            const mapEntries = [];
+            state.updates.forEach((item) => {
+                const normalizedId = normalizeId(item.processed_game_id);
+                const key = normalizedId === null ? item.processed_game_id : normalizedId;
+                mapEntries.push([key, item]);
+                if (normalizedId === null) {
+                    return;
+                }
+                if (item.cover) {
+                    newCoverCache.set(normalizedId, item.cover);
+                    return;
+                }
+                if (previousCoverCache.has(normalizedId)) {
+                    const cached = previousCoverCache.get(normalizedId);
+                    if (cached) {
+                        item.cover = cached;
+                    }
+                    newCoverCache.set(normalizedId, cached);
+                    return;
+                }
+                if (item.cover_available === false) {
+                    newCoverCache.set(normalizedId, null);
+                }
+            });
+            state.coverCache = newCoverCache;
+            state.updateMap = new Map(mapEntries);
             state.page = 1;
             applyFilters({ resetPage: true });
             updateSortIndicators();
@@ -1512,6 +1761,7 @@
             state.page = 1;
             state.totalAvailable = 0;
             state.updateMap = new Map();
+            state.coverCache = new Map();
             if (elements.tableBody) {
                 elements.tableBody.innerHTML = '';
             }
