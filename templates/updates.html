@@ -203,6 +203,7 @@
             jobsUrl: {{ url_for('updates.api_updates_job_list')|tojson }},
             jobDetailUrlTemplate: {{ url_for('updates.api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
             detailUrlTemplate: {{ url_for('updates.api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
+            coverUrlTemplate: {{ url_for('updates.api_updates_cover', processed_game_id=0)|replace('0', '{id}')|tojson }},
             cacheBatchSize: {{ igdb_batch_size|tojson }},
             fixBatchSize: {{ FIX_NAMES_BATCH_LIMIT|default(50)|tojson }}
         };

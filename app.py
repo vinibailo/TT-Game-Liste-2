@@ -2685,6 +2685,7 @@ def fetch_cached_updates(
             processed_id = None
         if processed_id is not None:
             existing_ids.add(processed_id)
+        cover_available = bool(row['cover_path'] or row['cover_url'])
         updates.append(
             {
                 'processed_game_id': row['processed_game_id'],
@@ -2694,7 +2695,8 @@ def fetch_cached_updates(
                 'refreshed_at': row['refreshed_at'],
                 'name': row['game_name'],
                 'has_diff': has_diff,
-                'cover': load_cover_data(row['cover_path'], row['cover_url']),
+                'cover': None,
+                'cover_available': cover_available,
                 'update_type': 'mismatch' if has_diff else None,
                 'detail_available': True,
             }
@@ -2711,6 +2713,7 @@ def fetch_cached_updates(
                 continue
             existing_ids.add(processed_id)
             igdb_updated = _normalize_timestamp(row['cache_updated_at']) if row['cache_updated_at'] else ''
+            cover_available = bool(row['Cover Path'] or row['cover_url'])
             updates.append(
                 {
                     'processed_game_id': processed_id,
@@ -2720,7 +2723,8 @@ def fetch_cached_updates(
                     'refreshed_at': None,
                     'name': row['Name'],
                     'has_diff': False,
-                    'cover': load_cover_data(row['Cover Path'], row['cover_url']),
+                    'cover': None,
+                    'cover_available': cover_available,
                     'update_type': 'duplicate',
                     'detail_available': False,
                 }

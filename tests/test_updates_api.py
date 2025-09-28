@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pandas as pd
+from PIL import Image
 
 from tests.app_helpers import load_app, set_games_dataframe
 
@@ -286,6 +287,8 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['has_diff'] is True
     assert entry['update_type'] == 'mismatch'
     assert entry['detail_available'] is True
+    assert entry['cover'] is None
+    assert entry['cover_available'] is False
 
 
 def test_updates_list_includes_duplicates(tmp_path):
@@ -337,6 +340,8 @@ def test_updates_list_includes_duplicates(tmp_path):
     assert duplicate_entry['update_type'] == 'duplicate'
     assert duplicate_entry['detail_available'] is False
     assert duplicate_entry['has_diff'] is False
+    assert duplicate_entry['cover'] is None
+    assert duplicate_entry['cover_available'] is False
 
 
 def test_updates_list_respects_offset_and_limit(tmp_path):
@@ -687,6 +692,37 @@ def test_updates_detail_returns_diff(tmp_path):
     assert 'Category' not in payload['diff']
     assert payload['processed_game_id'] == 1
     assert payload['igdb_id'] == '100'
+    assert payload['cover_available'] is False
+
+
+def test_updates_cover_endpoint_returns_image(tmp_path):
+    app_module = load_app(tmp_path)
+    cover_path = tmp_path / 'cover.png'
+    Image.new('RGB', (4, 4), color='red').save(cover_path, format='PNG')
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{'Cover Path': str(cover_path)},
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    response = client.get('/api/updates/1/cover')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['cover'].startswith('data:image/jpeg;base64,')
+
+
+def test_updates_cover_endpoint_returns_404_when_missing(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module, ID=1, **{'Cover Path': ''})
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    response = client.get('/api/updates/1/cover')
+    assert response.status_code == 404
 
 
 def test_fix_names_updates_batches(tmp_path):
