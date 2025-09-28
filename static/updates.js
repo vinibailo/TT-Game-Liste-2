@@ -1,8 +1,10 @@
 (function () {
     const config = window.updatesConfig || {};
+    const resolvedPageSize = toPositiveInt(config.pageSize, 100, { max: 500 });
     const state = {
         updates: [],
         filtered: [],
+        filteredAll: [],
         sortKey: 'refreshed_at',
         sortDir: 'desc',
         searchTerm: '',
@@ -20,6 +22,10 @@
         refreshObservedActive: false,
         refreshPendingPolls: 0,
         waitingForRefreshStart: false,
+        page: 1,
+        pageSize: resolvedPageSize,
+        pageCount: 1,
+        totalAvailable: 0,
     };
 
     const JOB_TYPES = Object.freeze({
@@ -57,6 +63,10 @@
         refreshCount: document.querySelector('[data-refresh-count]'),
         refreshPercent: document.querySelector('[data-refresh-percent]'),
         refreshBar: document.querySelector('[data-refresh-bar]'),
+        pagination: document.querySelector('[data-pagination]'),
+        paginationInfo: document.querySelector('[data-page-info]'),
+        paginationPrev: document.querySelector('[data-page-prev]'),
+        paginationNext: document.querySelector('[data-page-next]'),
     };
 
     const modal = {
@@ -90,6 +100,26 @@
         toastTimer = setTimeout(() => {
             toast.classList.remove('show');
         }, 3200);
+    }
+
+    function toNonNegativeInt(value, fallback = 0) {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+            return fallback;
+        }
+        return Math.max(Math.trunc(number), 0);
+    }
+
+    function toPositiveInt(value, fallback = 1, options = {}) {
+        const number = Number(value);
+        if (!Number.isFinite(number) || number <= 0) {
+            return options.max ? Math.min(fallback, options.max) : fallback;
+        }
+        const truncated = Math.trunc(number);
+        if (options.max && truncated > options.max) {
+            return options.max;
+        }
+        return truncated;
     }
 
     function clearRefreshStatusTimer() {
@@ -299,7 +329,7 @@
         if (!elements.countLabel) {
             return;
         }
-        elements.countLabel.textContent = String(state.filtered.length);
+        elements.countLabel.textContent = String(state.filteredAll.length);
     }
 
     function updateStatusMessage() {
@@ -307,7 +337,7 @@
             return;
         }
         if (state.searchTerm) {
-            const count = state.filtered.length;
+            const count = state.filteredAll.length;
             const plural = count === 1 ? '' : 's';
             elements.statusLabel.textContent = `Showing ${count} result${plural} for “${state.searchTerm}”.`;
             return;
@@ -355,9 +385,10 @@
         }
     }
 
-    function applyFilters() {
+    function applyFilters(options = {}) {
+        const { resetPage = false } = options;
         const term = state.searchTerm.trim().toLocaleLowerCase();
-        const filtered = term
+        const filteredAll = term
             ? state.updates.filter((item) => {
                   const name = (item.name || '').toLocaleLowerCase();
                   const id = String(item.processed_game_id || '');
@@ -366,14 +397,35 @@
               })
             : state.updates.slice();
 
-        filtered.sort((a, b) => {
+        filteredAll.sort((a, b) => {
             const comparison = compareValues(a, b, state.sortKey);
             return state.sortDir === 'asc' ? comparison : -comparison;
         });
 
-        state.filtered = filtered;
+        state.filteredAll = filteredAll;
+        if (resetPage) {
+            state.page = 1;
+        }
+        updateVisiblePage();
+    }
+
+    function updateVisiblePage() {
+        const totalItems = state.filteredAll.length;
+        const totalPages = Math.max(1, Math.ceil(totalItems / state.pageSize));
+        state.pageCount = totalPages;
+        if (totalItems === 0) {
+            state.page = 1;
+        } else if (state.page > totalPages) {
+            state.page = totalPages;
+        } else if (state.page < 1) {
+            state.page = 1;
+        }
+        const start = (state.page - 1) * state.pageSize;
+        const end = start + state.pageSize;
+        state.filtered = state.filteredAll.slice(start, end);
         updateCount();
         renderTable();
+        renderPagination();
         updateStatusMessage();
     }
 
@@ -534,6 +586,42 @@
         elements.tableBody.appendChild(fragment);
     }
 
+    function renderPagination() {
+        const container = elements.pagination;
+        if (!container) {
+            return;
+        }
+        const totalItems = state.filteredAll.length;
+        const shouldShow = totalItems > state.pageSize;
+        container.hidden = !shouldShow;
+        if (!shouldShow) {
+            return;
+        }
+        if (elements.paginationInfo) {
+            elements.paginationInfo.textContent = `Page ${state.page} of ${state.pageCount}`;
+        }
+        if (elements.paginationPrev) {
+            const disablePrev = state.page <= 1;
+            elements.paginationPrev.disabled = disablePrev;
+            elements.paginationPrev.setAttribute('aria-disabled', disablePrev ? 'true' : 'false');
+        }
+        if (elements.paginationNext) {
+            const disableNext = state.page >= state.pageCount;
+            elements.paginationNext.disabled = disableNext;
+            elements.paginationNext.setAttribute('aria-disabled', disableNext ? 'true' : 'false');
+        }
+    }
+
+    function setPage(page) {
+        const totalPages = Math.max(1, state.pageCount);
+        const clamped = Math.min(Math.max(page, 1), totalPages);
+        if (clamped === state.page) {
+            return;
+        }
+        state.page = clamped;
+        updateVisiblePage();
+    }
+
     function updateSortIndicators() {
         elements.sortButtons.forEach((button) => {
             const key = button.dataset.sort;
@@ -586,7 +674,7 @@
 
     function updateSearchTerm(event) {
         state.searchTerm = event.target.value || '';
-        applyFilters();
+        applyFilters({ resetPage: true });
     }
 
     function setRefreshButtonLoading(loading) {
@@ -1323,28 +1411,107 @@
         }
     }
 
+    function buildUpdatesUrl(offset, limit) {
+        const base = config.updatesUrl || '/api/updates';
+        try {
+            const url = new URL(base, window.location.origin);
+            url.searchParams.set('offset', String(offset));
+            url.searchParams.set('limit', String(limit));
+            return url.pathname + url.search + url.hash;
+        } catch (err) {
+            const separator = base.includes('?') ? '&' : '?';
+            return `${base}${separator}offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`;
+        }
+    }
+
+    async function fetchUpdatesBatch(offset, limit) {
+        const url = buildUpdatesUrl(offset, limit);
+        const response = await fetch(url, { headers: { Accept: 'application/json' } });
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch (err) {
+            payload = null;
+        }
+        if (!response.ok || !payload || !Array.isArray(payload.items)) {
+            throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
+        }
+        return payload;
+    }
+
     async function loadUpdates() {
         setLoading(true);
         try {
-            const response = await fetch(config.updatesUrl || '/api/updates');
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (err) {
-                payload = null;
+            const aggregated = [];
+            const seenIds = new Set();
+            let total = 0;
+            let offset = 0;
+            let pageLimit = state.pageSize;
+            const visitedOffsets = new Set();
+
+            while (true) {
+                if (visitedOffsets.has(offset)) {
+                    break;
+                }
+                visitedOffsets.add(offset);
+                const payload = await fetchUpdatesBatch(offset, pageLimit);
+                const items = Array.isArray(payload.items) ? payload.items : [];
+                const normalizedOffset = toNonNegativeInt(payload.offset, offset);
+                const normalizedLimit = toPositiveInt(payload.limit, pageLimit, { max: 500 });
+                const normalizedTotal = toNonNegativeInt(payload.total, items.length);
+                if (normalizedTotal > total) {
+                    total = normalizedTotal;
+                }
+                items.forEach((item) => {
+                    if (!item) {
+                        return;
+                    }
+                    const key = item.processed_game_id;
+                    if (key === undefined || key === null) {
+                        aggregated.push(item);
+                        return;
+                    }
+                    if (seenIds.has(key)) {
+                        return;
+                    }
+                    seenIds.add(key);
+                    aggregated.push(item);
+                });
+
+                const received = items.length;
+                if (received === 0) {
+                    offset = normalizedOffset;
+                    break;
+                }
+                if (total > 0 && aggregated.length >= total) {
+                    break;
+                }
+                const nextOffset = normalizedOffset + received;
+                if (nextOffset <= normalizedOffset) {
+                    break;
+                }
+                offset = nextOffset;
+                pageLimit = normalizedLimit;
             }
-            if (!response.ok || !payload || !Array.isArray(payload.updates)) {
-                throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
-            }
-            state.updates = payload.updates;
-            state.updateMap = new Map(state.updates.map((item) => [item.processed_game_id, item]));
-            applyFilters();
+
+            state.updates = aggregated;
+            state.totalAvailable = total || aggregated.length;
+            state.updateMap = new Map(
+                state.updates.map((item) => [item.processed_game_id, item])
+            );
+            state.page = 1;
+            applyFilters({ resetPage: true });
             updateSortIndicators();
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
             state.updates = [];
             state.filtered = [];
+            state.filteredAll = [];
+            state.pageCount = 1;
+            state.page = 1;
+            state.totalAvailable = 0;
+            state.updateMap = new Map();
             if (elements.tableBody) {
                 elements.tableBody.innerHTML = '';
             }
@@ -1352,6 +1519,7 @@
                 elements.emptyState.hidden = false;
             }
             updateCount();
+            renderPagination();
             updateStatusMessage();
         } finally {
             setLoading(false);
@@ -1379,6 +1547,16 @@
                 if (event.target === modal.backdrop) {
                     closeModal();
                 }
+            });
+        }
+        if (elements.paginationPrev) {
+            elements.paginationPrev.addEventListener('click', () => {
+                setPage(state.page - 1);
+            });
+        }
+        if (elements.paginationNext) {
+            elements.paginationNext.addEventListener('click', () => {
+                setPage(state.page + 1);
             });
         }
         document.addEventListener('keydown', (event) => {

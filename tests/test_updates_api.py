@@ -275,8 +275,11 @@ def test_refresh_creates_update_records(tmp_path):
     listing = client.get('/api/updates')
     assert listing.status_code == 200
     listing_data = listing.get_json()
-    assert listing_data['updates']
-    entry = listing_data['updates'][0]
+    assert listing_data['total'] == 1
+    assert listing_data['offset'] == 0
+    assert listing_data['limit'] == 100
+    assert listing_data['items']
+    entry = listing_data['items'][0]
     assert entry['processed_game_id'] == 1
     assert entry['igdb_id'] == '100'
     assert entry['name'] == 'Local Game'
@@ -327,12 +330,55 @@ def test_updates_list_includes_duplicates(tmp_path):
     listing = client.get('/api/updates')
     assert listing.status_code == 200
     data = listing.get_json()
-    assert len(data['updates']) == 1
-    duplicate_entry = data['updates'][0]
+    assert data['total'] == 1
+    assert data['items']
+    duplicate_entry = data['items'][0]
     assert duplicate_entry['processed_game_id'] == 3
     assert duplicate_entry['update_type'] == 'duplicate'
     assert duplicate_entry['detail_available'] is False
     assert duplicate_entry['has_diff'] is False
+
+
+def test_updates_list_respects_offset_and_limit(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    for index in range(1, 4):
+        insert_processed_game(
+            app_module,
+            ID=index,
+            **{
+                'Source Index': str(index - 1),
+                'Name': f'Game {index}',
+                'igdb_id': str(100 + index),
+                'Summary': 'Summary',
+            },
+        )
+        _insert_igdb_update(
+            app_module,
+            index,
+            f'2024-05-0{index}T00:00:00+00:00',
+            has_diff=1 if index % 2 else 0,
+        )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    first_page = client.get('/api/updates?offset=1&limit=1')
+    assert first_page.status_code == 200
+    payload = first_page.get_json()
+    assert payload['total'] == 3
+    assert payload['offset'] == 1
+    assert payload['limit'] == 1
+    assert len(payload['items']) == 1
+    assert payload['items'][0]['processed_game_id'] == 2
+
+    overflow_page = client.get('/api/updates?offset=10&limit=2')
+    assert overflow_page.status_code == 200
+    overflow_data = overflow_page.get_json()
+    assert overflow_data['offset'] == 3
+    assert overflow_data['total'] == 3
+    assert overflow_data['items'] == []
 
 
 def test_cache_refresh_creates_entries(tmp_path):
@@ -1028,14 +1074,16 @@ def test_remove_duplicates_handles_all_duplicates(tmp_path):
     assert app_module.catalog_state.total_games == 1
 
 
-def _insert_igdb_update(app_module, processed_id: int, refreshed_at: str) -> None:
+def _insert_igdb_update(
+    app_module, processed_id: int, refreshed_at: str, *, has_diff: int = 0
+) -> None:
     with app_module.db_lock:
         with app_module.db:
             app_module.db.execute(
                 '''INSERT INTO igdb_updates (
                         processed_game_id, igdb_id, igdb_updated_at,
-                        igdb_payload, diff, local_last_edited_at, refreshed_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                        igdb_payload, diff, local_last_edited_at, refreshed_at, has_diff
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
                 (
                     processed_id,
                     str(100 + processed_id),
@@ -1044,6 +1092,7 @@ def _insert_igdb_update(app_module, processed_id: int, refreshed_at: str) -> Non
                     '{}',
                     '2024-01-01T00:00:00+00:00',
                     refreshed_at,
+                    has_diff,
                 ),
             )
 
