@@ -15,6 +15,11 @@
         jobPollers: new Map(),
         activeJobIds: new Map(),
         completedJobs: new Set(),
+        refreshStatusTimer: null,
+        refreshPhase: 'idle',
+        refreshObservedActive: false,
+        refreshPendingPolls: 0,
+        waitingForRefreshStart: false,
     };
 
     const JOB_TYPES = Object.freeze({
@@ -24,6 +29,8 @@
     });
     const JOB_ACTIVE_STATUSES = new Set(['pending', 'running']);
     const JOB_POLL_INTERVAL = 2000;
+    const REFRESH_STATUS_INTERVAL = 1000;
+    const REFRESH_PENDING_MAX_POLLS = 5;
 
     const placeholderImage = '/no-image.jpg';
 
@@ -83,6 +90,121 @@
         toastTimer = setTimeout(() => {
             toast.classList.remove('show');
         }, 3200);
+    }
+
+    function clearRefreshStatusTimer() {
+        if (state.refreshStatusTimer) {
+            window.clearInterval(state.refreshStatusTimer);
+            state.refreshStatusTimer = null;
+            state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
+        }
+    }
+
+    function startRefreshStatusPolling(immediate = false) {
+        if (state.refreshStatusTimer) {
+            return;
+        }
+        if (immediate) {
+            pollRefreshStatus();
+        }
+        state.refreshStatusTimer = window.setInterval(pollRefreshStatus, REFRESH_STATUS_INTERVAL);
+    }
+
+    async function pollRefreshStatus() {
+        const url = config.refreshStatusUrl || '/api/updates/status';
+        try {
+            const response = await fetch(url, { headers: { Accept: 'application/json' } });
+            if (response.status === 504) {
+                showToast('Server is busy; retrying...', 'warning');
+                return;
+            }
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (err) {
+                payload = null;
+            }
+            if (!response.ok || !payload || payload.error) {
+                throw new Error(payload && payload.error ? payload.error : 'Failed to fetch refresh status.');
+            }
+            applyRefreshStatus(payload);
+        } catch (error) {
+            if (error instanceof TypeError) {
+                showToast('Server is busy; retrying...', 'warning');
+                return;
+            }
+            console.error('Failed to fetch refresh status', error);
+            showToast(error.message || 'Failed to fetch refresh status.', 'warning');
+            clearRefreshStatusTimer();
+            state.refreshObservedActive = false;
+            state.refreshPhase = 'idle';
+            state.refreshing = false;
+            state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
+            setRefreshButtonLoading(false);
+            setRefreshProgressVisible(false);
+            updateRefreshProgress(0, 0, 'idle');
+        }
+    }
+
+    function applyRefreshStatus(status) {
+        if (!status || typeof status !== 'object') {
+            return;
+        }
+        const phase = typeof status.phase === 'string' ? status.phase : 'idle';
+        const processedNumber = Number(status.processed);
+        const queuedNumber = Number(status.queued);
+        const processed = Number.isFinite(processedNumber) ? Math.max(Math.round(processedNumber), 0) : 0;
+        const queued = Number.isFinite(queuedNumber) ? Math.max(Math.round(queuedNumber), 0) : 0;
+        const waitingForStart = state.waitingForRefreshStart;
+
+        state.refreshPhase = phase;
+        const displayPhase = phase === 'idle' && waitingForStart ? 'pending' : phase;
+        updateRefreshProgress(processed, queued, displayPhase);
+
+        if (phase !== 'idle') {
+            state.refreshObservedActive = true;
+            state.refreshing = true;
+            state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
+            setRefreshButtonLoading(true);
+            setRefreshProgressVisible(true);
+            return;
+        }
+
+        if (state.refreshObservedActive) {
+            state.refreshObservedActive = false;
+            clearRefreshStatusTimer();
+            state.refreshing = false;
+            state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
+            setRefreshButtonLoading(false);
+            setRefreshProgressVisible(false);
+            state.detailCache.clear();
+            loadUpdates();
+            return;
+        }
+
+        if (waitingForStart) {
+            state.refreshPendingPolls += 1;
+            if (state.refreshPendingPolls <= REFRESH_PENDING_MAX_POLLS) {
+                state.refreshing = true;
+                setRefreshButtonLoading(true);
+                setRefreshProgressVisible(true);
+                return;
+            }
+            state.waitingForRefreshStart = false;
+            state.refreshPendingPolls = 0;
+        }
+
+        clearRefreshStatusTimer();
+        state.refreshing = false;
+        state.refreshPendingPolls = 0;
+        state.waitingForRefreshStart = false;
+        setRefreshButtonLoading(false);
+        setRefreshProgressVisible(false);
+        updateRefreshProgress(0, 0, 'idle');
     }
 
     async function fetchJson(url, options = {}) {
@@ -624,35 +746,38 @@
         container.hidden = !visible;
     }
 
-    function updateRefreshProgress(processed, total) {
+    function updateRefreshProgress(processed, queued, phase = state.refreshPhase || 'idle') {
         const countLabel = elements.refreshCount;
         const percentLabel = elements.refreshPercent;
         const bar = elements.refreshBar;
-        const totalNumber = Number(total);
         const processedNumber = Number(processed);
-        const totalValue = Number.isFinite(totalNumber) ? Math.max(Math.round(totalNumber), 0) : 0;
+        const queuedNumber = Number(queued);
         const processedValue = Number.isFinite(processedNumber)
             ? Math.max(Math.round(processedNumber), 0)
             : 0;
-        const boundedProcessed = totalValue > 0
-            ? Math.min(processedValue, totalValue)
+        const queuedValue = Number.isFinite(queuedNumber)
+            ? Math.max(Math.round(queuedNumber), 0)
+            : 0;
+        const boundedProcessed = queuedValue > 0
+            ? Math.min(processedValue, queuedValue)
             : processedValue;
         if (countLabel) {
-            countLabel.textContent = totalValue > 0
-                ? `${boundedProcessed}/${totalValue}`
+            countLabel.textContent = queuedValue > 0
+                ? `${boundedProcessed}/${queuedValue}`
                 : `${boundedProcessed}`;
         }
-        const percentValue = totalValue > 0
-            ? Math.min(100, (boundedProcessed / totalValue) * 100)
-            : 0;
-        const percentText = Number.isFinite(percentValue)
-            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
-            : '0';
+        let percentValue = queuedValue > 0
+            ? Math.floor((boundedProcessed / queuedValue) * 100)
+            : (phase === 'idle' ? 100 : 0);
+        if (!Number.isFinite(percentValue)) {
+            percentValue = 0;
+        }
+        percentValue = Math.max(0, Math.min(100, percentValue));
         if (percentLabel) {
-            percentLabel.textContent = `${percentText}%`;
+            percentLabel.textContent = `${percentValue}%`;
         }
         if (bar) {
-            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
+            bar.style.width = `${percentValue}%`;
         }
     }
 
@@ -718,13 +843,27 @@
             }
             case JOB_TYPES.refresh: {
                 state.refreshing = active;
-                setRefreshButtonLoading(active);
                 if (active) {
+                    const phase = job.data && typeof job.data.phase === 'string' ? job.data.phase : 'running';
+                    state.refreshPhase = phase;
+                    if (phase !== 'idle') {
+                        state.refreshObservedActive = true;
+                    }
+                    state.refreshPendingPolls = 0;
+                    state.waitingForRefreshStart = false;
+                    setRefreshButtonLoading(true);
                     setRefreshProgressVisible(true);
-                    updateRefreshProgress(job.progress_current || 0, job.progress_total || 0);
+                    startRefreshStatusPolling(true);
                 } else {
-                    updateRefreshProgress(0, 0);
-                    setRefreshProgressVisible(false);
+                    if (!state.refreshStatusTimer) {
+                        state.refreshPhase = 'idle';
+                        state.refreshObservedActive = false;
+                        state.refreshPendingPolls = 0;
+                        state.waitingForRefreshStart = false;
+                        setRefreshButtonLoading(false);
+                        setRefreshProgressVisible(false);
+                        updateRefreshProgress(0, 0, 'idle');
+                    }
                 }
                 if (elements.statusLabel && job.message) {
                     elements.statusLabel.textContent = job.message;
@@ -768,8 +907,13 @@
             }
         } else if (type === JOB_TYPES.refresh) {
             state.refreshing = false;
+            state.refreshPhase = 'idle';
+            state.refreshObservedActive = false;
+            state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
+            clearRefreshStatusTimer();
             setRefreshButtonLoading(false);
-            updateRefreshProgress(0, 0);
+            updateRefreshProgress(0, 0, 'idle');
             setRefreshProgressVisible(false);
             if (status === 'success') {
                 state.detailCache.clear();
@@ -833,6 +977,15 @@
             const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
             jobs.forEach((job) => {
                 if (!job || !job.id) {
+                    return;
+                }
+                if (job.job_type === JOB_TYPES.refresh) {
+                    if (isJobActive(job.status)) {
+                        state.completedJobs.delete(job.id);
+                    } else {
+                        state.completedJobs.add(job.id);
+                    }
+                    updateJobUi(job);
                     return;
                 }
                 if (isJobActive(job.status)) {
@@ -1127,21 +1280,46 @@
             return;
         }
         state.refreshing = true;
+        state.refreshPhase = 'pending';
+        state.refreshObservedActive = false;
+        state.refreshPendingPolls = 0;
+        state.waitingForRefreshStart = true;
+        clearRefreshStatusTimer();
         setRefreshProgressVisible(true);
-        updateRefreshProgress(0, 0);
+        updateRefreshProgress(0, 0, 'pending');
         setRefreshButtonLoading(true);
+        const url = `${config.refreshUrl}?offset=0&limit=200`;
         try {
-            const job = await startJob(config.refreshUrl);
-            monitorJob(job);
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    Accept: 'application/json',
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({}),
+            });
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (err) {
+                payload = null;
+            }
+            if (!response.ok || (payload && payload.error)) {
+                const message = payload && payload.error ? payload.error : 'Failed to start refresh.';
+                throw new Error(message);
+            }
+            startRefreshStatusPolling(true);
         } catch (error) {
             console.error(error);
             showToast(error.message, 'warning');
             state.refreshing = false;
+            state.refreshPhase = 'idle';
+            state.refreshObservedActive = false;
+            state.refreshPendingPolls = 0;
+            clearRefreshStatusTimer();
             setRefreshButtonLoading(false);
-            updateRefreshProgress(0, 0);
+            updateRefreshProgress(0, 0, 'idle');
             setRefreshProgressVisible(false);
-        } finally {
-            // Button state resets when job completes.
         }
     }
 
