@@ -2896,6 +2896,7 @@ def _execute_refresh_cache_job(
     *,
     offset: int | None = None,
     limit: int | None = None,
+    process_all: bool = True,
 ) -> dict[str, Any]:
     """Background job helper that refreshes the IGDB cache only."""
 
@@ -3005,6 +3006,9 @@ def _execute_refresh_cache_job(
 
         current_offset = next_offset if next_offset > current_offset else current_offset + batch_count
 
+        if not process_all:
+            break
+
     progress_total = total_value if total_value > 0 else processed_value
     progress_current = (
         min(processed_value, progress_total) if progress_total > 0 else processed_value
@@ -3052,11 +3056,24 @@ def _execute_refresh_cache_job(
     return summary
 
 
-def _execute_refresh_job(update_progress: Callable[..., None]) -> dict[str, Any]:
+def _execute_refresh_job(
+    update_progress: Callable[..., None],
+    *,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
     cache_summary = None
     cache_error: str | None = None
     try:
-        cache_summary = _run_refresh_cache_phase(update_progress)
+        if offset is None and limit is None:
+            cache_summary = _run_refresh_cache_phase(update_progress)
+        else:
+            cache_summary = _execute_refresh_cache_job(
+                update_progress,
+                offset=offset,
+                limit=limit,
+                process_all=False,
+            )
     except RuntimeError as exc:
         cache_error = str(exc)
     else:
