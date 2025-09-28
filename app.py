@@ -975,6 +975,14 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 
             try:
                 conn.execute(
+                    'CREATE INDEX IF NOT EXISTS igdb_updates_refreshed_at_idx '
+                    'ON igdb_updates(refreshed_at)'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
                     f'''
                     CREATE TABLE IF NOT EXISTS {IGDB_CACHE_TABLE} (
                         igdb_id INTEGER PRIMARY KEY,

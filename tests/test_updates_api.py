@@ -168,6 +168,22 @@ def clear_processed_tables(app_module):
                 app_module.db.execute(f'DELETE FROM {table}')
 
 
+class StubJobManager:
+    def __init__(self, active_job=None, history=None):
+        self._active_job = active_job
+        self._history = list(history or [])
+
+    def get_active_job(self, job_type):
+        if job_type != 'refresh_updates':
+            return None
+        return self._active_job
+
+    def list_jobs(self, job_type=None):
+        if job_type and job_type != 'refresh_updates':
+            return []
+        return list(self._history)
+
+
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
@@ -945,3 +961,97 @@ def test_remove_duplicates_handles_all_duplicates(tmp_path):
     assert len(df) == 1
     assert list(df['Source Index']) == ['0']
     assert app_module.catalog_state.total_games == 1
+
+
+def _insert_igdb_update(app_module, processed_id: int, refreshed_at: str) -> None:
+    with app_module.db_lock:
+        with app_module.db:
+            app_module.db.execute(
+                '''INSERT INTO igdb_updates (
+                        processed_game_id, igdb_id, igdb_updated_at,
+                        igdb_payload, diff, local_last_edited_at, refreshed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (
+                    processed_id,
+                    str(100 + processed_id),
+                    '2024-01-01T00:00:00+00:00',
+                    '{}',
+                    '{}',
+                    '2024-01-01T00:00:00+00:00',
+                    refreshed_at,
+                ),
+            )
+
+
+def test_updates_status_idle(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module)
+    refreshed_at = '2024-05-01T12:00:00+00:00'
+    _insert_igdb_update(app_module, 1, refreshed_at)
+    app_module.routes_updates._context['job_manager'] = StubJobManager()
+
+    client = app_module.app.test_client()
+    authenticate(client)
+    response = client.get('/api/updates/status')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['phase'] == 'idle'
+    assert payload['queued'] == 0
+    assert payload['processed'] == 0
+    assert payload['last_refreshed_at'] == refreshed_at
+    assert payload['errors'] == []
+
+
+def test_updates_status_running(tmp_path):
+    app_module = load_app(tmp_path)
+    active_job = {
+        'status': 'running',
+        'progress_current': 5,
+        'progress_total': 20,
+        'data': {'phase': 'diffs'},
+        'result': {},
+    }
+    app_module.routes_updates._context['job_manager'] = StubJobManager(
+        active_job=active_job
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+    response = client.get('/api/updates/status')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['phase'] == 'diffs'
+    assert payload['processed'] == 5
+    assert payload['queued'] == 15
+    assert payload['last_refreshed_at'] is None
+    assert payload['errors'] == []
+
+
+def test_updates_status_after_completion(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module)
+    refreshed_at = '2024-06-15T08:00:00+00:00'
+    _insert_igdb_update(app_module, 1, refreshed_at)
+    history_job = {
+        'status': 'error',
+        'error': 'refresh failed',
+        'result': {'errors': ['timeout']},
+    }
+    app_module.routes_updates._context['job_manager'] = StubJobManager(
+        history=[history_job]
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+    response = client.get('/api/updates/status')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['phase'] == 'error'
+    assert payload['queued'] == 0
+    assert payload['processed'] == 0
+    assert payload['last_refreshed_at'] == refreshed_at
+    assert 'refresh failed' in payload['errors']
+    assert 'timeout' in payload['errors']
