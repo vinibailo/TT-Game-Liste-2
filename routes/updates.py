@@ -141,6 +141,15 @@ def api_updates_status():
     db_lock = _ctx('db_lock')
     get_db = _ctx('get_db')
     coerce_int = _ctx('_coerce_int')
+    timeout_fn = _context.get('get_igdb_timeout_count')
+    timeout_errors: list[str] = []
+    if callable(timeout_fn):
+        try:
+            timeout_count = int(timeout_fn())
+        except Exception:  # pragma: no cover - defensive guard
+            timeout_count = 0
+        if timeout_count > 0:
+            timeout_errors.append(f'IGDB timeouts: {timeout_count}')
 
     with db_lock:
         conn = get_db()
@@ -182,7 +191,7 @@ def api_updates_status():
             phase=str(phase),
             queued=queued,
             processed=processed,
-            errors=_collect_job_errors(active_job),
+            errors=_collect_job_errors(active_job) + timeout_errors,
         )
         return jsonify(payload)
 
@@ -195,6 +204,9 @@ def api_updates_status():
         payload['errors'] = _collect_job_errors(latest_job)
         if latest_job.get('status') == JOB_STATUS_ERROR and payload['phase'] == 'idle':
             payload['phase'] = 'error'
+
+    if timeout_errors:
+        payload['errors'] = list(payload.get('errors', [])) + timeout_errors
 
     return jsonify(payload)
 

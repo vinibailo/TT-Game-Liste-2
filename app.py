@@ -5,6 +5,7 @@ import io
 import sqlite3
 import numbers
 import re
+import time
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
@@ -70,6 +71,7 @@ from igdb.client import (
     coerce_igdb_id,
     cover_url_from_cover,
     extract_igdb_id,
+    get_igdb_timeout_count,
     map_igdb_genres,
     map_igdb_modes,
     resolve_igdb_page_size,
@@ -1870,12 +1872,13 @@ def fetch_igdb_metadata(
     return results
 
 
-def exchange_twitch_credentials() -> tuple[str, str]:
+def exchange_twitch_credentials(*, force_refresh: bool = False) -> tuple[str, str]:
     """Compatibility wrapper that proxies to :mod:`igdb.client`."""
 
     return igdb_api_client.exchange_twitch_credentials(
         request_factory=Request,
         opener=urlopen,
+        force_refresh=force_refresh,
     )
 
 
@@ -2792,6 +2795,10 @@ def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[d
     unchanged_total = 0
 
     while offset < total:
+        try:
+            access_token, client_id = exchange_twitch_credentials()
+        except RuntimeError as exc:
+            raise RuntimeError(str(exc)) from exc
         payloads = download_igdb_games(access_token, client_id, offset, limit)
         batch_count = len(payloads)
         with db_lock:
@@ -2869,45 +2876,68 @@ def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, A
             normalized_id = coerce_igdb_id(igdb_id_value)
             if not normalized_id:
                 continue
-            payload = igdb_payloads.get(normalized_id)
-            if not payload and normalized_id.isdigit():
-                payload = igdb_payloads.get(str(int(normalized_id)))
-            if not payload:
-                try:
-                    missing.append(int(row.get('ID', 0)))
-                except (TypeError, ValueError):
-                    pass
-                continue
-            igdb_updated_at = _normalize_timestamp(payload.get('updated_at'))
-            diff = build_igdb_diff(row, payload)
-            has_diff_value = 1 if diff else 0
-            conn.execute(
-                '''INSERT INTO igdb_updates (
-                        processed_game_id, igdb_id, igdb_updated_at,
-                        igdb_payload, diff, local_last_edited_at,
-                        refreshed_at, has_diff
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(processed_game_id) DO UPDATE SET
-                        igdb_id=excluded.igdb_id,
-                        igdb_updated_at=excluded.igdb_updated_at,
-                        igdb_payload=excluded.igdb_payload,
-                        diff=excluded.diff,
-                        local_last_edited_at=excluded.local_last_edited_at,
-                        refreshed_at=excluded.refreshed_at,
-                        has_diff=excluded.has_diff''',
-                (
-                    int(row['ID']),
-                    str(igdb_id_value),
-                    igdb_updated_at,
-                    json.dumps(payload),
-                    json.dumps(diff),
-                    row.get('last_edited_at') or refreshed_at,
-                    refreshed_at,
-                    has_diff_value,
-                ),
-            )
-            updated_count += 1
-            processed += 1
+            try:
+                processed_game_id = int(row.get('ID'))
+            except (TypeError, ValueError):
+                processed_game_id = None
+            start_time = time.perf_counter()
+            outcome = 'updated'
+            try:
+                payload = igdb_payloads.get(normalized_id)
+                if not payload and normalized_id.isdigit():
+                    payload = igdb_payloads.get(str(int(normalized_id)))
+                if not payload:
+                    outcome = 'missing'
+                    if processed_game_id is not None:
+                        missing.append(processed_game_id)
+                    continue
+                igdb_updated_at = _normalize_timestamp(payload.get('updated_at'))
+                diff = build_igdb_diff(row, payload)
+                has_diff_value = 1 if diff else 0
+                conn.execute(
+                    '''INSERT INTO igdb_updates (
+                            processed_game_id, igdb_id, igdb_updated_at,
+                            igdb_payload, diff, local_last_edited_at,
+                            refreshed_at, has_diff
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(processed_game_id) DO UPDATE SET
+                            igdb_id=excluded.igdb_id,
+                            igdb_updated_at=excluded.igdb_updated_at,
+                            igdb_payload=excluded.igdb_payload,
+                            diff=excluded.diff,
+                            local_last_edited_at=excluded.local_last_edited_at,
+                            refreshed_at=excluded.refreshed_at,
+                            has_diff=excluded.has_diff''',
+                    (
+                        int(row['ID']),
+                        str(igdb_id_value),
+                        igdb_updated_at,
+                        json.dumps(payload),
+                        json.dumps(diff),
+                        row.get('last_edited_at') or refreshed_at,
+                        refreshed_at,
+                        has_diff_value,
+                    ),
+                )
+                updated_count += 1
+                processed += 1
+                if not diff:
+                    outcome = 'unchanged'
+            except Exception:
+                outcome = 'error'
+                raise
+            finally:
+                elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+                logger.info(
+                    'updates.diff',
+                    extra={
+                        'event': 'updates.diff',
+                        'igdb_id': normalized_id,
+                        'processed_game_id': processed_game_id,
+                        'ms': elapsed_ms,
+                        'outcome': outcome,
+                    },
+                )
             if processed % 25 == 0 or processed == total:
                 update_progress(
                     current=processed,
@@ -3012,6 +3042,7 @@ def _execute_refresh_cache_job(
             download_total=download_igdb_game_count,
             download_games=download_igdb_games,
             upsert_games=_upsert_igdb_cache_entries,
+            exchange_credentials=exchange_twitch_credentials,
             igdb_prefill_cache=_igdb_prefill_cache,
             igdb_prefill_lock=_igdb_prefill_lock,
         )
@@ -3061,6 +3092,11 @@ def _execute_refresh_cache_job(
 
         if not process_all:
             break
+
+        try:
+            access_token, client_id = exchange_twitch_credentials()
+        except RuntimeError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     progress_total = total_value if total_value > 0 else processed_value
     progress_current = (
@@ -3297,6 +3333,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         'fetch_cached_updates': fetch_cached_updates,
         'get_processed_games_columns': get_processed_games_columns,
         'load_cover_data': load_cover_data,
+        'get_igdb_timeout_count': get_igdb_timeout_count,
         'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
         '_scan_duplicate_candidates': _scan_duplicate_candidates,
         '_coerce_int': _coerce_int,

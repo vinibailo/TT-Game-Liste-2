@@ -19,6 +19,15 @@ from igdb.client import (
 
 ProgressCallback = Callable[..., None]
 
+def _looks_like_auth_error(error: BaseException) -> bool:
+    message = str(error).strip().casefold()
+    if not message:
+        return False
+    for token in ("401", "403", "unauthorized", "invalid", "forbidden"):
+        if token in message:
+            return True
+    return False
+
 
 def refresh_igdb_cache(
     access_token: str,
@@ -33,6 +42,7 @@ def refresh_igdb_cache(
     download_total: Callable[[str, str], int] | None = None,
     download_games: Callable[[str, str, int, int], Sequence[Mapping[str, Any]]] | None = None,
     upsert_games: Callable[[Any, Iterable[Mapping[str, Any]]], tuple[int, int, int]] = upsert_igdb_games,
+    exchange_credentials: Callable[[], tuple[str, str]] | None = None,
     igdb_prefill_cache: MutableMapping[str, Any] | None = None,
     igdb_prefill_lock: Any | None = None,
 ) -> dict[str, Any]:
@@ -60,6 +70,50 @@ def refresh_igdb_cache(
         client_download_igdb_games, user_agent=IGDB_USER_AGENT
     )
 
+    token_value = (access_token or "").strip()
+    client_value = (client_id or "").strip()
+
+    def _ensure_credentials(force_refresh: bool = False) -> tuple[str, str]:
+        nonlocal token_value, client_value
+        if force_refresh or not token_value or not client_value:
+            if exchange_credentials is None:
+                raise RuntimeError("Invalid IGDB credentials")
+            try:
+                new_token, new_client = exchange_credentials(force_refresh=force_refresh)
+            except TypeError:
+                new_token, new_client = exchange_credentials()
+            token_value = (new_token or "").strip()
+            client_value = (new_client or "").strip()
+        if not token_value:
+            raise RuntimeError(
+                "Missing IGDB access token; call exchange_twitch_credentials first"
+            )
+        if not client_value:
+            raise RuntimeError("Missing IGDB client identifier; set IGDB_CLIENT_ID")
+        return token_value, client_value
+
+    def _download_total_with_retry() -> int:
+        nonlocal token_value, client_value
+        token_value, client_value = _ensure_credentials()
+        try:
+            return download_total_fn(token_value, client_value)
+        except RuntimeError as exc:
+            if exchange_credentials and _looks_like_auth_error(exc):
+                token_value, client_value = _ensure_credentials(force_refresh=True)
+                return download_total_fn(token_value, client_value)
+            raise
+
+    def _download_games_with_retry(offset_param: int, limit_param: int):
+        nonlocal token_value, client_value
+        token_value, client_value = _ensure_credentials()
+        try:
+            return download_games_fn(token_value, client_value, offset_param, limit_param)
+        except RuntimeError as exc:
+            if exchange_credentials and _looks_like_auth_error(exc):
+                token_value, client_value = _ensure_credentials(force_refresh=True)
+                return download_games_fn(token_value, client_value, offset_param, limit_param)
+            raise
+
     with db_lock:
         conn = get_db()
         cached_total = get_cached_total(conn) if get_cached_total else None
@@ -68,7 +122,7 @@ def refresh_igdb_cache(
     total = cached_total
     if should_refresh_total:
         try:
-            total = download_total_fn(access_token, client_id)
+            total = _download_total_with_retry()
         except RuntimeError as exc:
             return {
                 'status': 'error',
@@ -120,7 +174,7 @@ def refresh_igdb_cache(
         }
 
     try:
-        payloads = download_games_fn(access_token, client_id, offset_value, limit_value)
+        payloads = _download_games_with_retry(offset_value, limit_value)
     except RuntimeError as exc:
         return {
             'status': 'error',
