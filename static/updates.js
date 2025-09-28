@@ -50,7 +50,8 @@
     };
 
     const DEFAULT_OFFSET = 0;
-    const DEFAULT_LIMIT = 200;
+    const DEFAULT_REFRESH_LIMIT = 200;
+    const DEFAULT_UPDATES_LIMIT = 100;
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -141,11 +142,11 @@
         return toNonNegativeInt(value, DEFAULT_OFFSET);
     }
 
-    function resolveLimit(value) {
+    function resolveLimit(value, fallback = DEFAULT_REFRESH_LIMIT) {
         if (value === undefined || value === null || value === '') {
-            return DEFAULT_LIMIT;
+            return fallback;
         }
-        return toPositiveInt(value, DEFAULT_LIMIT, { max: 500 });
+        return toPositiveInt(value, fallback, { max: 500 });
     }
 
     function logFetch(url) {
@@ -293,26 +294,53 @@
     }
 
     async function fetchJson(url, options = {}) {
-        const requestOptions = { ...options };
-        requestOptions.headers = {
-            Accept: 'application/json',
-            ...(options.headers || {}),
+        const { logRequest = true, headers: providedHeaders, ...rest } = options || {};
+        if (logRequest) {
+            logFetch(url);
+        }
+        const headers = new Headers(providedHeaders || {});
+        headers.set('Accept', 'application/json');
+        const requestOptions = {
+            credentials: 'same-origin',
+            ...rest,
+            headers,
         };
-        logFetch(url);
         const response = await fetch(url, requestOptions);
-        let payload = null;
+        if (response.status === 504) {
+            throw new Error('Server timed out (504). Please try again later.');
+        }
+        const contentType = (response.headers && response.headers.get('content-type')) || '';
+        const isJson = contentType.toLowerCase().includes('application/json');
+        if (response.ok && !isJson && (response.status === 204 || response.status === 205 || response.status === 304)) {
+            return null;
+        }
+        if (!isJson) {
+            let preview = '';
+            try {
+                const text = await response.text();
+                preview = text.slice(0, 160);
+            } catch (err) {
+                preview = '';
+            }
+            const message = preview ? `Non-JSON response: ${preview}` : 'Non-JSON response: (empty)';
+            throw new Error(message);
+        }
+        let payload;
         try {
             payload = await response.json();
         } catch (err) {
-            payload = null;
+            throw new Error('Invalid JSON response.');
         }
-        if (!response.ok || !payload || payload.error) {
-            const errorMessage = payload && payload.error
-                ? payload.error
-                : 'Request failed.';
-            throw new Error(errorMessage);
+        if (response.ok) {
+            return payload;
         }
-        return payload;
+        if (payload && typeof payload === 'object' && payload.error) {
+            throw new Error(String(payload.error));
+        }
+        if (payload && typeof payload === 'object' && typeof payload.message === 'string') {
+            throw new Error(payload.message);
+        }
+        throw new Error(`Request failed with status ${response.status}`);
     }
 
     function getJobDetailUrl(jobId) {
@@ -923,6 +951,16 @@
         if (bar) {
             bar.style.width = `${percentValue}%`;
         }
+    }
+
+    function updateProgressBar(processed, total) {
+        const processedValue = toNonNegativeInt(processed, 0);
+        const totalValueRaw = toNonNegativeInt(total, processedValue);
+        const normalizedTotal = Math.max(totalValueRaw, processedValue);
+        const hasTotal = normalizedTotal > 0;
+        const queuedValue = hasTotal ? normalizedTotal : processedValue;
+        const phase = hasTotal && processedValue >= normalizedTotal ? 'idle' : 'running';
+        updateRefreshProgress(processedValue, queuedValue, phase);
     }
 
     function clearJobPoller(jobId) {
@@ -1617,20 +1655,6 @@
         }
     }
 
-    function buildRefreshUrl(offset, limit) {
-        const resolvedOffset = resolveOffset(offset);
-        const resolvedLimit = resolveLimit(limit);
-        const base = '/api/updates/refresh';
-        try {
-            const url = new URL(base, window.location.origin);
-            url.searchParams.set('offset', String(resolvedOffset));
-            url.searchParams.set('limit', String(resolvedLimit));
-            return url.pathname + url.search + url.hash;
-        } catch (err) {
-            return `${base}?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
-        }
-    }
-
     async function handleRefresh() {
         if (state.refreshing) {
             return;
@@ -1639,76 +1663,98 @@
         state.refreshPhase = 'pending';
         state.refreshObservedActive = false;
         state.refreshPendingPolls = 0;
-        state.waitingForRefreshStart = true;
+        state.waitingForRefreshStart = false;
         clearRefreshStatusTimer();
         setRefreshProgressVisible(true);
         updateRefreshProgress(0, 0, 'pending');
         setRefreshButtonLoading(true);
-        const url = buildRefreshUrl(DEFAULT_OFFSET, DEFAULT_LIMIT);
+        const limit = DEFAULT_REFRESH_LIMIT;
+        const visitedOffsets = new Set();
+        let offset = DEFAULT_OFFSET;
         try {
-            logFetch(url);
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    Accept: 'application/json',
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({}),
-            });
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (err) {
-                payload = null;
+            let done = false;
+            while (!done) {
+                const resolvedOffset = resolveOffset(offset);
+                if (visitedOffsets.has(resolvedOffset)) {
+                    throw new Error('Refresh appears to be stuck.');
+                }
+                visitedOffsets.add(resolvedOffset);
+                const url = `/api/updates/refresh?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(limit)}`;
+                const payload = await fetchJson(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                if (!payload || typeof payload !== 'object') {
+                    throw new Error('Invalid refresh response.');
+                }
+                const processed = toNonNegativeInt(
+                    payload.processed ?? payload.progress_current ?? payload.current ?? payload.completed,
+                    0,
+                );
+                const total = toNonNegativeInt(
+                    payload.total ?? payload.progress_total ?? payload.queued ?? payload.total_items ?? payload.count,
+                    processed,
+                );
+                state.refreshPhase = typeof payload.phase === 'string' ? payload.phase : 'running';
+                updateProgressBar(processed, total);
+                done = Boolean(payload.done);
+                const nextOffsetRaw = payload.next_offset ?? (resolvedOffset + limit);
+                const nextOffset = resolveOffset(nextOffsetRaw);
+                if (done) {
+                    break;
+                }
+                offset = nextOffset > resolvedOffset ? nextOffset : resolvedOffset + limit;
+                await new Promise((resolve) => {
+                    window.setTimeout(resolve, 300);
+                });
             }
-            if (!response.ok || (payload && payload.error)) {
-                const message = payload && payload.error ? payload.error : 'Failed to start refresh.';
-                throw new Error(message);
-            }
-            startRefreshStatusPolling(true);
+            state.refreshPhase = 'idle';
+            state.detailCache.clear();
+            await loadUpdates();
+            showToast('IGDB refresh completed', 'success');
         } catch (error) {
             console.error(error);
-            showToast(error.message, 'warning');
+            showToast(error.message, 'error');
+        } finally {
             state.refreshing = false;
             state.refreshPhase = 'idle';
             state.refreshObservedActive = false;
             state.refreshPendingPolls = 0;
+            state.waitingForRefreshStart = false;
             clearRefreshStatusTimer();
             setRefreshButtonLoading(false);
-            updateRefreshProgress(0, 0, 'idle');
             setRefreshProgressVisible(false);
+            updateRefreshProgress(0, 0, 'idle');
         }
     }
 
-    function buildUpdatesUrl(offset, limit) {
-        const base = config.updatesUrl || '/api/updates';
+    async function fetchUpdatesBatch(offset = DEFAULT_OFFSET, limit = DEFAULT_UPDATES_LIMIT) {
         const resolvedOffset = resolveOffset(offset);
-        const resolvedLimit = resolveLimit(limit);
-        try {
-            const url = new URL(base, window.location.origin);
-            url.searchParams.set('offset', String(resolvedOffset));
-            url.searchParams.set('limit', String(resolvedLimit));
-            return url.pathname + url.search + url.hash;
-        } catch (err) {
-            const separator = base.includes('?') ? '&' : '?';
-            return `${base}${separator}offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
-        }
-    }
-
-    async function fetchUpdatesBatch(offset = DEFAULT_OFFSET, limit = DEFAULT_LIMIT) {
-        const url = buildUpdatesUrl(offset, limit);
+        const resolvedLimit = resolveLimit(limit, DEFAULT_UPDATES_LIMIT);
+        const url = `/api/updates?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
         logFetch(url);
-        const response = await fetch(url, { headers: { Accept: 'application/json' } });
-        let payload = null;
-        try {
-            payload = await response.json();
-        } catch (err) {
-            payload = null;
+        const payload = await fetchJson(url, { logRequest: false });
+        if (Array.isArray(payload)) {
+            return {
+                items: payload,
+                total: payload.length,
+                nextOffset: resolvedOffset + payload.length,
+            };
         }
-        if (!response.ok || !payload || !Array.isArray(payload.items)) {
-            throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
+        if (payload && typeof payload === 'object' && Array.isArray(payload.items)) {
+            const total = toNonNegativeInt(
+                payload.total ?? payload.total_available ?? payload.count ?? payload.total_items,
+                payload.items.length,
+            );
+            const nextOffset = resolveOffset(payload.next_offset ?? (resolvedOffset + payload.items.length));
+            return {
+                items: payload.items,
+                total,
+                nextOffset,
+            };
         }
-        return payload;
+        throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
     }
 
     async function loadUpdates() {
@@ -1717,19 +1763,19 @@
             const aggregated = [];
             const seenIds = new Set();
             let total = 0;
-            let offset = 0;
-            let pageLimit = state.pageSize;
+            let offset = DEFAULT_OFFSET;
+            let batchLimit = state.pageSize || DEFAULT_UPDATES_LIMIT;
             const visitedOffsets = new Set();
 
             while (true) {
-                if (visitedOffsets.has(offset)) {
+                const resolvedOffset = resolveOffset(offset);
+                if (visitedOffsets.has(resolvedOffset)) {
                     break;
                 }
-                visitedOffsets.add(offset);
-                const payload = await fetchUpdatesBatch(offset, pageLimit);
+                visitedOffsets.add(resolvedOffset);
+                const normalizedLimit = resolveLimit(batchLimit, DEFAULT_UPDATES_LIMIT);
+                const payload = await fetchUpdatesBatch(resolvedOffset, normalizedLimit);
                 const items = Array.isArray(payload.items) ? payload.items : [];
-                const normalizedOffset = toNonNegativeInt(payload.offset, offset);
-                const normalizedLimit = toPositiveInt(payload.limit, pageLimit, { max: 500 });
                 const normalizedTotal = toNonNegativeInt(payload.total, items.length);
                 if (normalizedTotal > total) {
                     total = normalizedTotal;
@@ -1752,18 +1798,20 @@
 
                 const received = items.length;
                 if (received === 0) {
-                    offset = normalizedOffset;
                     break;
                 }
                 if (total > 0 && aggregated.length >= total) {
                     break;
                 }
-                const nextOffset = normalizedOffset + received;
-                if (nextOffset <= normalizedOffset) {
+                const nextOffset = payload.nextOffset !== undefined
+                    ? resolveOffset(payload.nextOffset)
+                    : resolvedOffset + received;
+                if (nextOffset <= resolvedOffset) {
+                    offset = resolvedOffset + normalizedLimit;
                     break;
                 }
                 offset = nextOffset;
-                pageLimit = normalizedLimit;
+                batchLimit = normalizedLimit;
             }
 
             state.updates = aggregated;
@@ -1801,6 +1849,7 @@
             updateSortIndicators();
         } catch (error) {
             console.error(error);
+            setLoading(false);
             showToast(error.message, 'warning');
             state.updates = [];
             state.filtered = [];
@@ -1819,9 +1868,9 @@
             updateCount();
             renderPagination();
             updateStatusMessage();
-        } finally {
-            setLoading(false);
+            return;
         }
+        setLoading(false);
     }
 
     function bindEvents() {
