@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any, Mapping
 
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
+from jobs.manager import JOB_STATUS_ERROR, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 from routes.api_utils import (
     NotFoundError,
     UpstreamServiceError,
@@ -26,6 +28,40 @@ def _ctx(key: str) -> Any:
     if key not in _context:
         raise RuntimeError(f"update routes missing context value: {key}")
     return _context[key]
+
+
+def _iter_error_strings(value: Any) -> Iterable[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [f"{k}: {v}" if v else str(k) for k, v in value.items() if v or k]
+    if isinstance(value, Iterable):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
+def _collect_job_errors(job: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+
+    for candidate in (
+        job.get('error'),
+        job.get('result', {}).get('errors')
+        if isinstance(job.get('result'), Mapping)
+        else None,
+        job.get('data', {}).get('errors')
+        if isinstance(job.get('data'), Mapping)
+        else None,
+    ):
+        for entry in _iter_error_strings(candidate):
+            text = str(entry).strip()
+            if not text:
+                continue
+            if text not in errors:
+                errors.append(text)
+
+    return errors
 
 
 @updates_blueprint.route('/updates')
@@ -96,6 +132,71 @@ def api_igdb_cache_refresh():
         )
     status_code = 202 if created else 200
     return response, status_code
+
+
+@updates_blueprint.route('/api/updates/status', methods=['GET'])
+@handle_api_errors
+def api_updates_status():
+    job_manager = _ctx('job_manager')
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+    coerce_int = _ctx('_coerce_int')
+
+    with db_lock:
+        conn = get_db()
+        cur = conn.execute(
+            'SELECT MAX(refreshed_at) AS last_refreshed_at FROM igdb_updates'
+        )
+        row = cur.fetchone()
+
+    last_refreshed_at = row['last_refreshed_at'] if row else None
+
+    payload = {
+        'phase': 'idle',
+        'queued': 0,
+        'processed': 0,
+        'last_refreshed_at': last_refreshed_at,
+        'errors': [],
+    }
+
+    active_job = job_manager.get_active_job('refresh_updates')
+    if isinstance(active_job, Mapping):
+        data = active_job.get('data') if isinstance(active_job.get('data'), Mapping) else {}
+        phase = data.get('phase') if isinstance(data, Mapping) else None
+        if not phase:
+            status = active_job.get('status')
+            if status == JOB_STATUS_RUNNING:
+                phase = 'running'
+            elif status == JOB_STATUS_PENDING:
+                phase = 'pending'
+            else:
+                phase = 'running'
+
+        processed = coerce_int(active_job.get('progress_current')) or 0
+        total = coerce_int(active_job.get('progress_total')) or 0
+        if total and processed > total:
+            processed = total
+        queued = max(total - processed, 0) if total else 0
+
+        payload.update(
+            phase=str(phase),
+            queued=queued,
+            processed=processed,
+            errors=_collect_job_errors(active_job),
+        )
+        return jsonify(payload)
+
+    latest_job: Mapping[str, Any] | None = None
+    job_history = job_manager.list_jobs('refresh_updates')
+    if job_history:
+        latest_job = job_history[-1]
+
+    if isinstance(latest_job, Mapping):
+        payload['errors'] = _collect_job_errors(latest_job)
+        if latest_job.get('status') == JOB_STATUS_ERROR and payload['phase'] == 'idle':
+            payload['phase'] = 'error'
+
+    return jsonify(payload)
 
 
 @updates_blueprint.route('/api/updates/refresh', methods=['POST'])
