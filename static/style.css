@@ -826,6 +826,59 @@ textarea {
   overflow-x: auto;
 }
 
+.table-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-top: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(15, 23, 42, 0.25);
+  flex-wrap: wrap;
+}
+
+.pagination-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.4);
+  background: rgba(37, 99, 235, 0.15);
+  color: var(--color-text);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.pagination-button .material-symbols-rounded {
+  font-size: 1.1rem;
+}
+
+.pagination-button[disabled],
+.pagination-button[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.5;
+  background: rgba(148, 163, 184, 0.2);
+  border-color: rgba(148, 163, 184, 0.25);
+}
+
+.pagination-button:hover:not([disabled]):not([aria-disabled='true']) {
+  background: rgba(37, 99, 235, 0.3);
+  border-color: rgba(37, 99, 235, 0.6);
+}
+
+.pagination-info {
+  color: var(--color-muted);
+  font-size: 0.95rem;
+  min-width: 120px;
+  text-align: center;
+}
+
+.pagination-label {
+  font-size: 0.9rem;
+}
+
 .updates-table {
   width: 100%;
   border-collapse: collapse;

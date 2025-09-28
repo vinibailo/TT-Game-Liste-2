@@ -417,7 +417,32 @@ def api_updates_job_detail(job_id: str):
 @handle_api_errors
 def api_updates_list():
     fetch_cached_updates = _ctx('fetch_cached_updates')
-    return jsonify({'updates': fetch_cached_updates()})
+    try:
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0:
+        offset = 0
+
+    try:
+        limit = int(request.args.get('limit', 100))
+    except (TypeError, ValueError):
+        limit = 100
+    if limit <= 0:
+        limit = 100
+    limit = min(limit, 500)
+
+    items, total, normalized_offset = fetch_cached_updates(
+        offset=offset, limit=limit
+    )
+    return jsonify(
+        {
+            'items': items,
+            'total': total,
+            'offset': normalized_offset,
+            'limit': limit,
+        }
+    )
 
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])

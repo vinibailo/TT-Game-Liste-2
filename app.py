@@ -967,6 +967,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                         diff TEXT,
                         local_last_edited_at TEXT,
                         refreshed_at TEXT,
+                        has_diff INTEGER NOT NULL DEFAULT 0,
                         FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
                     )'''
                 )
@@ -975,8 +976,35 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 
             try:
                 conn.execute(
+                    'ALTER TABLE igdb_updates ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
                     'CREATE INDEX IF NOT EXISTS igdb_updates_refreshed_at_idx '
                     'ON igdb_updates(refreshed_at)'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS igdb_updates_has_diff_updated_idx '
+                    'ON igdb_updates(has_diff, igdb_updated_at)'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    '''UPDATE igdb_updates
+                       SET has_diff = CASE
+                           WHEN diff IS NULL OR diff = '' OR diff = '{}' THEN 0
+                           ELSE 1
+                       END
+                       WHERE has_diff NOT IN (0, 1) OR has_diff IS NULL'''
                 )
             except sqlite3.OperationalError:
                 pass
@@ -2588,7 +2616,9 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
     )
 
 
-def fetch_cached_updates() -> list[dict[str, Any]]:
+def fetch_cached_updates(
+    *, offset: int = 0, limit: int = 100
+) -> tuple[list[dict[str, Any]], int, int]:
     with db_lock:
         conn = get_db()
         processed_columns = get_processed_games_columns(conn)
@@ -2605,6 +2635,7 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
                    u.local_last_edited_at,
                    u.refreshed_at,
                    u.diff,
+                   u.has_diff,
                    p."Name" AS game_name,
                    p."Cover Path" AS cover_path,
                    {cover_url_select}
@@ -2644,7 +2675,10 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
     existing_ids: set[int] = set()
     for row in update_rows:
-        has_diff = bool(row['diff'])
+        try:
+            has_diff = bool(row['has_diff'])
+        except (KeyError, TypeError):
+            has_diff = bool(row['diff'])
         try:
             processed_id = int(row['processed_game_id'])
         except (TypeError, ValueError):
@@ -2692,7 +2726,18 @@ def fetch_cached_updates() -> list[dict[str, Any]]:
                 }
             )
 
-    return updates
+    total = len(updates)
+    normalized_offset = max(min(offset, total), 0)
+    effective_limit = limit if isinstance(limit, int) and limit is not None else total
+    if effective_limit is None or effective_limit <= 0:
+        effective_limit = total - normalized_offset
+    end = normalized_offset + max(effective_limit, 0)
+    if end < normalized_offset:
+        end = normalized_offset
+    if end > total:
+        end = total
+    paged = updates[normalized_offset:end]
+    return paged, total, normalized_offset
 
 
 def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
@@ -2831,18 +2876,21 @@ def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, A
                 continue
             igdb_updated_at = _normalize_timestamp(payload.get('updated_at'))
             diff = build_igdb_diff(row, payload)
+            has_diff_value = 1 if diff else 0
             conn.execute(
                 '''INSERT INTO igdb_updates (
                         processed_game_id, igdb_id, igdb_updated_at,
-                        igdb_payload, diff, local_last_edited_at, refreshed_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        igdb_payload, diff, local_last_edited_at,
+                        refreshed_at, has_diff
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(processed_game_id) DO UPDATE SET
                         igdb_id=excluded.igdb_id,
                         igdb_updated_at=excluded.igdb_updated_at,
                         igdb_payload=excluded.igdb_payload,
                         diff=excluded.diff,
                         local_last_edited_at=excluded.local_last_edited_at,
-                        refreshed_at=excluded.refreshed_at''',
+                        refreshed_at=excluded.refreshed_at,
+                        has_diff=excluded.has_diff''',
                 (
                     int(row['ID']),
                     str(igdb_id_value),
@@ -2851,6 +2899,7 @@ def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, A
                     json.dumps(diff),
                     row.get('last_edited_at') or refreshed_at,
                     refreshed_at,
+                    has_diff_value,
                 ),
             )
             updated_count += 1
