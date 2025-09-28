@@ -184,6 +184,76 @@ class StubJobManager:
         return list(self._history)
 
 
+def test_updates_refresh_enqueues_batch(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    recorded: dict[str, Any] = {}
+
+    class RecordingJobManager:
+        def enqueue_job(self, job_type, runner_path, *, description=None, kwargs=None):
+            recorded['job_type'] = job_type
+            recorded['runner_path'] = runner_path
+            recorded['description'] = description
+            recorded['kwargs'] = dict(kwargs or {})
+            return {'id': 'job123'}, True
+
+    app_module.routes_updates._context['job_manager'] = RecordingJobManager()
+
+    logger = app_module.app.logger
+    with patch.object(logger, 'info') as mock_info:
+        response = client.post('/api/updates/refresh', json={'offset': 100, 'limit': 75})
+
+    assert response.status_code == 202
+    assert response.get_json() == {'accepted': 75, 'next_offset': 175}
+    assert recorded == {
+        'job_type': 'refresh_updates',
+        'runner_path': 'app._execute_refresh_job',
+        'description': 'Refreshing IGDB updates…',
+        'kwargs': {'offset': 100, 'limit': 75},
+    }
+    mock_info.assert_any_call('updates.refresh accepted=%s offset=%s', 75, 100)
+    assert response.headers['Location'].endswith('/api/updates/jobs/job123')
+
+
+def test_updates_refresh_validates_limit_range(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    captured_limits: list[int] = []
+
+    class LimitRecordingJobManager:
+        def enqueue_job(self, job_type, runner_path, *, description=None, kwargs=None):
+            captured_limits.append(kwargs.get('limit'))
+            return {'id': 'job456'}, True
+
+    app_module.routes_updates._context['job_manager'] = LimitRecordingJobManager()
+
+    response = client.post('/api/updates/refresh', json={'offset': 10, 'limit': 5})
+
+    assert response.status_code == 202
+    assert response.get_json() == {'accepted': 50, 'next_offset': 60}
+    assert captured_limits == [50]
+
+
+def test_updates_refresh_handles_existing_job(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    class ExistingJobManager:
+        def enqueue_job(self, *_args, **_kwargs):
+            return {'id': 'job789'}, False
+
+    app_module.routes_updates._context['job_manager'] = ExistingJobManager()
+
+    response = client.post('/api/updates/refresh', json={'offset': 20, 'limit': 400})
+
+    assert response.status_code == 200
+    assert response.get_json() == {'accepted': 0, 'next_offset': 20}
+
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
@@ -197,12 +267,10 @@ def test_refresh_creates_update_records(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    refresh = client.post('/api/updates/refresh')
-    assert refresh.status_code == 200
-    data = refresh.get_json()
-    assert data['status'] == 'ok'
-    assert data['updated'] == 1
-    assert data['missing'] == []
+    result = app_module._execute_refresh_job(lambda **_kwargs: None)
+    assert result['status'] == 'ok'
+    assert result['updated'] == 1
+    assert result['missing'] == []
 
     listing = client.get('/api/updates')
     assert listing.status_code == 200
@@ -321,9 +389,10 @@ def test_cache_refresh_creates_entries(tmp_path):
         'unchanged': 0,
         'done': True,
         'next_offset': 2,
-        'batch_count': 0,
-        'message': 'IGDB cache refresh complete.',
+        'message': 'Cached 2 IGDB records.',
         'toast_type': 'success',
+        'offset': 0,
+        'limit': 5,
     }
 
     with app_module.db_lock:
@@ -365,11 +434,9 @@ def test_refresh_parses_involved_companies(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    refresh = client.post('/api/updates/refresh')
-    assert refresh.status_code == 200
-    payload = refresh.get_json()
-    assert payload['status'] == 'ok'
-    assert payload['updated'] == 1
+    result = app_module._execute_refresh_job(lambda **_kwargs: None)
+    assert result['status'] == 'ok'
+    assert result['updated'] == 1
 
     detail = client.get('/api/updates/1')
     assert detail.status_code == 200
@@ -435,12 +502,10 @@ def test_refresh_surfaces_igdb_failure(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    response = client.post('/api/updates/refresh')
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload['status'] == 'ok'
-    assert payload['updated'] == 0
-    assert payload['missing'] == [1]
+    result = app_module._execute_refresh_job(lambda **_kwargs: None)
+    assert result['status'] == 'ok'
+    assert result['updated'] == 0
+    assert result['missing'] == [1]
 
 
 def test_download_igdb_metadata_sets_user_agent(tmp_path):
@@ -563,8 +628,8 @@ def test_updates_detail_returns_diff(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    refresh = client.post('/api/updates/refresh')
-    assert refresh.status_code == 200
+    result = app_module._execute_refresh_job(lambda **_kwargs: None)
+    assert result['status'] == 'ok'
 
     detail = client.get('/api/updates/1')
     assert detail.status_code == 200

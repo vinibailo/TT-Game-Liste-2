@@ -205,24 +205,40 @@ def api_updates_refresh():
     if not _ctx('validate_igdb_credentials')():
         return jsonify({'error': 'IGDB credentials missing'}), 503
 
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
-    execute_refresh_job = _ctx('_execute_refresh_job')
-    job_manager = _ctx('job_manager')
+    payload = request.get_json(silent=True) or {}
+    try:
+        offset = int(payload.get('offset', 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if offset < 0:
+        offset = 0
 
-    if run_sync:
-        try:
-            result = execute_refresh_job(lambda **_kwargs: None)
-        except RuntimeError as exc:
-            raise UpstreamServiceError(str(exc)) from exc
-        return jsonify(result)
+    try:
+        limit_value = int(payload.get('limit', 200))
+    except (TypeError, ValueError):
+        limit_value = 200
+    if limit_value <= 0:
+        limit_value = 200
+    if limit_value < 50:
+        limit_value = 50
+    if limit_value > 500:
+        limit_value = 500
+
+    job_manager = _ctx('job_manager')
 
     job, created = job_manager.enqueue_job(
         'refresh_updates',
         'app._execute_refresh_job',
         description='Refreshing IGDB updates…',
+        kwargs={'offset': offset, 'limit': limit_value},
     )
+
+    accepted = limit_value if created else 0
+    next_offset = offset + accepted
+    current_app.logger.info('updates.refresh accepted=%s offset=%s', accepted, offset)
+
+    response = jsonify({'accepted': accepted, 'next_offset': next_offset})
     status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
     if job:
         response.headers['Location'] = url_for(
             'updates.api_updates_job_detail', job_id=job['id']
