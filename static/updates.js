@@ -1,6 +1,6 @@
 (function () {
     const config = window.updatesConfig || {};
-    const resolvedPageSize = toPositiveInt(config.pageSize, 100, { max: 500 });
+    const resolvedPageSize = toPositiveInt(config.pageSize, 200, { max: 500 });
     const state = {
         updates: [],
         filtered: [],
@@ -48,6 +48,9 @@
         enqueued: new Set(),
         targets: new Map(),
     };
+
+    const DEFAULT_OFFSET = 0;
+    const DEFAULT_LIMIT = 200;
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -131,6 +134,29 @@
         return truncated;
     }
 
+    function resolveOffset(value) {
+        if (value === undefined || value === null || value === '') {
+            return DEFAULT_OFFSET;
+        }
+        return toNonNegativeInt(value, DEFAULT_OFFSET);
+    }
+
+    function resolveLimit(value) {
+        if (value === undefined || value === null || value === '') {
+            return DEFAULT_LIMIT;
+        }
+        return toPositiveInt(value, DEFAULT_LIMIT, { max: 500 });
+    }
+
+    function logFetch(url) {
+        try {
+            const resolved = url instanceof URL ? url.toString() : String(url);
+            console.log('[updates] Fetching URL:', resolved);
+        } catch (err) {
+            console.log('[updates] Fetching URL:', url);
+        }
+    }
+
     function normalizeId(value) {
         const parsed = Number.parseInt(value, 10);
         if (Number.isNaN(parsed)) {
@@ -172,6 +198,7 @@
     async function pollRefreshStatus() {
         const url = config.refreshStatusUrl || '/api/updates/status';
         try {
+            logFetch(url);
             const response = await fetch(url, { headers: { Accept: 'application/json' } });
             if (response.status === 504) {
                 showToast('Server is busy; retrying...', 'warning');
@@ -271,6 +298,7 @@
             Accept: 'application/json',
             ...(options.headers || {}),
         };
+        logFetch(url);
         const response = await fetch(url, requestOptions);
         let payload = null;
         try {
@@ -1132,7 +1160,9 @@
     }
 
     async function fetchCoverData(id) {
-        const response = await fetch(buildCoverUrl(id), {
+        const url = buildCoverUrl(id);
+        logFetch(url);
+        const response = await fetch(url, {
             headers: { Accept: 'application/json' },
         });
         if (response.status === 404) {
@@ -1304,7 +1334,9 @@
         if (state.detailCache.has(id)) {
             return state.detailCache.get(id);
         }
-        const response = await fetch(buildDetailUrl(id));
+        const url = buildDetailUrl(id);
+        logFetch(url);
+        const response = await fetch(url);
         let payload = null;
         try {
             payload = await response.json();
@@ -1385,7 +1417,9 @@
             button.setAttribute('aria-busy', 'true');
         }
         try {
-            const response = await fetch(buildDeleteDuplicateUrl(id), { method: 'POST' });
+            const url = buildDeleteDuplicateUrl(id);
+            logFetch(url);
+            const response = await fetch(url, { method: 'POST' });
             let payload = null;
             try {
                 payload = await response.json();
@@ -1583,12 +1617,22 @@
         }
     }
 
+    function buildRefreshUrl(offset, limit) {
+        const resolvedOffset = resolveOffset(offset);
+        const resolvedLimit = resolveLimit(limit);
+        const base = '/api/updates/refresh';
+        try {
+            const url = new URL(base, window.location.origin);
+            url.searchParams.set('offset', String(resolvedOffset));
+            url.searchParams.set('limit', String(resolvedLimit));
+            return url.pathname + url.search + url.hash;
+        } catch (err) {
+            return `${base}?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
+        }
+    }
+
     async function handleRefresh() {
         if (state.refreshing) {
-            return;
-        }
-        if (!config.refreshUrl) {
-            showToast('Refresh endpoint is not configured.', 'warning');
             return;
         }
         state.refreshing = true;
@@ -1600,8 +1644,9 @@
         setRefreshProgressVisible(true);
         updateRefreshProgress(0, 0, 'pending');
         setRefreshButtonLoading(true);
-        const url = `${config.refreshUrl}?offset=0&limit=200`;
+        const url = buildRefreshUrl(DEFAULT_OFFSET, DEFAULT_LIMIT);
         try {
+            logFetch(url);
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -1637,19 +1682,22 @@
 
     function buildUpdatesUrl(offset, limit) {
         const base = config.updatesUrl || '/api/updates';
+        const resolvedOffset = resolveOffset(offset);
+        const resolvedLimit = resolveLimit(limit);
         try {
             const url = new URL(base, window.location.origin);
-            url.searchParams.set('offset', String(offset));
-            url.searchParams.set('limit', String(limit));
+            url.searchParams.set('offset', String(resolvedOffset));
+            url.searchParams.set('limit', String(resolvedLimit));
             return url.pathname + url.search + url.hash;
         } catch (err) {
             const separator = base.includes('?') ? '&' : '?';
-            return `${base}${separator}offset=${encodeURIComponent(offset)}&limit=${encodeURIComponent(limit)}`;
+            return `${base}${separator}offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
         }
     }
 
-    async function fetchUpdatesBatch(offset, limit) {
+    async function fetchUpdatesBatch(offset = DEFAULT_OFFSET, limit = DEFAULT_LIMIT) {
         const url = buildUpdatesUrl(offset, limit);
+        logFetch(url);
         const response = await fetch(url, { headers: { Accept: 'application/json' } });
         let payload = null;
         try {
