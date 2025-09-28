@@ -2883,6 +2883,167 @@ def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, A
     }
 
 
+def _execute_refresh_cache_job(
+    update_progress: Callable[..., None],
+    *,
+    offset: int | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Background job helper that refreshes the IGDB cache only."""
+
+    update_progress(
+        message='Preparing IGDB cache…',
+        data={'phase': 'cache', 'inserted': 0, 'updated': 0, 'unchanged': 0},
+    )
+
+    try:
+        access_token, client_id = exchange_twitch_credentials()
+    except RuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    try:
+        current_offset = int(offset or 0)
+    except (TypeError, ValueError):
+        current_offset = 0
+    if current_offset < 0:
+        current_offset = 0
+    start_offset = current_offset
+
+    if limit is None:
+        limit_candidate = IGDB_BATCH_SIZE
+    else:
+        limit_candidate = limit
+    try:
+        limit_value = int(limit_candidate)
+    except (TypeError, ValueError):
+        limit_value = 0
+    if limit_value <= 0:
+        limit_value = 500
+    limit_value = max(1, min(limit_value, 500))
+
+    inserted_total = 0
+    updated_total = 0
+    unchanged_total = 0
+    total_value = 0
+    processed_value = 0
+    next_offset = current_offset
+    done = False
+
+    def _coerce_count(value: Any) -> int:
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    last_result: dict[str, Any] | None = None
+
+    while True:
+        result = updates_service.refresh_igdb_cache(
+            access_token,
+            client_id,
+            current_offset,
+            limit_value,
+            db_lock=db_lock,
+            get_db=get_db,
+            get_cached_total=_get_cached_igdb_total,
+            set_cached_total=_set_cached_igdb_total,
+            download_total=download_igdb_game_count,
+            download_games=download_igdb_games,
+            upsert_games=_upsert_igdb_cache_entries,
+            igdb_prefill_cache=_igdb_prefill_cache,
+            igdb_prefill_lock=_igdb_prefill_lock,
+        )
+
+        last_result = dict(result or {})
+
+        if not isinstance(result, Mapping):
+            break
+
+        if result.get('status') == 'error':
+            message = str(result.get('error') or 'Failed to refresh IGDB cache.')
+            update_progress(
+                message=f'Error refreshing IGDB cache: {message}',
+                data={'phase': 'cache'},
+            )
+            raise RuntimeError(message)
+
+        inserted_total += _coerce_count(result.get('inserted'))
+        updated_total += _coerce_count(result.get('updated'))
+        unchanged_total += _coerce_count(result.get('unchanged'))
+        total_value = _coerce_count(result.get('total'))
+        processed_value = _coerce_count(result.get('processed'))
+        next_offset = _coerce_count(result.get('next_offset'))
+        done = bool(result.get('done'))
+        batch_count = _coerce_count(result.get('batch_count'))
+
+        progress_total = total_value if total_value > 0 else processed_value
+        progress_current = (
+            min(processed_value, progress_total) if progress_total > 0 else processed_value
+        )
+        update_progress(
+            current=progress_current,
+            total=progress_total,
+            message='Refreshing IGDB cache…',
+            data={
+                'phase': 'cache',
+                'inserted': inserted_total,
+                'updated': updated_total,
+                'unchanged': unchanged_total,
+            },
+        )
+
+        if done or batch_count == 0:
+            break
+
+        current_offset = next_offset if next_offset > current_offset else current_offset + batch_count
+
+    progress_total = total_value if total_value > 0 else processed_value
+    progress_current = (
+        min(processed_value, progress_total) if progress_total > 0 else processed_value
+    )
+    update_progress(
+        current=progress_current,
+        total=progress_total,
+        message='Finished refreshing IGDB cache.',
+        data={
+            'phase': 'cache',
+            'inserted': inserted_total,
+            'updated': updated_total,
+            'unchanged': unchanged_total,
+        },
+    )
+
+    changed_total = inserted_total + updated_total
+    if total_value <= 0:
+        status_message = 'IGDB cache is empty.'
+    elif changed_total > 0:
+        status_message = (
+            f"Cached {changed_total} IGDB record{'s' if changed_total != 1 else ''}."
+        )
+    else:
+        status_message = 'IGDB cache is up to date.'
+
+    summary = {
+        'status': 'ok',
+        'total': total_value,
+        'processed': processed_value,
+        'inserted': inserted_total,
+        'updated': updated_total,
+        'unchanged': unchanged_total,
+        'done': done or (progress_total > 0 and progress_current >= progress_total),
+        'next_offset': next_offset,
+        'offset': start_offset,
+        'limit': limit_value,
+        'message': status_message,
+        'toast_type': 'success' if changed_total > 0 else 'info',
+    }
+
+    if last_result and 'error' in last_result:
+        summary['error'] = last_result['error']
+
+    return summary
+
+
 def _execute_refresh_job(update_progress: Callable[..., None]) -> dict[str, Any]:
     cache_summary = None
     cache_error: str | None = None
@@ -3050,6 +3211,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         '_upsert_igdb_cache_entries': _upsert_igdb_cache_entries,
         '_igdb_prefill_lock': _igdb_prefill_lock,
         '_igdb_prefill_cache': _igdb_prefill_cache,
+        'refresh_cache_job': _execute_refresh_cache_job,
         '_execute_refresh_job': _execute_refresh_job,
         'job_manager': job_manager,
         'fix_names_job': _execute_fix_names_job,
