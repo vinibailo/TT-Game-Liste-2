@@ -1117,6 +1117,27 @@ def test_updates_status_idle(tmp_path):
     assert payload['errors'] == []
 
 
+def test_updates_status_reports_timeout_counts(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module)
+    refreshed_at = '2024-05-01T12:00:00+00:00'
+    _insert_igdb_update(app_module, 1, refreshed_at)
+    app_module.routes_updates._context['job_manager'] = StubJobManager()
+    app_module.routes_updates._context['get_igdb_timeout_count'] = lambda: 3
+
+    client = app_module.app.test_client()
+    authenticate(client)
+    response = client.get('/api/updates/status')
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['phase'] == 'idle'
+    assert payload['queued'] == 0
+    assert payload['processed'] == 0
+    assert payload['last_refreshed_at'] == refreshed_at
+    assert 'IGDB timeouts: 3' in payload['errors']
+
+
 def test_updates_status_running(tmp_path):
     app_module = load_app(tmp_path)
     active_job = {

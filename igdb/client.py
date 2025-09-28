@@ -6,6 +6,8 @@ import json
 import logging
 import numbers
 import os
+import socket
+import threading
 import time
 from typing import Any, Callable, Iterable, Mapping
 
@@ -23,6 +25,27 @@ from helpers import (
 
 logger = logging.getLogger(__name__)
 
+_TOKEN_TTL_SECONDS = 600
+_DEFAULT_TIMEOUT_SECONDS = 8.0
+
+_timeout_lock = threading.Lock()
+_timeout_count = 0
+_token_cache_lock = threading.Lock()
+_token_cache: dict[str, tuple[str, float]] = {}
+
+
+def _record_timeout() -> None:
+    global _timeout_count
+    with _timeout_lock:
+        _timeout_count += 1
+
+
+def get_igdb_timeout_count() -> int:
+    """Return the number of IGDB client timeouts recorded."""
+
+    with _timeout_lock:
+        return _timeout_count
+
 
 __all__ = [
     "IGDBClient",
@@ -37,7 +60,12 @@ __all__ = [
     "map_igdb_genres",
     "map_igdb_modes",
     "resolve_igdb_page_size",
+    "get_igdb_timeout_count",
 ]
+
+
+class IGDBAuthenticationError(RuntimeError):
+    """Exception raised when IGDB returns an authentication failure."""
 
 
 def resolve_igdb_page_size(batch_size: Any, *, max_page_size: int = 500) -> int:
@@ -350,6 +378,10 @@ class IGDBClient:
         self._opener = opener
         self._sleep = sleep or time.sleep
         self._env = env or os.environ
+        self._timeout_seconds = _DEFAULT_TIMEOUT_SECONDS
+        self._token_lock = _token_cache_lock
+        self._token_cache = _token_cache
+        self._token_ttl_seconds = float(_TOKEN_TTL_SECONDS)
 
     @property
     def user_agent(self) -> str:
@@ -360,6 +392,95 @@ class IGDBClient:
             return env_agent.strip()
         return "TT-Game-Liste/1.0 (support@example.com)"
 
+    def _resolve_client_identifier(self, client_id: str | None) -> str:
+        for candidate in (
+            client_id,
+            self._client_id,
+            self._env.get("IGDB_CLIENT_ID") if self._env else None,
+            self._env.get("TWITCH_CLIENT_ID") if self._env else None,
+        ):
+            if not candidate:
+                continue
+            text = str(candidate).strip()
+            if text:
+                return text
+        return ""
+
+    def _resolve_client_secret(self, client_secret: str | None) -> str:
+        for candidate in (
+            client_secret,
+            self._client_secret,
+            self._env.get("IGDB_CLIENT_SECRET") if self._env else None,
+            self._env.get("TWITCH_CLIENT_SECRET") if self._env else None,
+        ):
+            if not candidate:
+                continue
+            text = str(candidate).strip()
+            if text:
+                return text
+        return ""
+
+    def _get_cached_token(self, client_id: str) -> str | None:
+        if not client_id:
+            return None
+        with self._token_lock:
+            cached = self._token_cache.get(client_id)
+            if not cached:
+                return None
+            token, expires_at = cached
+            if expires_at > time.time():
+                return token
+            self._token_cache.pop(client_id, None)
+        return None
+
+    def _store_cached_token(self, client_id: str, token: str) -> None:
+        if not client_id or not token:
+            return
+        expires_at = time.time() + self._token_ttl_seconds
+        with self._token_lock:
+            self._token_cache[client_id] = (token, expires_at)
+
+    def _invalidate_cached_token(self, client_id: str) -> None:
+        if not client_id:
+            return
+        with self._token_lock:
+            self._token_cache.pop(client_id, None)
+
+    def _prepare_access_token(
+        self,
+        access_token: str | None,
+        client_id: str | None,
+        *,
+        force_refresh: bool = False,
+        request_factory: Callable[..., Any] | None = None,
+        opener: Callable[[Any], Any] | None = None,
+    ) -> tuple[str, str]:
+        resolved_client_id = self._resolve_client_identifier(client_id)
+        if not resolved_client_id:
+            raise RuntimeError("Missing IGDB client identifier; set IGDB_CLIENT_ID")
+
+        if not force_refresh:
+            cached_token = self._get_cached_token(resolved_client_id)
+            if cached_token:
+                return cached_token, resolved_client_id
+            token_text = (access_token or "").strip()
+            if token_text:
+                self._store_cached_token(resolved_client_id, token_text)
+                return token_text, resolved_client_id
+
+        if force_refresh:
+            self._invalidate_cached_token(resolved_client_id)
+
+        token, refreshed_client_id = self.exchange_twitch_credentials(
+            client_id=resolved_client_id,
+            request_factory=request_factory,
+            opener=opener,
+            force_refresh=True,
+        )
+        resolved_client_id = refreshed_client_id or resolved_client_id
+        self._store_cached_token(resolved_client_id, token)
+        return token, resolved_client_id
+
     def exchange_twitch_credentials(
         self,
         client_id: str | None = None,
@@ -367,27 +488,24 @@ class IGDBClient:
         *,
         request_factory: Callable[..., Any] | None = None,
         opener: Callable[[Any], Any] | None = None,
+        force_refresh: bool = False,
     ) -> tuple[str, str]:
         """Return a Twitch access token paired with the resolved client id."""
 
-        resolved_client_id = (
-            client_id
-            or self._client_id
-            or self._env.get("IGDB_CLIENT_ID")
-            or self._env.get("TWITCH_CLIENT_ID")
-            or ""
-        ).strip()
-        resolved_client_secret = (
-            client_secret
-            or self._client_secret
-            or self._env.get("IGDB_CLIENT_SECRET")
-            or self._env.get("TWITCH_CLIENT_SECRET")
-            or ""
-        ).strip()
+        resolved_client_id = self._resolve_client_identifier(client_id)
+        resolved_client_secret = self._resolve_client_secret(client_secret)
         if not resolved_client_id or not resolved_client_secret:
             raise RuntimeError(
                 "Missing IGDB client credentials; set IGDB_CLIENT_ID and IGDB_CLIENT_SECRET"
             )
+
+        if not force_refresh:
+            cached_token = self._get_cached_token(resolved_client_id)
+            if cached_token:
+                return cached_token, resolved_client_id
+
+        if force_refresh:
+            self._invalidate_cached_token(resolved_client_id)
 
         payload = urlencode(
             {
@@ -423,6 +541,7 @@ class IGDBClient:
         token = data.get("access_token") if isinstance(data, Mapping) else None
         if not token:
             raise RuntimeError("missing access token in twitch response")
+        self._store_cached_token(resolved_client_id, str(token))
         return str(token), resolved_client_id
 
     def fetch_game_count(
@@ -439,19 +558,38 @@ class IGDBClient:
         build_request = self._resolve_request_factory(request_factory)
         open_request = self._resolve_opener(opener)
 
-        request = build_request(
-            f"{self.BASE_URL}/games/count",
-            data="where id != null;".encode("utf-8"),
-            method="POST",
+        token_value, resolved_client_id = self._prepare_access_token(
+            access_token,
+            client_id,
+            request_factory=request_factory,
+            opener=opener,
         )
-        self._apply_headers(request, client_id, access_token, user_agent)
 
-        payload = self._request_json(
-            request,
-            open_request,
-            error_prefix="IGDB count request failed",
-            generic_error="failed to query IGDB count",
-        )
+        def _perform(token: str, resolved_id: str):
+            request = build_request(
+                f"{self.BASE_URL}/games/count",
+                data="where id != null;".encode("utf-8"),
+                method="POST",
+            )
+            self._apply_headers(request, resolved_id, token, user_agent)
+            return self._request_json(
+                request,
+                open_request,
+                error_prefix="IGDB count request failed",
+                generic_error="failed to query IGDB count",
+            )
+
+        try:
+            payload = _perform(token_value, resolved_client_id)
+        except IGDBAuthenticationError:
+            token_value, resolved_client_id = self._prepare_access_token(
+                access_token,
+                resolved_client_id,
+                force_refresh=True,
+                request_factory=request_factory,
+                opener=opener,
+            )
+            payload = _perform(token_value, resolved_client_id)
 
         if isinstance(payload, Mapping):
             count_value = payload.get("count")
@@ -498,19 +636,38 @@ class IGDBClient:
         build_request = self._resolve_request_factory(request_factory)
         open_request = self._resolve_opener(opener)
 
-        request = build_request(
-            f"{self.BASE_URL}/games",
-            data=query.encode("utf-8"),
-            method="POST",
+        token_value, resolved_client_id = self._prepare_access_token(
+            access_token,
+            client_id,
+            request_factory=request_factory,
+            opener=opener,
         )
-        self._apply_headers(request, client_id, access_token, user_agent)
 
-        payload = self._request_json(
-            request,
-            open_request,
-            error_prefix="IGDB request failed",
-            generic_error="failed to query IGDB games",
-        )
+        def _perform(token: str, resolved_id: str):
+            request = build_request(
+                f"{self.BASE_URL}/games",
+                data=query.encode("utf-8"),
+                method="POST",
+            )
+            self._apply_headers(request, resolved_id, token, user_agent)
+            return self._request_json(
+                request,
+                open_request,
+                error_prefix="IGDB request failed",
+                generic_error="failed to query IGDB games",
+            )
+
+        try:
+            payload = _perform(token_value, resolved_client_id)
+        except IGDBAuthenticationError:
+            token_value, resolved_client_id = self._prepare_access_token(
+                access_token,
+                resolved_client_id,
+                force_refresh=True,
+                request_factory=request_factory,
+                opener=opener,
+            )
+            payload = _perform(token_value, resolved_client_id)
 
         results: list[dict[str, Any]] = []
         for item in payload or []:
@@ -558,6 +715,13 @@ class IGDBClient:
         build_request = self._resolve_request_factory(request_factory)
         open_request = self._resolve_opener(opener)
 
+        token_value, resolved_client_id = self._prepare_access_token(
+            access_token,
+            client_id,
+            request_factory=request_factory,
+            opener=opener,
+        )
+
         results: dict[str, dict[str, Any]] = {}
         for start in range(0, len(numeric_ids), chunk_size):
             chunk = numeric_ids[start : start + chunk_size]
@@ -575,19 +739,31 @@ class IGDBClient:
                 f"limit {len(chunk)};"
             )
 
-            request = build_request(
-                f"{self.BASE_URL}/games",
-                data=query.encode("utf-8"),
-                method="POST",
-            )
-            self._apply_headers(request, client_id, access_token, user_agent)
+            def _perform(token: str, resolved_id: str):
+                request = build_request(
+                    f"{self.BASE_URL}/games",
+                    data=query.encode("utf-8"),
+                    method="POST",
+                )
+                self._apply_headers(request, resolved_id, token, user_agent)
+                return self._request_json(
+                    request,
+                    open_request,
+                    error_prefix="IGDB request failed",
+                    generic_error="failed to query IGDB",
+                )
 
-            payload = self._request_json(
-                request,
-                open_request,
-                error_prefix="IGDB request failed",
-                generic_error="failed to query IGDB",
-            )
+            try:
+                payload = _perform(token_value, resolved_client_id)
+            except IGDBAuthenticationError:
+                token_value, resolved_client_id = self._prepare_access_token(
+                    access_token,
+                    resolved_client_id,
+                    force_refresh=True,
+                    request_factory=request_factory,
+                    opener=opener,
+                )
+                payload = _perform(token_value, resolved_client_id)
 
             for item in payload or []:
                 normalized_item = self.normalize_game(item)
@@ -737,10 +913,12 @@ class IGDBClient:
 
         def _default_opener(request: Any):
             try:
-                return urlopen(request, timeout=10)
+                return urlopen(request, timeout=self._timeout_seconds)
             except HTTPError:
                 raise
             except Exception as exc:  # pragma: no cover - network errors handled at runtime
+                if _is_timeout_error(exc):
+                    _record_timeout()
                 raise RuntimeError("IGDB request failed or timed out") from exc
 
         return _default_opener
@@ -766,10 +944,14 @@ class IGDBClient:
                         self._sleep(delay)
                     continue
                 message = _format_http_error(error_prefix, exc)
+                if exc.code in (401, 403):
+                    raise IGDBAuthenticationError(message) from exc
                 raise RuntimeError(message) from exc
             except RuntimeError:
                 raise
             except (TimeoutError, URLError, OSError) as exc:
+                if _is_timeout_error(exc):
+                    _record_timeout()
                 raise RuntimeError("IGDB request failed or timed out") from exc
             except Exception as exc:  # pragma: no cover - network failures surfaced
                 raise RuntimeError(f"{generic_error}: {exc}") from exc
@@ -833,6 +1015,7 @@ def exchange_twitch_credentials(
     request_factory: Callable[..., Any] | None = None,
     opener: Callable[[Any], Any] | None = None,
     env: Mapping[str, str] | None = None,
+    force_refresh: bool = False,
 ) -> tuple[str, str]:
     """Compatibility wrapper that proxies to :class:`IGDBClient`."""
 
@@ -842,6 +1025,7 @@ def exchange_twitch_credentials(
         client_secret=client_secret,
         request_factory=request_factory,
         opener=opener,
+        force_refresh=force_refresh,
     )
 
 
@@ -960,6 +1144,8 @@ def _resolve_client_id(client_id: str | None, env: Mapping[str, str] | None) -> 
 
 
 def _is_authentication_error(error: BaseException) -> bool:
+    if isinstance(error, IGDBAuthenticationError):
+        return True
     message = str(error).strip().casefold()
     if not message:
         return False
@@ -974,6 +1160,18 @@ def _is_authentication_error(error: BaseException) -> bool:
         "access token",
     )
     return any(token in message for token in indicators)
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    if isinstance(error, socket.timeout):
+        return True
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    message = str(error).strip().casefold()
+    return "timed out" in message or "timeout" in message
 
 
 def _format_http_error(prefix: str, error: HTTPError) -> str:
