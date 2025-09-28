@@ -8,6 +8,8 @@ from typing import Any, Mapping
 
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
+from updates.service import refresh_igdb_cache
+
 from jobs.manager import JOB_STATUS_ERROR, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 from routes.api_utils import (
     NotFoundError,
@@ -217,45 +219,85 @@ def api_updates_refresh():
     if not _ctx('validate_igdb_credentials')():
         return jsonify({'error': 'IGDB credentials missing'}), 503
 
-    payload = request.get_json(silent=True) or {}
     try:
-        offset = int(payload.get('offset', 0))
+        offset = int(request.args.get('offset', 0))
     except (TypeError, ValueError):
         offset = 0
     if offset < 0:
         offset = 0
 
     try:
-        limit_value = int(payload.get('limit', 200))
+        limit_value = int(request.args.get('limit', 200))
     except (TypeError, ValueError):
         limit_value = 200
     if limit_value <= 0:
         limit_value = 200
-    if limit_value < 50:
-        limit_value = 50
     if limit_value > 500:
         limit_value = 500
+    if limit_value < 1:
+        limit_value = 1
 
-    job_manager = _ctx('job_manager')
+    exchange_helper = _ctx('exchange_twitch_credentials')
+    try:
+        helper_result = exchange_helper() if callable(exchange_helper) else exchange_helper
+        if callable(helper_result):
+            exchange_callable = helper_result
+            access_token, client_id = exchange_callable()
+        elif isinstance(helper_result, (tuple, list)) and len(helper_result) >= 2:
+            exchange_callable = None
+            access_token, client_id = helper_result[0], helper_result[1]
+        else:
+            raise RuntimeError('Unable to resolve IGDB credentials')
 
-    job, created = job_manager.enqueue_job(
-        'refresh_updates',
-        'app._execute_refresh_job',
-        description='Refreshing IGDB updates…',
-        kwargs={'offset': offset, 'limit': limit_value},
-    )
-
-    accepted = limit_value if created else 0
-    next_offset = offset + accepted
-    current_app.logger.info('updates.refresh accepted=%s offset=%s', accepted, offset)
-
-    response = jsonify({'accepted': accepted, 'next_offset': next_offset})
-    status_code = 202 if created else 200
-    if job:
-        response.headers['Location'] = url_for(
-            'updates.api_updates_job_detail', job_id=job['id']
+        download_total_helper = _ctx('download_igdb_game_count')
+        download_total = (
+            download_total_helper()
+            if callable(download_total_helper)
+            else download_total_helper
         )
-    return response, status_code
+        download_games_helper = _ctx('download_igdb_games')
+        download_games = (
+            download_games_helper()
+            if callable(download_games_helper)
+            else download_games_helper
+        )
+
+        result = refresh_igdb_cache(
+            access_token,
+            client_id,
+            offset,
+            limit_value,
+            conn=_ctx('get_db')(),
+            db_lock=_ctx('db_lock'),
+            get_cached_total=_ctx('_get_cached_igdb_total'),
+            set_cached_total=_ctx('_set_cached_igdb_total'),
+            download_total=download_total,
+            download_games=download_games,
+            upsert_games=_ctx('_upsert_igdb_cache_entries'),
+            exchange_credentials=exchange_callable,
+            igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
+            igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
+        )
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 502
+
+    progress = {
+        'total': result.get('total', 0) if isinstance(result, Mapping) else 0,
+        'processed': result.get('processed', 0) if isinstance(result, Mapping) else 0,
+        'inserted': result.get('inserted', 0) if isinstance(result, Mapping) else 0,
+        'updated': result.get('updated', 0) if isinstance(result, Mapping) else 0,
+        'unchanged': result.get('unchanged', 0) if isinstance(result, Mapping) else 0,
+        'done': bool(result.get('done')) if isinstance(result, Mapping) else False,
+        'next_offset': result.get('next_offset', offset) if isinstance(result, Mapping) else offset,
+    }
+
+    current_app.logger.info(
+        'updates.refresh batch offset=%s limit=%s processed=%s',
+        offset,
+        limit_value,
+        progress['processed'],
+    )
+    return jsonify(progress)
 
 
 @updates_blueprint.route('/api/updates/fix-names', methods=['POST'])

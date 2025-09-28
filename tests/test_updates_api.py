@@ -185,75 +185,114 @@ class StubJobManager:
         return list(self._history)
 
 
-def test_updates_refresh_enqueues_batch(tmp_path):
+def test_updates_refresh_returns_progress(tmp_path):
     app_module = load_app(tmp_path)
     client = app_module.app.test_client()
     authenticate(client)
 
     recorded: dict[str, Any] = {}
 
-    class RecordingJobManager:
-        def enqueue_job(self, job_type, runner_path, *, description=None, kwargs=None):
-            recorded['job_type'] = job_type
-            recorded['runner_path'] = runner_path
-            recorded['description'] = description
-            recorded['kwargs'] = dict(kwargs or {})
-            return {'id': 'job123'}, True
+    def fake_refresh(access_token, client_id, offset, limit, **kwargs):
+        recorded['access_token'] = access_token
+        recorded['client_id'] = client_id
+        recorded['offset'] = offset
+        recorded['limit'] = limit
+        recorded['conn'] = kwargs.get('conn')
+        recorded['db_lock'] = kwargs.get('db_lock')
+        return {
+            'status': 'ok',
+            'total': 500,
+            'processed': offset + 3,
+            'inserted': 2,
+            'updated': 1,
+            'unchanged': 0,
+            'done': False,
+            'next_offset': offset + 3,
+        }
 
-    app_module.routes_updates._context['job_manager'] = RecordingJobManager()
+    app_module.routes_updates._context['exchange_twitch_credentials'] = (
+        lambda: (lambda: ('token', 'client'))
+    )
 
-    logger = app_module.app.logger
-    with patch.object(logger, 'info') as mock_info:
-        response = client.post('/api/updates/refresh', json={'offset': 100, 'limit': 75})
-
-    assert response.status_code == 202
-    assert response.get_json() == {'accepted': 75, 'next_offset': 175}
-    assert recorded == {
-        'job_type': 'refresh_updates',
-        'runner_path': 'app._execute_refresh_job',
-        'description': 'Refreshing IGDB updates…',
-        'kwargs': {'offset': 100, 'limit': 75},
-    }
-    mock_info.assert_any_call('updates.refresh accepted=%s offset=%s', 75, 100)
-    assert response.headers['Location'].endswith('/api/updates/jobs/job123')
-
-
-def test_updates_refresh_validates_limit_range(tmp_path):
-    app_module = load_app(tmp_path)
-    client = app_module.app.test_client()
-    authenticate(client)
-
-    captured_limits: list[int] = []
-
-    class LimitRecordingJobManager:
-        def enqueue_job(self, job_type, runner_path, *, description=None, kwargs=None):
-            captured_limits.append(kwargs.get('limit'))
-            return {'id': 'job456'}, True
-
-    app_module.routes_updates._context['job_manager'] = LimitRecordingJobManager()
-
-    response = client.post('/api/updates/refresh', json={'offset': 10, 'limit': 5})
-
-    assert response.status_code == 202
-    assert response.get_json() == {'accepted': 50, 'next_offset': 60}
-    assert captured_limits == [50]
-
-
-def test_updates_refresh_handles_existing_job(tmp_path):
-    app_module = load_app(tmp_path)
-    client = app_module.app.test_client()
-    authenticate(client)
-
-    class ExistingJobManager:
-        def enqueue_job(self, *_args, **_kwargs):
-            return {'id': 'job789'}, False
-
-    app_module.routes_updates._context['job_manager'] = ExistingJobManager()
-
-    response = client.post('/api/updates/refresh', json={'offset': 20, 'limit': 400})
+    with patch.object(app_module.routes_updates, 'refresh_igdb_cache', side_effect=fake_refresh):
+        response = client.post('/api/updates/refresh?offset=7&limit=120')
 
     assert response.status_code == 200
-    assert response.get_json() == {'accepted': 0, 'next_offset': 20}
+    assert response.get_json() == {
+        'total': 500,
+        'processed': 10,
+        'inserted': 2,
+        'updated': 1,
+        'unchanged': 0,
+        'done': False,
+        'next_offset': 10,
+    }
+    assert recorded['access_token'] == 'token'
+    assert recorded['client_id'] == 'client'
+    assert recorded['offset'] == 7
+    assert recorded['limit'] == 120
+    assert recorded['conn'] is not None
+    assert recorded['db_lock'] is app_module.db_lock
+
+
+def test_updates_refresh_defaults_query_params(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    captured: dict[str, Any] = {}
+
+    def fake_refresh(access_token, client_id, offset, limit, **_kwargs):
+        captured['offset'] = offset
+        captured['limit'] = limit
+        return {
+            'status': 'ok',
+            'total': 0,
+            'processed': 0,
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'done': True,
+            'next_offset': 0,
+        }
+
+    app_module.routes_updates._context['exchange_twitch_credentials'] = (
+        lambda: (lambda: ('token', 'client'))
+    )
+
+    with patch.object(app_module.routes_updates, 'refresh_igdb_cache', side_effect=fake_refresh):
+        response = client.post('/api/updates/refresh')
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'total': 0,
+        'processed': 0,
+        'inserted': 0,
+        'updated': 0,
+        'unchanged': 0,
+        'done': True,
+        'next_offset': 0,
+    }
+    assert captured == {'offset': 0, 'limit': 200}
+
+
+def test_updates_refresh_handles_runtime_error(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    app_module.routes_updates._context['exchange_twitch_credentials'] = (
+        lambda: (lambda: ('token', 'client'))
+    )
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError('network unavailable')
+
+    with patch.object(app_module.routes_updates, 'refresh_igdb_cache', side_effect=fail_refresh):
+        response = client.post('/api/updates/refresh?offset=3&limit=10')
+
+    assert response.status_code == 502
+    assert response.get_json() == {'error': 'network unavailable'}
 
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)

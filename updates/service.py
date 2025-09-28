@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
@@ -35,8 +36,9 @@ def refresh_igdb_cache(
     offset: Any,
     limit: Any,
     *,
-    db_lock: Any,
-    get_db: Callable[[], Any],
+    db_lock: Any | None = None,
+    get_db: Callable[[], Any] | None = None,
+    conn: Any | None = None,
     get_cached_total: Callable[[Any], int | None] = cache_get_cached_total,
     set_cached_total: Callable[[Any, int | None], None] = cache_set_cached_total,
     download_total: Callable[[str, str], int] | None = None,
@@ -114,9 +116,27 @@ def refresh_igdb_cache(
                 return download_games_fn(token_value, client_value, offset_param, limit_param)
             raise
 
-    with db_lock:
-        conn = get_db()
-        cached_total = get_cached_total(conn) if get_cached_total else None
+    if conn is not None:
+        get_conn = lambda: conn  # noqa: E731
+
+        if db_lock is not None:
+            def acquire_lock() -> Any:
+                return db_lock
+        else:
+            def acquire_lock() -> Any:
+                return nullcontext()
+    else:
+        if get_db is None or db_lock is None:
+            raise RuntimeError('refresh_igdb_cache requires database helpers')
+
+        get_conn = get_db
+
+        def acquire_lock() -> Any:
+            return db_lock
+
+    with acquire_lock():
+        conn_obj = get_conn()
+        cached_total = get_cached_total(conn_obj) if get_cached_total else None
 
     should_refresh_total = cached_total is None or offset_value == 0
     total = cached_total
@@ -137,17 +157,17 @@ def refresh_igdb_cache(
                 'batch_count': 0,
             }
         if set_cached_total:
-            with db_lock:
-                conn = get_db()
-                with conn:
-                    set_cached_total(conn, total)
+            with acquire_lock():
+                conn_obj = get_conn()
+                with conn_obj:
+                    set_cached_total(conn_obj, total)
 
     if total is None or total <= 0:
         if set_cached_total:
-            with db_lock:
-                conn = get_db()
-                with conn:
-                    set_cached_total(conn, total)
+            with acquire_lock():
+                conn_obj = get_conn()
+                with conn_obj:
+                    set_cached_total(conn_obj, total)
         return {
             'status': 'ok',
             'total': total or 0,
@@ -192,10 +212,10 @@ def refresh_igdb_cache(
 
     inserted = updated = unchanged = 0
     if batch_count:
-        with db_lock:
-            conn = get_db()
-            with conn:
-                inserted, updated, unchanged = upsert_games(conn, payloads)
+        with acquire_lock():
+            conn_obj = get_conn()
+            with conn_obj:
+                inserted, updated, unchanged = upsert_games(conn_obj, payloads)
         if igdb_prefill_lock is not None and igdb_prefill_cache is not None:
             with igdb_prefill_lock:
                 igdb_prefill_cache.clear()
