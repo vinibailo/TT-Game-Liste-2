@@ -76,84 +76,64 @@
                 </div>
             </div>
         </header>
-        <section class="updates-progress-stack" data-progress-stack aria-live="polite">
-            <div class="progress-indicator updates-progress" data-refresh-progress role="status" hidden>
-                <div class="progress-body">
-                    <div class="progress-info">
-                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">refresh</span>
-                        <div class="progress-text">
-                            <span class="progress-title">Updating IGDB cache</span>
-                            <span class="progress-message" data-refresh-message>Preparing IGDB cache…</span>
-                        </div>
-                    </div>
-                    <div class="progress-metrics">
-                        <span class="progress-count" data-refresh-count>0/0</span>
-                        <span class="progress-percent" data-refresh-percent>0%</span>
+        <section class="updates-progress-stack">
+            <div class="task-banner" data-task-banner hidden role="status" aria-live="polite">
+                <div class="task-banner-heading">
+                    <span class="task-banner-icon material-symbols-rounded" aria-hidden="true">sync</span>
+                    <div class="task-banner-text">
+                        <span class="task-banner-title">Tasks in progress</span>
+                        <span class="task-banner-note">These actions continue in the background.</span>
                     </div>
                 </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" data-refresh-bar></div>
-                </div>
-            </div>
-            <div class="progress-indicator updates-progress" data-compare-progress role="status" hidden>
-                <div class="progress-body">
-                    <div class="progress-info">
-                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">compare_arrows</span>
-                        <div class="progress-text">
-                            <span class="progress-title">Comparing catalog entries</span>
-                            <span class="progress-message" data-compare-message>Comparing processed games with the IGDB cache…</span>
-                        </div>
-                    </div>
-                    <div class="progress-metrics">
-                        <span class="progress-count" data-compare-count>0/0</span>
-                        <span class="progress-percent" data-compare-percent>0%</span>
-                    </div>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" data-compare-bar></div>
-                </div>
-            </div>
-            <div class="progress-indicator updates-progress" data-fix-progress role="status" hidden>
-                <div class="progress-body">
-                    <div class="progress-info">
-                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">spellcheck</span>
-                        <div class="progress-text">
-                            <span class="progress-title">Fixing IGDB names</span>
-                            <span class="progress-message" data-fix-message>Correcting processed game names using IGDB data…</span>
-                        </div>
-                    </div>
-                    <div class="progress-metrics">
-                        <span class="progress-count" data-fix-count>0/0</span>
-                        <span class="progress-percent" data-fix-percent>0%</span>
-                    </div>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" data-fix-bar></div>
-                </div>
-            </div>
-            <div class="progress-indicator updates-progress" data-dedupe-progress role="status" hidden>
-                <div class="progress-body">
-                    <div class="progress-info">
-                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">layers_clear</span>
-                        <div class="progress-text">
-                            <span class="progress-title">Removing duplicates</span>
-                            <span class="progress-message" data-dedupe-message>Cleaning duplicate IGDB entries…</span>
-                        </div>
-                    </div>
-                    <div class="progress-metrics">
-                        <span class="progress-count" data-dedupe-count>0/0</span>
-                        <span class="progress-percent" data-dedupe-percent>0%</span>
-                    </div>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" data-dedupe-bar></div>
-                </div>
+                <ul class="task-banner-list" data-task-list></ul>
             </div>
         </section>
         <section class="updates-summary" aria-live="polite">
             <span>Total entries:</span>
             <strong data-count>0</strong>
             <span class="updates-status" data-refresh-status></span>
+        </section>
+        <section class="updates-cache-card" aria-live="polite">
+            <article class="status-card">
+                <header class="status-card-header">
+                    <span class="status-card-icon material-symbols-rounded" aria-hidden="true">database</span>
+                    <div class="status-card-text">
+                        <h2>IGDB Cache</h2>
+                        <p data-cache-status-message>Loading cache status…</p>
+                    </div>
+                </header>
+                <dl class="status-card-grid">
+                    <div class="status-card-metric">
+                        <dt>Cached entries</dt>
+                        <dd data-cache-count>—</dd>
+                    </div>
+                    <div class="status-card-metric">
+                        <dt>Last synced</dt>
+                        <dd data-cache-synced>—</dd>
+                    </div>
+                    <div class="status-card-metric">
+                        <dt>Remote total</dt>
+                        <dd data-cache-remote>—</dd>
+                    </div>
+                </dl>
+                <div class="status-card-summary" data-cache-summary hidden>
+                    <div class="status-pill">
+                        <span>Inserted</span>
+                        <strong data-cache-inserted>0</strong>
+                    </div>
+                    <div class="status-pill">
+                        <span>Updated</span>
+                        <strong data-cache-updated>0</strong>
+                    </div>
+                    <div class="status-pill">
+                        <span>Unchanged</span>
+                        <strong data-cache-unchanged>0</strong>
+                    </div>
+                </div>
+                <p class="status-card-footer" data-cache-refreshed hidden>
+                    Last refresh completed <span data-cache-refresh>—</span>.
+                </p>
+            </article>
         </section>
         <section class="updates-table-card">
             <div class="table-scroll" role="region" aria-live="polite" aria-label="Updates table">
@@ -261,6 +241,7 @@
             jobDetailUrlTemplate: {{ url_for('updates.api_updates_job_detail', job_id='job')|replace('job', '{id}')|tojson }},
             detailUrlTemplate: {{ url_for('updates.api_updates_detail', processed_game_id=0)|replace('0', '{id}')|tojson }},
             coverUrlTemplate: {{ url_for('updates.api_updates_cover', processed_game_id=0)|replace('0', '{id}')|tojson }},
+            cacheStatusUrl: {{ url_for('updates.api_updates_cache_status')|tojson }},
             cacheBatchSize: {{ igdb_batch_size|tojson }},
             fixBatchSize: {{ FIX_NAMES_BATCH_LIMIT|default(50)|tojson }}
         };

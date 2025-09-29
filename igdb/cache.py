@@ -106,6 +106,42 @@ def set_cached_total(
     )
 
 
+def get_cache_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return aggregate information about the local IGDB cache."""
+
+    _ensure_cache_state_table(conn)
+    _ensure_games_table(conn)
+
+    total_row = conn.execute(
+        f"SELECT COUNT(*) AS count FROM {_quote(IGDB_CACHE_TABLE)}"
+    ).fetchone()
+    cached_entries = _row_lookup(total_row, 'count', 0)
+    try:
+        cached_total = max(int(cached_entries), 0)
+    except (TypeError, ValueError):
+        cached_total = 0
+
+    state_row = conn.execute(
+        f"SELECT total_count, last_synced_at FROM {_quote(IGDB_CACHE_STATE_TABLE)} WHERE id = 1"
+    ).fetchone()
+    remote_total = _row_lookup(state_row, 'total_count', 0)
+    last_synced = _row_lookup(state_row, 'last_synced_at', 1)
+
+    result: dict[str, Any] = {
+        'cached_entries': cached_total,
+        'remote_total': None,
+        'last_synced_at': str(last_synced) if last_synced else None,
+    }
+
+    try:
+        if remote_total is not None:
+            result['remote_total'] = max(int(remote_total), 0)
+    except (TypeError, ValueError):
+        result['remote_total'] = None
+
+    return result
+
+
 def _serialize_cache_list(values: Iterable[Any]) -> str:
     items: list[str] = []
     for value in values or []:

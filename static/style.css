@@ -782,66 +782,246 @@ textarea {
 }
 
 .updates-progress-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
   margin: 16px 0 24px;
 }
 
-.updates-progress {
-  min-width: 0;
-  align-items: stretch;
-  padding: 16px 20px;
+.task-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
   border-radius: 16px;
   border: 1px solid var(--color-border);
-  background: var(--color-surface-elevated);
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(28, 45, 74, 0.95));
   box-shadow: 0 18px 40px rgba(8, 15, 35, 0.35);
+  color: var(--color-text);
 }
 
-.updates-progress .progress-body {
+.task-banner-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  flex-wrap: wrap;
+  gap: 14px;
 }
 
-.updates-progress .progress-info {
-  display: flex;
+.task-banner-icon {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  min-width: 220px;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.18);
+  color: var(--color-blue);
+  font-size: 1.6rem;
 }
 
-.updates-progress .progress-icon {
-  font-size: 1.8rem;
+.task-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-banner-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.task-banner-note {
+  font-size: 0.85rem;
   color: var(--color-muted);
 }
 
-.updates-progress .progress-text {
+.task-banner-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.task-banner-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(37, 99, 235, 0.22);
+}
+
+.task-banner-item-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.task-banner-item-icon {
+  font-size: 1.4rem;
+  color: var(--color-muted);
+}
+
+.task-banner-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.task-banner-item-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--color-text);
+}
+
+.task-banner-item-message {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+
+.task-banner-item-progress {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--color-blue);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .task-banner-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .task-banner-item-progress {
+    align-self: flex-end;
+  }
+
+  .task-banner-item-message {
+    max-width: 100%;
+  }
+}
+
+.updates-cache-card {
+  margin-bottom: 24px;
+}
+
+.status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 16px 32px rgba(8, 15, 35, 0.25);
+}
+
+.status-card-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.status-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.18);
+  color: var(--color-blue);
+  font-size: 1.6rem;
+}
+
+.status-card-text {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.updates-progress .progress-title {
-  font-size: 1rem;
+.status-card-text h2 {
+  margin: 0;
+  font-size: 1.1rem;
   font-weight: 600;
-  color: var(--color-text);
 }
 
-.updates-progress .progress-message {
+.status-card-text p {
+  margin: 0;
   font-size: 0.9rem;
   color: var(--color-muted);
 }
 
-.updates-progress .progress-metrics {
-  align-items: baseline;
+.status-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 0;
 }
 
-.updates-progress .progress-bar {
-  width: 100%;
-  max-width: 100%;
+.status-card-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-card-metric dt {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+}
+
+.status-card-metric dd {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.status-card-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.status-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  min-width: 96px;
+}
+
+.status-pill span {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+}
+
+.status-pill strong {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.status-card-footer {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-muted);
 }
 
 .updates-search {
