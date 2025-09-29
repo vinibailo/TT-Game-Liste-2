@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Iterable
@@ -775,6 +776,8 @@ def api_updates_list():
 
     fetch_limit = limit + 1
 
+    etag_header_value: str | None = None
+
     with db_lock:
         conn = get_db()
         processed_columns = get_processed_games_columns(conn)
@@ -797,6 +800,44 @@ def api_updates_list():
             params.append(normalized_since)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ''
+
+        metadata_query = (
+            f"""SELECT
+                    MAX({updated_at_expr}) AS max_updated_at,
+                    COUNT(*) AS total_count
+                FROM igdb_updates u
+                {where_sql}"""
+        )
+
+        metadata_row = conn.execute(metadata_query, params).fetchone()
+        max_updated_at_value = ''
+        if metadata_row is not None:
+            raw_max_updated_at = metadata_row['max_updated_at']
+            if raw_max_updated_at:
+                max_updated_at_value = str(raw_max_updated_at)
+        total_count_value = 0
+        if metadata_row is not None:
+            total_count_value = int(metadata_row['total_count'] or 0)
+
+        etag_source = f"{max_updated_at_value}:{total_count_value}"
+        etag_hash = hashlib.sha256(etag_source.encode('utf-8')).hexdigest()
+        etag_header_value = f'W/"{etag_hash}"'
+
+        if_none_match_header = request.headers.get('If-None-Match', '')
+        if if_none_match_header:
+            candidates = [token.strip() for token in if_none_match_header.split(',') if token.strip()]
+            normalized_candidates = set(candidates)
+            for candidate in candidates:
+                if candidate.startswith('W/'):
+                    normalized_candidates.add(candidate[2:])
+            target_values = {etag_header_value}
+            if etag_header_value.startswith('W/'):
+                target_values.add(etag_header_value[2:])
+            if '*' in normalized_candidates or target_values & normalized_candidates:
+                response = Response(status=304)
+                response.headers['ETag'] = etag_header_value
+                response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
+                return response
 
         query = (
             f'''SELECT
@@ -868,7 +909,11 @@ def api_updates_list():
         last_item = items[-1]
         next_after = last_item.get('id')
 
-    return jsonify({'items': items, 'nextAfter': next_after})
+    response = jsonify({'items': items, 'nextAfter': next_after})
+    if etag_header_value:
+        response.headers['ETag'] = etag_header_value
+    response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
+    return response
 
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])

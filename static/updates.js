@@ -33,6 +33,7 @@
         pageCount: 1,
         totalAvailable: 0,
         nextAfter: null,
+        updatesEtag: null,
     };
 
     const JOB_TYPES = Object.freeze({
@@ -189,9 +190,13 @@
             }
             const items = Array.isArray(parsed.items) ? parsed.items : [];
             const nextAfter = parsed.nextAfter ?? parsed.next_after ?? null;
+            const etag = typeof parsed.etag === 'string' && parsed.etag.trim()
+                ? parsed.etag.trim()
+                : null;
             return {
                 items,
                 nextAfter,
+                etag,
             };
         } catch (error) {
             console.debug('Failed to load cached updates', error);
@@ -204,16 +209,20 @@
         if (!storage) {
             return;
         }
-        if (!payload || !Array.isArray(payload.items) || payload.items.length === 0) {
+        if (!payload || typeof payload !== 'object') {
             storage.removeItem(LOCAL_STORAGE_KEYS.updates);
             return;
         }
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const nextAfter = payload.nextAfter ?? null;
+        const etag = typeof payload.etag === 'string' && payload.etag.trim() ? payload.etag.trim() : null;
         try {
             storage.setItem(
                 LOCAL_STORAGE_KEYS.updates,
                 JSON.stringify({
-                    items: payload.items,
-                    nextAfter: payload.nextAfter ?? null,
+                    items,
+                    nextAfter,
+                    etag,
                 }),
             );
         } catch (error) {
@@ -256,6 +265,7 @@
     }
 
     function clearUpdatesCache() {
+        state.updatesEtag = null;
         const storage = getLocalStorage();
         if (!storage) {
             return;
@@ -584,7 +594,13 @@
     }
 
     async function fetchJson(url, options = {}) {
-        const { logRequest = true, headers: providedHeaders, ...rest } = options || {};
+        const {
+            logRequest = true,
+            headers: providedHeaders,
+            onNotModified,
+            onResponse,
+            ...rest
+        } = options || {};
         if (logRequest) {
             logFetch(url);
         }
@@ -600,9 +616,24 @@
         if (status === 504) {
             throw new HttpError('Server timed out (504). Please try again later.', { status, response });
         }
+        if (status === 304) {
+            if (typeof onResponse === 'function') {
+                onResponse(response, null);
+            }
+            if (typeof onNotModified === 'function') {
+                const fallback = await onNotModified({ response });
+                if (fallback !== undefined) {
+                    return fallback;
+                }
+            }
+            return null;
+        }
         const contentType = (response.headers && response.headers.get('content-type')) || '';
         const isJson = contentType.toLowerCase().includes('application/json');
-        if (response.ok && !isJson && (response.status === 204 || response.status === 205 || response.status === 304)) {
+        if (response.ok && !isJson && (response.status === 204 || response.status === 205)) {
+            if (typeof onResponse === 'function') {
+                onResponse(response, null);
+            }
             return null;
         }
         if (!isJson) {
@@ -621,6 +652,9 @@
             payload = await response.json();
         } catch (err) {
             throw new HttpError('Invalid JSON response.', { status, response });
+        }
+        if (typeof onResponse === 'function') {
+            onResponse(response, payload);
         }
         if (response.ok) {
             return payload;
@@ -2406,10 +2440,46 @@
         }
         const url = `/api/updates?${params.toString()}`;
         logFetch(url);
-        const payload = await fetchJson(url, { logRequest: false });
+        const requestHeaders = {};
+        if (typeof state.updatesEtag === 'string' && state.updatesEtag.trim()) {
+            requestHeaders['If-None-Match'] = state.updatesEtag;
+        }
+        let responseEtag = null;
+        const payload = await fetchJson(url, {
+            logRequest: false,
+            headers: requestHeaders,
+            onResponse: (response) => {
+                if (response && response.headers) {
+                    const headerValue = response.headers.get('etag');
+                    if (headerValue && headerValue.trim()) {
+                        responseEtag = headerValue.trim();
+                    }
+                }
+            },
+            onNotModified: () => {
+                const cached = loadCachedUpdates();
+                if (cached && Array.isArray(cached.items)) {
+                    if (!responseEtag) {
+                        responseEtag = cached.etag && cached.etag.trim() ? cached.etag.trim() : state.updatesEtag;
+                    }
+                    return {
+                        items: cached.items.slice(),
+                        nextAfter: cached.nextAfter ?? null,
+                    };
+                }
+                if (!responseEtag && state.updatesEtag) {
+                    responseEtag = state.updatesEtag;
+                }
+                return {
+                    items: Array.isArray(state.updates) ? state.updates.slice() : [],
+                    nextAfter: state.nextAfter ?? null,
+                };
+            },
+        });
         if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
             throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
         }
+        state.updatesEtag = responseEtag && responseEtag.trim() ? responseEtag.trim() : null;
         const nextAfterRaw = payload.nextAfter ?? payload.next_after ?? null;
         const nextAfter = normalizeNextAfter(nextAfterRaw);
         const hasMore =
@@ -2426,6 +2496,7 @@
             limit: payload.limit,
             total: payload.total,
             hasMore,
+            etag: state.updatesEtag,
         };
     }
 
@@ -2535,6 +2606,7 @@
             state.updateMap = new Map();
             state.coverCache = new Map();
             state.nextAfter = null;
+            state.updatesEtag = null;
             if (elements.tableBody) {
                 elements.tableBody.innerHTML = '';
             }
@@ -2554,6 +2626,7 @@
         saveUpdatesCache({
             items: state.updates,
             nextAfter: state.nextAfter,
+            etag: state.updatesEtag,
         });
         const latest = getLatestUpdatedAt(state.updates);
         if (latest) {
@@ -2565,14 +2638,16 @@
 
     function restoreUpdatesFromCache() {
         const cached = loadCachedUpdates();
-        if (!cached || !Array.isArray(cached.items) || !cached.items.length) {
+        if (!cached) {
+            state.updatesEtag = null;
             return { hasItems: false, latestUpdatedAt: null };
         }
-        state.updates = cached.items.slice();
+        state.updatesEtag = typeof cached.etag === 'string' && cached.etag ? cached.etag : null;
+        state.updates = Array.isArray(cached.items) ? cached.items.slice() : [];
         state.nextAfter = normalizeNextAfter(cached.nextAfter);
         rebuildUpdatesState({ resetPage: true });
         return {
-            hasItems: true,
+            hasItems: state.updates.length > 0,
             latestUpdatedAt: getLatestUpdatedAt(state.updates),
         };
     }
