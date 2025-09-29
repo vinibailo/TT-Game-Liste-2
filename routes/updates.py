@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Mapping
 
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
+from werkzeug.routing import BaseConverter
 
 from updates.service import refresh_igdb_cache
 from igdb.cache import get_cache_status as cache_get_status
@@ -18,6 +19,23 @@ from routes.api_utils import (
     handle_api_errors,
 )
 updates_blueprint = Blueprint("updates", __name__)
+
+
+class HexJobIdConverter(BaseConverter):
+    """Route converter for 32-character hexadecimal job identifiers."""
+
+    regex = r"[0-9a-fA-F]{32}"
+
+    def to_python(self, value: str) -> str:
+        return str(value or "").strip().lower()
+
+    def to_url(self, value: str) -> str:
+        return super().to_url(str(value or "").strip().lower())
+
+
+@updates_blueprint.record
+def _register_hex_converter(setup_state: Any) -> None:
+    setup_state.app.url_map.converters["hexjob"] = HexJobIdConverter
 
 _context: dict[str, Any] = {}
 
@@ -616,7 +634,7 @@ def api_updates_job_list():
     return jsonify({'jobs': job_manager.list_jobs()})
 
 
-@updates_blueprint.route('/api/updates/jobs/<job_id>', methods=['GET'])
+@updates_blueprint.route('/api/updates/<hexjob:job_id>', methods=['GET'])
 @handle_api_errors
 def api_updates_job_detail(job_id: str):
     job_manager = _ctx('job_manager')
@@ -626,17 +644,21 @@ def api_updates_job_detail(job_id: str):
     return jsonify(job)
 
 
+@updates_blueprint.route('/api/updates/jobs/<job_id>', methods=['GET'])
+@handle_api_errors
+def api_updates_job_detail_legacy(job_id: str):
+    """Backward compatible job detail endpoint."""
+
+    normalized = str(job_id or '').strip().lower()
+    if len(normalized) == 33 and normalized.endswith('s'):
+        normalized = normalized[:-1]
+    return api_updates_job_detail(normalized)
+
+
 @updates_blueprint.route('/api/updates', methods=['GET'])
 @handle_api_errors
 def api_updates_list():
     fetch_cached_updates = _ctx('fetch_cached_updates')
-    try:
-        offset = int(request.args.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    if offset < 0:
-        offset = 0
-
     try:
         limit = int(request.args.get('limit', 100))
     except (TypeError, ValueError):
@@ -645,17 +667,21 @@ def api_updates_list():
         limit = 100
     limit = min(limit, 500)
 
-    items, total, normalized_offset = fetch_cached_updates(
-        offset=offset, limit=limit
+    cursor = request.args.get('cursor')
+    items, total, next_cursor, has_more = fetch_cached_updates(
+        cursor=cursor, limit=limit
     )
-    return jsonify(
-        {
-            'items': items,
-            'total': total,
-            'offset': normalized_offset,
-            'limit': limit,
-        }
-    )
+    payload: dict[str, Any] = {
+        'items': items,
+        'total': total,
+        'limit': limit,
+        'has_more': has_more,
+    }
+    if cursor:
+        payload['cursor'] = cursor
+    if next_cursor:
+        payload['next_cursor'] = next_cursor
+    return jsonify(payload)
 
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])

@@ -341,8 +341,9 @@ def test_refresh_creates_update_records(tmp_path):
     assert listing.status_code == 200
     listing_data = listing.get_json()
     assert listing_data['total'] == 1
-    assert listing_data['offset'] == 0
     assert listing_data['limit'] == 100
+    assert listing_data['has_more'] is False
+    assert 'next_cursor' not in listing_data
     assert listing_data['items']
     entry = listing_data['items'][0]
     assert entry['processed_game_id'] == 1
@@ -408,7 +409,7 @@ def test_updates_list_includes_duplicates(tmp_path):
     assert duplicate_entry['cover_available'] is False
 
 
-def test_updates_list_respects_offset_and_limit(tmp_path):
+def test_updates_list_respects_cursor_pagination(tmp_path):
     app_module = load_app(tmp_path)
     clear_processed_tables(app_module)
 
@@ -433,21 +434,33 @@ def test_updates_list_respects_offset_and_limit(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
-    first_page = client.get('/api/updates?offset=1&limit=1')
+    first_page = client.get('/api/updates?limit=1')
     assert first_page.status_code == 200
     payload = first_page.get_json()
     assert payload['total'] == 3
-    assert payload['offset'] == 1
     assert payload['limit'] == 1
     assert len(payload['items']) == 1
-    assert payload['items'][0]['processed_game_id'] == 2
+    assert payload['has_more'] is True
+    first_id = payload['items'][0]['processed_game_id']
+    assert first_id in {1, 2, 3}
+    assert payload['next_cursor']
 
-    overflow_page = client.get('/api/updates?offset=10&limit=2')
-    assert overflow_page.status_code == 200
-    overflow_data = overflow_page.get_json()
-    assert overflow_data['offset'] == 3
-    assert overflow_data['total'] == 3
-    assert overflow_data['items'] == []
+    second_page = client.get(f"/api/updates?cursor={payload['next_cursor']}&limit=1")
+    assert second_page.status_code == 200
+    second_data = second_page.get_json()
+    assert second_data['limit'] == 1
+    assert len(second_data['items']) == 1
+    assert second_data['items'][0]['processed_game_id'] != first_id
+    assert second_data['has_more'] is True
+    assert second_data['next_cursor']
+
+    third_page = client.get(f"/api/updates?cursor={second_data['next_cursor']}&limit=1")
+    assert third_page.status_code == 200
+    third_data = third_page.get_json()
+    assert len(third_data['items']) == 1
+    remaining_id = third_data['items'][0]['processed_game_id']
+    assert remaining_id not in {first_id, second_data['items'][0]['processed_game_id']}
+    assert third_data['has_more'] is False
 
 
 def test_cache_refresh_creates_entries(tmp_path):
