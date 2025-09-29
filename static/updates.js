@@ -32,6 +32,7 @@
         pageSize: resolvedPageSize,
         pageCount: 1,
         totalAvailable: 0,
+        nextAfter: null,
     };
 
     const JOB_TYPES = Object.freeze({
@@ -2240,11 +2241,14 @@
         }
     }
 
-    async function fetchUpdatesBatch(cursor = null, limit = DEFAULT_UPDATES_LIMIT) {
+    async function fetchUpdatesBatch(after = null, limit = DEFAULT_UPDATES_LIMIT) {
         const resolvedLimit = resolveLimit(limit, DEFAULT_UPDATES_LIMIT);
         const params = new URLSearchParams({ limit: String(resolvedLimit) });
-        if (cursor) {
-            params.set('cursor', cursor);
+        if (after !== null && after !== undefined) {
+            const parsedAfter = Number.parseInt(after, 10);
+            if (!Number.isNaN(parsedAfter) && parsedAfter >= 0) {
+                params.set('after', String(parsedAfter));
+            }
         }
         const url = `/api/updates?${params.toString()}`;
         logFetch(url);
@@ -2252,108 +2256,113 @@
         if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
             throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
         }
-        const total = toNonNegativeInt(
-            payload.total ?? payload.total_available ?? payload.count ?? payload.total_items,
-            payload.items.length,
-        );
-        const nextCursor = typeof payload.next_cursor === 'string' && payload.next_cursor
-            ? payload.next_cursor
-            : null;
+        const nextAfterRaw = payload.nextAfter ?? payload.next_after ?? null;
+        let nextAfter = null;
+        if (typeof nextAfterRaw === 'number' && Number.isFinite(nextAfterRaw)) {
+            nextAfter = Math.max(Math.trunc(nextAfterRaw), 0);
+        } else if (typeof nextAfterRaw === 'string' && nextAfterRaw.trim()) {
+            const parsed = Number.parseInt(nextAfterRaw, 10);
+            if (!Number.isNaN(parsed) && parsed >= 0) {
+                nextAfter = parsed;
+            }
+        }
         return {
             items: payload.items,
-            total,
-            nextCursor,
-            hasMore: Boolean(payload.has_more) || Boolean(nextCursor),
+            nextAfter,
         };
     }
 
-    async function loadUpdates() {
+    function rebuildUpdatesState({ resetPage = true } = {}) {
+        const previousCoverCache = state.coverCache instanceof Map ? state.coverCache : new Map();
+        const newCoverCache = new Map();
+        const mapEntries = [];
+        state.updates.forEach((item) => {
+            const normalizedId = normalizeId(item && item.processed_game_id);
+            const key = normalizedId === null ? item && item.processed_game_id : normalizedId;
+            if (key !== undefined && key !== null) {
+                mapEntries.push([key, item]);
+            }
+            if (normalizedId === null) {
+                return;
+            }
+            if (item.cover) {
+                newCoverCache.set(normalizedId, item.cover);
+                return;
+            }
+            if (previousCoverCache.has(normalizedId)) {
+                const cached = previousCoverCache.get(normalizedId);
+                if (cached) {
+                    item.cover = cached;
+                }
+                newCoverCache.set(normalizedId, cached);
+                return;
+            }
+            if (item.cover_available === false) {
+                newCoverCache.set(normalizedId, null);
+            }
+        });
+        state.coverCache = newCoverCache;
+        state.updateMap = new Map(mapEntries);
+        state.totalAvailable = state.updates.length;
+        if (resetPage) {
+            state.page = 1;
+        }
+        applyFilters({ resetPage });
+        updateSortIndicators();
+    }
+
+    async function loadUpdates({ append = false } = {}) {
         setLoading(true);
         try {
-            const aggregated = [];
-            const seenIds = new Set();
-            let total = 0;
-            let cursor = null;
-            let batchLimit = state.pageSize || DEFAULT_UPDATES_LIMIT;
-            const visitedCursors = new Set();
-            let iteration = 0;
-
-            while (true) {
-                if (cursor && visitedCursors.has(cursor)) {
-                    break;
-                }
-                const normalizedLimit = resolveLimit(batchLimit, DEFAULT_UPDATES_LIMIT);
-                const payload = await fetchUpdatesBatch(cursor, normalizedLimit);
-                const items = Array.isArray(payload.items) ? payload.items : [];
-                const normalizedTotal = toNonNegativeInt(payload.total, items.length);
-                if (normalizedTotal > total) {
-                    total = normalizedTotal;
-                }
-                items.forEach((item) => {
-                    if (!item) {
-                        return;
-                    }
-                    const key = item.processed_game_id;
-                    if (key === undefined || key === null) {
-                        aggregated.push(item);
-                        return;
-                    }
-                    if (seenIds.has(key)) {
-                        return;
-                    }
-                    seenIds.add(key);
-                    aggregated.push(item);
-                });
-
-                const nextCursor = payload.nextCursor;
-                if (!payload.hasMore || !nextCursor || items.length === 0) {
-                    break;
-                }
-                if (cursor) {
-                    visitedCursors.add(cursor);
-                }
-                cursor = nextCursor;
-                batchLimit = normalizedLimit;
-                iteration += 1;
-                if (iteration > 50) {
-                    console.warn('Aborting updates fetch due to excessive pagination iterations.');
-                    break;
-                }
+            if (!append) {
+                state.updates = [];
+                state.nextAfter = null;
             }
 
-            state.updates = aggregated;
-            state.totalAvailable = total || aggregated.length;
-            const previousCoverCache = state.coverCache instanceof Map ? state.coverCache : new Map();
-            const newCoverCache = new Map();
-            const mapEntries = [];
+            const limit = state.pageSize || DEFAULT_UPDATES_LIMIT;
+            const after = append ? state.nextAfter : null;
+            const payload = await fetchUpdatesBatch(after, limit);
+            const items = Array.isArray(payload.items) ? payload.items : [];
+
+            const existingIds = new Set();
             state.updates.forEach((item) => {
-                const normalizedId = normalizeId(item.processed_game_id);
-                const key = normalizedId === null ? item.processed_game_id : normalizedId;
-                mapEntries.push([key, item]);
-                if (normalizedId === null) {
+                if (!item) {
                     return;
                 }
-                if (item.cover) {
-                    newCoverCache.set(normalizedId, item.cover);
-                    return;
-                }
-                if (previousCoverCache.has(normalizedId)) {
-                    const cached = previousCoverCache.get(normalizedId);
-                    if (cached) {
-                        item.cover = cached;
-                    }
-                    newCoverCache.set(normalizedId, cached);
-                    return;
-                }
-                if (item.cover_available === false) {
-                    newCoverCache.set(normalizedId, null);
+                const rowId = normalizeId(item.id ?? item.row_id ?? item.processed_game_id);
+                if (rowId !== null) {
+                    existingIds.add(rowId);
                 }
             });
-            state.coverCache = newCoverCache;
-            state.updateMap = new Map(mapEntries);
-            state.page = 1;
-            applyFilters({ resetPage: true });
-            updateSortIndicators();
+
+            items.forEach((item) => {
+                if (!item) {
+                    return;
+                }
+                const rowId = normalizeId(item.id ?? item.row_id ?? item.processed_game_id);
+                if (rowId !== null && existingIds.has(rowId)) {
+                    return;
+                }
+                if (rowId !== null && !Object.prototype.hasOwnProperty.call(item, 'id')) {
+                    item.id = rowId;
+                }
+                if (rowId !== null) {
+                    existingIds.add(rowId);
+                }
+                state.updates.push(item);
+            });
+
+            state.nextAfter = payload.nextAfter ?? null;
+            if (typeof state.nextAfter === 'number' && Number.isFinite(state.nextAfter)) {
+                state.nextAfter = Math.max(Math.trunc(state.nextAfter), 0);
+            } else if (typeof state.nextAfter === 'string' && state.nextAfter.trim()) {
+                const parsedAfter = Number.parseInt(state.nextAfter, 10);
+                state.nextAfter = Number.isNaN(parsedAfter) ? null : Math.max(parsedAfter, 0);
+            } else {
+                state.nextAfter = null;
+            }
+
+            rebuildUpdatesState({ resetPage: !append });
         } catch (error) {
             console.error(error);
             setLoading(false);
@@ -2366,6 +2375,7 @@
             state.totalAvailable = 0;
             state.updateMap = new Map();
             state.coverCache = new Map();
+            state.nextAfter = null;
             if (elements.tableBody) {
                 elements.tableBody.innerHTML = '';
             }
