@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 
 from updates.service import refresh_igdb_cache
+from igdb.cache import get_cache_status as cache_get_status
 
 from jobs.manager import JOB_STATUS_ERROR, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 from routes.api_utils import (
@@ -105,6 +106,7 @@ def api_igdb_cache_refresh():
 
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
+        coerce_int = _ctx('_coerce_int')
         exchange_helper = _ctx('exchange_twitch_credentials')
         try:
             helper_result = exchange_helper() if callable(exchange_helper) else exchange_helper
@@ -148,7 +150,46 @@ def api_igdb_cache_refresh():
             )
         except RuntimeError as exc:
             raise UpstreamServiceError(str(exc)) from exc
-        return jsonify(result)
+        payload: dict[str, Any] = dict(result) if isinstance(result, Mapping) else {'status': 'error'}
+
+        status_value = str(payload.get('status') or '').lower()
+        inserted = coerce_int(payload.get('inserted')) or 0
+        updated = coerce_int(payload.get('updated')) or 0
+        batch_count = coerce_int(payload.get('batch_count')) or 0
+        done = bool(payload.get('done'))
+        if status_value == 'ok' and not done and batch_count < limit:
+            done = True
+            payload['done'] = True
+
+        message: str
+        toast_type = 'info'
+        if status_value != 'ok':
+            error_message = str(payload.get('error') or 'Unknown error').strip()
+            if not error_message:
+                error_message = 'Unknown error'
+            message = f'IGDB cache refresh failed: {error_message}'
+            toast_type = 'error'
+        else:
+            changed = inserted + updated
+            if changed > 0:
+                suffix = 'record' if changed == 1 else 'records'
+                message = f'Cached {changed} IGDB {suffix}.'
+                toast_type = 'success'
+            elif done:
+                message = 'IGDB cache is already up to date.'
+            else:
+                message = 'Refreshing IGDB cache…'
+
+        payload.pop('batch_count', None)
+
+        payload.update(
+            message=message,
+            toast_type=toast_type,
+            offset=offset,
+            limit=limit,
+            done=done,
+        )
+        return jsonify(payload)
 
     job, created = job_manager.enqueue_job(
         'refresh_igdb_cache',
@@ -169,6 +210,66 @@ def api_igdb_cache_refresh():
         )
     status_code = 202 if created else 200
     return response, status_code
+
+
+@updates_blueprint.route('/api/updates/cache-status', methods=['GET'])
+@handle_api_errors
+def api_updates_cache_status():
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+    job_manager = _ctx('job_manager')
+    coerce_int = _ctx('_coerce_int')
+
+    with db_lock:
+        conn = get_db()
+        cache_status = cache_get_status(conn)
+
+    payload: dict[str, Any] = {
+        'cached_entries': coerce_int(cache_status.get('cached_entries')) or 0,
+        'remote_total': coerce_int(cache_status.get('remote_total')),
+        'last_synced_at': cache_status.get('last_synced_at'),
+        'last_refresh': None,
+    }
+
+    job_history = job_manager.list_jobs('refresh_updates')
+    last_job: Mapping[str, Any] | None = None
+    last_summary: Mapping[str, Any] | None = None
+    for job in reversed(job_history):
+        if not isinstance(job, Mapping):
+            continue
+        result = job.get('result')
+        if isinstance(result, Mapping):
+            summary = result.get('cache_summary')
+            if isinstance(summary, Mapping):
+                last_job = job
+                last_summary = summary
+                break
+
+    if last_summary is not None:
+        inserted = coerce_int(last_summary.get('inserted')) or 0
+        updated = coerce_int(last_summary.get('updated')) or 0
+        unchanged = coerce_int(last_summary.get('unchanged')) or 0
+        total = last_summary.get('total')
+        processed = last_summary.get('processed')
+        message = last_summary.get('message') if isinstance(last_summary.get('message'), str) else None
+        finished_at = None
+        if isinstance(last_summary.get('finished_at'), str):
+            finished_at = last_summary.get('finished_at')
+        elif isinstance(last_job, Mapping):
+            finished_at = last_job.get('finished_at') or last_job.get('updated_at')
+
+        payload['last_refresh'] = {
+            'inserted': inserted,
+            'updated': updated,
+            'unchanged': unchanged,
+            'total': coerce_int(total),
+            'processed': coerce_int(processed),
+            'message': message,
+            'finished_at': finished_at,
+            'started_at': last_job.get('started_at') if isinstance(last_job, Mapping) else None,
+        }
+
+    return jsonify(payload)
 
 
 @updates_blueprint.route('/api/updates/status', methods=['GET'])

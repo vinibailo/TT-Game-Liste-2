@@ -24,6 +24,9 @@
         refreshObservedActive: false,
         refreshPendingPolls: 0,
         waitingForRefreshStart: false,
+        taskEntries: new Map(),
+        taskVisibility: new Map(),
+        cacheStatus: null,
         page: 1,
         pageSize: resolvedPageSize,
         pageCount: 1,
@@ -40,6 +43,40 @@
     const JOB_POLL_INTERVAL = 2000;
     const REFRESH_STATUS_INTERVAL = 1000;
     const REFRESH_PENDING_MAX_POLLS = 5;
+
+    const TASK_CONFIG = {
+        [JOB_TYPES.refresh]: {
+            name: 'Updating IGDB cache',
+            icon: 'refresh',
+            defaultMessage: 'Updating IGDB cache…',
+        },
+        [JOB_TYPES.compare]: {
+            name: 'Comparing catalog entries',
+            icon: 'compare_arrows',
+            defaultMessage: 'Comparing processed games…',
+        },
+        [JOB_TYPES.fix]: {
+            name: 'Fixing IGDB names',
+            icon: 'spellcheck',
+            defaultMessage: 'Fixing IGDB names…',
+        },
+        [JOB_TYPES.dedupe]: {
+            name: 'Removing duplicates',
+            icon: 'layers_clear',
+            defaultMessage: 'Removing duplicates…',
+        },
+    };
+
+    const TASK_ORDER = [
+        JOB_TYPES.refresh,
+        JOB_TYPES.compare,
+        JOB_TYPES.fix,
+        JOB_TYPES.dedupe,
+    ];
+
+    Object.values(JOB_TYPES).forEach((jobType) => {
+        state.taskVisibility.set(jobType, false);
+    });
 
     const placeholderImage = '/no-image.jpg';
     const COVER_FETCH_CONCURRENCY = 4;
@@ -66,27 +103,19 @@
         statusLabel: document.querySelector('[data-refresh-status]'),
         sortButtons: Array.from(document.querySelectorAll('.sort-button[data-sort]')),
         fixButton: document.querySelector('[data-fix-names]'),
-        fixProgress: document.querySelector('[data-fix-progress]'),
-        fixCount: document.querySelector('[data-fix-count]'),
-        fixPercent: document.querySelector('[data-fix-percent]'),
-        fixBar: document.querySelector('[data-fix-bar]'),
-        fixMessage: document.querySelector('[data-fix-message]'),
         dedupeButton: document.querySelector('[data-remove-duplicates]'),
-        dedupeProgress: document.querySelector('[data-dedupe-progress]'),
-        dedupeCount: document.querySelector('[data-dedupe-count]'),
-        dedupePercent: document.querySelector('[data-dedupe-percent]'),
-        dedupeBar: document.querySelector('[data-dedupe-bar]'),
-        dedupeMessage: document.querySelector('[data-dedupe-message]'),
-        refreshProgress: document.querySelector('[data-refresh-progress]'),
-        refreshCount: document.querySelector('[data-refresh-count]'),
-        refreshPercent: document.querySelector('[data-refresh-percent]'),
-        refreshBar: document.querySelector('[data-refresh-bar]'),
-        refreshMessage: document.querySelector('[data-refresh-message]'),
-        compareProgress: document.querySelector('[data-compare-progress]'),
-        compareCount: document.querySelector('[data-compare-count]'),
-        comparePercent: document.querySelector('[data-compare-percent]'),
-        compareBar: document.querySelector('[data-compare-bar]'),
-        compareMessage: document.querySelector('[data-compare-message]'),
+        taskBanner: document.querySelector('[data-task-banner]'),
+        taskList: document.querySelector('[data-task-list]'),
+        cacheStatusMessage: document.querySelector('[data-cache-status-message]'),
+        cacheCount: document.querySelector('[data-cache-count]'),
+        cacheSynced: document.querySelector('[data-cache-synced]'),
+        cacheRemote: document.querySelector('[data-cache-remote]'),
+        cacheSummary: document.querySelector('[data-cache-summary]'),
+        cacheInserted: document.querySelector('[data-cache-inserted]'),
+        cacheUpdated: document.querySelector('[data-cache-updated]'),
+        cacheUnchanged: document.querySelector('[data-cache-unchanged]'),
+        cacheRefreshed: document.querySelector('[data-cache-refreshed]'),
+        cacheRefreshValue: document.querySelector('[data-cache-refresh]'),
         pagination: document.querySelector('[data-pagination]'),
         paginationInfo: document.querySelector('[data-page-info]'),
         paginationPrev: document.querySelector('[data-page-prev]'),
@@ -111,13 +140,6 @@
     let toastTimer = null;
     let lastFocusedElement = null;
 
-    const defaultProgressMessages = {
-        refresh: elements.refreshMessage ? elements.refreshMessage.textContent : '',
-        compare: elements.compareMessage ? elements.compareMessage.textContent : '',
-        fix: elements.fixMessage ? elements.fixMessage.textContent : '',
-        dedupe: elements.dedupeMessage ? elements.dedupeMessage.textContent : '',
-    };
-
     function showToast(message, type = 'success') {
         if (!toast) {
             return;
@@ -133,12 +155,169 @@
         }, 3200);
     }
 
-    function setProgressMessage(target, message, fallback = '') {
-        if (!target) {
+    function clampPercent(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+            return null;
+        }
+        if (number <= 0) {
+            return 0;
+        }
+        if (number >= 100) {
+            return 100;
+        }
+        return number;
+    }
+
+    function formatPercentLabel(value) {
+        if (value === null || value === undefined || Number.isNaN(value)) {
+            return '…';
+        }
+        const normalized = clampPercent(value);
+        if (normalized === null) {
+            return '…';
+        }
+        return normalized % 1 === 0
+            ? `${normalized.toFixed(0)}%`
+            : `${normalized.toFixed(1)}%`;
+    }
+
+    function showTask(jobType, overrides = {}) {
+        if (!jobType || !TASK_CONFIG[jobType]) {
             return;
         }
-        const text = typeof message === 'string' && message.trim() ? message.trim() : fallback;
-        target.textContent = text;
+        state.taskVisibility.set(jobType, true);
+        const config = TASK_CONFIG[jobType];
+        const percentValue = overrides.percent !== undefined && overrides.percent !== null
+            ? clampPercent(overrides.percent)
+            : null;
+        const messageValue = typeof overrides.message === 'string' && overrides.message.trim()
+            ? overrides.message.trim()
+            : config.defaultMessage;
+        state.taskEntries.set(jobType, {
+            name: config.name,
+            icon: config.icon,
+            message: messageValue,
+            percent: percentValue,
+        });
+        renderTaskBanner();
+    }
+
+    function updateTask(jobType, overrides = {}) {
+        if (!jobType || !TASK_CONFIG[jobType]) {
+            return;
+        }
+        if (!state.taskVisibility.get(jobType)) {
+            return;
+        }
+        const existing = state.taskEntries.get(jobType) || {};
+        const config = TASK_CONFIG[jobType];
+        const percentValue = overrides.percent !== undefined && overrides.percent !== null
+            ? clampPercent(overrides.percent)
+            : existing.percent ?? null;
+        const messageValue = typeof overrides.message === 'string' && overrides.message.trim()
+            ? overrides.message.trim()
+            : existing.message || config.defaultMessage;
+        state.taskEntries.set(jobType, {
+            name: config.name,
+            icon: config.icon,
+            message: messageValue,
+            percent: percentValue,
+        });
+        renderTaskBanner();
+    }
+
+    function hideTask(jobType) {
+        if (!jobType) {
+            return;
+        }
+        state.taskVisibility.set(jobType, false);
+        state.taskEntries.delete(jobType);
+        renderTaskBanner();
+    }
+
+    function renderTaskBanner() {
+        const container = elements.taskBanner;
+        const list = elements.taskList;
+        if (!container || !list) {
+            return;
+        }
+        list.innerHTML = '';
+        const entries = [];
+        TASK_ORDER.forEach((jobType) => {
+            if (!state.taskEntries.has(jobType)) {
+                return;
+            }
+            const entry = state.taskEntries.get(jobType);
+            if (!entry) {
+                return;
+            }
+            entries.push({ type: jobType, ...entry });
+        });
+        if (!entries.length) {
+            container.hidden = true;
+            container.setAttribute('aria-hidden', 'true');
+            return;
+        }
+        const fragment = document.createDocumentFragment();
+        entries.forEach((entry) => {
+            const item = document.createElement('li');
+            item.className = 'task-banner-item';
+            const main = document.createElement('div');
+            main.className = 'task-banner-item-main';
+            const icon = document.createElement('span');
+            icon.className = 'task-banner-item-icon material-symbols-rounded';
+            icon.textContent = entry.icon;
+            icon.setAttribute('aria-hidden', 'true');
+            const text = document.createElement('div');
+            text.className = 'task-banner-item-text';
+            const name = document.createElement('span');
+            name.className = 'task-banner-item-name';
+            name.textContent = entry.name;
+            const message = document.createElement('span');
+            message.className = 'task-banner-item-message';
+            message.textContent = entry.message || TASK_CONFIG[entry.type].defaultMessage;
+            text.appendChild(name);
+            text.appendChild(message);
+            main.appendChild(icon);
+            main.appendChild(text);
+            item.appendChild(main);
+            const progress = document.createElement('span');
+            progress.className = 'task-banner-item-progress';
+            progress.textContent = formatPercentLabel(entry.percent);
+            item.appendChild(progress);
+            fragment.appendChild(item);
+        });
+        list.appendChild(fragment);
+        container.hidden = false;
+        container.removeAttribute('aria-hidden');
+    }
+
+    function formatCount(value, fallback = '—') {
+        if (value === null || value === undefined) {
+            return fallback;
+        }
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+            return fallback;
+        }
+        return Math.max(0, Math.round(number)).toLocaleString();
+    }
+
+    function buildProgressMessage(prefix, processed, total, noun, fallback) {
+        const processedValue = toNonNegativeInt(processed, 0);
+        const totalNumber = Number(total);
+        const totalValue = Number.isFinite(totalNumber)
+            ? Math.max(Math.round(totalNumber), 0)
+            : 0;
+        const nounSuffix = noun ? ` ${noun}` : '';
+        if (totalValue > 0) {
+            return `${prefix} ${formatCount(processedValue)} of ${formatCount(totalValue)}${nounSuffix}`;
+        }
+        if (processedValue > 0) {
+            return `${prefix} ${formatCount(processedValue)}${nounSuffix}`;
+        }
+        return fallback;
     }
 
     function toNonNegativeInt(value, fallback = 0) {
@@ -269,11 +448,12 @@
         const queuedNumber = Number(status.queued);
         const processed = Number.isFinite(processedNumber) ? Math.max(Math.round(processedNumber), 0) : 0;
         const queued = Number.isFinite(queuedNumber) ? Math.max(Math.round(queuedNumber), 0) : 0;
+        const total = queued > 0 ? processed + queued : processed;
         const waitingForStart = state.waitingForRefreshStart;
 
         state.refreshPhase = phase;
         const displayPhase = phase === 'idle' && waitingForStart ? 'pending' : phase;
-        updateRefreshProgress(processed, queued, displayPhase);
+        updateRefreshProgress(processed, total, displayPhase);
 
         if (phase !== 'idle') {
             state.refreshObservedActive = true;
@@ -295,6 +475,7 @@
             setRefreshProgressVisible(false);
             state.detailCache.clear();
             loadUpdates();
+            loadCacheStatus();
             return;
         }
 
@@ -466,6 +647,136 @@
             elements.statusLabel.textContent = `Last refreshed ${formatDate(latest.toISOString())}`;
         } else {
             elements.statusLabel.textContent = '';
+        }
+    }
+
+    function applyCacheStatus(status, options = {}) {
+        const data = status && typeof status === 'object' ? status : null;
+        state.cacheStatus = data;
+        const errorMessage = options && typeof options.error === 'string' && options.error.trim()
+            ? options.error.trim()
+            : '';
+
+        if (!data) {
+            if (elements.cacheStatusMessage) {
+                elements.cacheStatusMessage.textContent = errorMessage || 'Cache status unavailable.';
+            }
+            if (elements.cacheCount) {
+                elements.cacheCount.textContent = '—';
+            }
+            if (elements.cacheSynced) {
+                elements.cacheSynced.textContent = '—';
+            }
+            if (elements.cacheRemote) {
+                elements.cacheRemote.textContent = '—';
+            }
+            if (elements.cacheSummary) {
+                elements.cacheSummary.hidden = true;
+            }
+            if (elements.cacheRefreshed) {
+                elements.cacheRefreshed.hidden = true;
+            }
+            if (elements.cacheRefreshValue) {
+                elements.cacheRefreshValue.textContent = '—';
+            }
+            if (elements.cacheInserted) {
+                elements.cacheInserted.textContent = '0';
+            }
+            if (elements.cacheUpdated) {
+                elements.cacheUpdated.textContent = '0';
+            }
+            if (elements.cacheUnchanged) {
+                elements.cacheUnchanged.textContent = '0';
+            }
+            return;
+        }
+
+        const cachedEntries = data.cached_entries;
+        if (elements.cacheCount) {
+            elements.cacheCount.textContent = formatCount(cachedEntries, '0');
+        }
+
+        const remoteNumber = Number(data.remote_total);
+        const remoteTotal = Number.isFinite(remoteNumber) ? Math.max(Math.round(remoteNumber), 0) : null;
+        if (elements.cacheRemote) {
+            elements.cacheRemote.textContent = remoteTotal !== null ? formatCount(remoteTotal, '—') : '—';
+        }
+
+        const syncedText = data.last_synced_at ? formatDate(data.last_synced_at) : '—';
+        if (elements.cacheSynced) {
+            elements.cacheSynced.textContent = syncedText;
+        }
+
+        const lastRefresh = data.last_refresh && typeof data.last_refresh === 'object'
+            ? data.last_refresh
+            : null;
+        if (elements.cacheSummary) {
+            const hasSummary = Boolean(lastRefresh);
+            elements.cacheSummary.hidden = !hasSummary;
+            if (hasSummary) {
+                if (elements.cacheInserted) {
+                    elements.cacheInserted.textContent = formatCount(lastRefresh.inserted, '0');
+                }
+                if (elements.cacheUpdated) {
+                    elements.cacheUpdated.textContent = formatCount(lastRefresh.updated, '0');
+                }
+                if (elements.cacheUnchanged) {
+                    elements.cacheUnchanged.textContent = formatCount(lastRefresh.unchanged, '0');
+                }
+            }
+        }
+
+        if (elements.cacheRefreshed) {
+            const finishedAt = lastRefresh && (lastRefresh.finished_at || lastRefresh.started_at);
+            if (finishedAt) {
+                elements.cacheRefreshed.hidden = false;
+                if (elements.cacheRefreshValue) {
+                    elements.cacheRefreshValue.textContent = formatDate(finishedAt);
+                }
+            } else {
+                elements.cacheRefreshed.hidden = true;
+                if (elements.cacheRefreshValue) {
+                    elements.cacheRefreshValue.textContent = '—';
+                }
+            }
+        }
+
+        let summaryMessage = '';
+        if (lastRefresh && typeof lastRefresh.message === 'string' && lastRefresh.message.trim()) {
+            summaryMessage = lastRefresh.message.trim();
+        } else if (remoteTotal !== null && Number.isFinite(remoteTotal)) {
+            const cachedValue = Number.isFinite(Number(cachedEntries))
+                ? toNonNegativeInt(cachedEntries, 0)
+                : null;
+            if (cachedValue !== null) {
+                summaryMessage = cachedValue >= remoteTotal
+                    ? 'Cache is up to date with IGDB.'
+                    : `Cached ${formatCount(cachedValue)} of ${formatCount(remoteTotal)} IGDB records.`;
+            } else {
+                summaryMessage = `IGDB reports ${formatCount(remoteTotal)} records.`;
+            }
+        } else if (Number.isFinite(Number(cachedEntries))) {
+            const cachedValue = toNonNegativeInt(cachedEntries, 0);
+            summaryMessage = `Cached ${formatCount(cachedValue)} IGDB record${cachedValue === 1 ? '' : 's'}.`;
+        } else {
+            summaryMessage = 'Cache status unavailable.';
+        }
+
+        if (elements.cacheStatusMessage) {
+            elements.cacheStatusMessage.textContent = summaryMessage;
+        }
+    }
+
+    async function loadCacheStatus() {
+        if (!config.cacheStatusUrl) {
+            return;
+        }
+        try {
+            const payload = await fetchJson(config.cacheStatusUrl, { logRequest: false });
+            applyCacheStatus(payload || {});
+        } catch (error) {
+            console.error('Failed to load cache status', error);
+            applyCacheStatus(null, { error: error.message || 'Unable to load cache status.' });
         }
     }
 
@@ -883,257 +1194,165 @@
     }
 
     function setDedupeProgressVisible(visible) {
-        const container = elements.dedupeProgress;
-        if (!container) {
-            return;
-        }
-        container.hidden = !visible;
         if (visible) {
-            setProgressMessage(
-                elements.dedupeMessage,
-                defaultProgressMessages.dedupe,
-                defaultProgressMessages.dedupe,
-            );
+            showTask(JOB_TYPES.dedupe, {
+                message: 'Preparing duplicate cleanup…',
+                percent: null,
+            });
         } else {
-            setProgressMessage(
-                elements.dedupeMessage,
-                defaultProgressMessages.dedupe,
-                defaultProgressMessages.dedupe,
-            );
+            hideTask(JOB_TYPES.dedupe);
         }
     }
 
     function updateDedupeProgress(processed, total) {
-        const countLabel = elements.dedupeCount;
-        const percentLabel = elements.dedupePercent;
-        const bar = elements.dedupeBar;
-        const totalValue = Number.isFinite(Number(total)) ? Math.max(Number(total) || 0, 0) : 0;
-        const processedValue = Number.isFinite(Number(processed))
-            ? Math.max(Number(processed) || 0, 0)
+        if (!state.taskVisibility.get(JOB_TYPES.dedupe)) {
+            return;
+        }
+        const processedValue = toNonNegativeInt(processed, 0);
+        const totalNumber = Number(total);
+        const totalValue = Number.isFinite(totalNumber)
+            ? Math.max(Math.round(totalNumber), 0)
             : 0;
-        const boundedProcessed = totalValue > 0
-            ? Math.min(processedValue, totalValue)
-            : processedValue;
-        if (countLabel) {
-            countLabel.textContent = totalValue > 0
-                ? `${boundedProcessed}/${totalValue}`
-                : `${boundedProcessed}`;
-        }
-        const percentValue = totalValue > 0
-            ? Math.min(100, (boundedProcessed / totalValue) * 100)
-            : 0;
-        const percentText = Number.isFinite(percentValue)
-            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
-            : '0';
-        if (percentLabel) {
-            percentLabel.textContent = `${percentText}%`;
-        }
-        if (bar) {
-            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
-        }
+        const percent = totalValue > 0 ? (processedValue / totalValue) * 100 : null;
+        const message = buildProgressMessage(
+            'Processing',
+            processed,
+            total,
+            'records',
+            'Removing duplicates…',
+        );
+        updateTask(JOB_TYPES.dedupe, { percent, message });
     }
 
     function setFixProgressVisible(visible) {
-        const container = elements.fixProgress;
-        if (!container) {
-            return;
-        }
-        container.hidden = !visible;
         if (visible) {
-            setProgressMessage(elements.fixMessage, defaultProgressMessages.fix, defaultProgressMessages.fix);
+            showTask(JOB_TYPES.fix, {
+                message: 'Preparing name fixes…',
+                percent: null,
+            });
         } else {
-            setProgressMessage(elements.fixMessage, defaultProgressMessages.fix, defaultProgressMessages.fix);
+            hideTask(JOB_TYPES.fix);
         }
     }
 
     function updateFixProgress(processed, total) {
-        const countLabel = elements.fixCount;
-        const percentLabel = elements.fixPercent;
-        const bar = elements.fixBar;
+        if (!state.taskVisibility.get(JOB_TYPES.fix)) {
+            return;
+        }
+        const processedValue = toNonNegativeInt(processed, 0);
         const totalNumber = Number(total);
-        const processedNumber = Number(processed);
         const totalValue = Number.isFinite(totalNumber)
             ? Math.max(Math.round(totalNumber), 0)
             : 0;
-        const processedValue = Number.isFinite(processedNumber)
-            ? Math.max(Math.round(processedNumber), 0)
-            : 0;
-        const boundedProcessed = totalValue > 0
-            ? Math.min(processedValue, totalValue)
-            : processedValue;
-        if (countLabel) {
-            countLabel.textContent = `${boundedProcessed}/${totalValue}`;
-        }
-        const percentValue = totalValue > 0
-            ? Math.min(100, (boundedProcessed / totalValue) * 100)
-            : 0;
-        const percentText = Number.isFinite(percentValue)
-            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
-            : '0';
-        if (percentLabel) {
-            percentLabel.textContent = `${percentText}%`;
-        }
-        if (bar) {
-            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
-        }
+        const percent = totalValue > 0 ? (processedValue / totalValue) * 100 : null;
+        const message = buildProgressMessage('Fixing', processed, total, 'names', 'Fixing IGDB names…');
+        updateTask(JOB_TYPES.fix, { percent, message });
     }
 
     function setRefreshProgressVisible(visible) {
-        const container = elements.refreshProgress;
-        if (!container) {
-            return;
-        }
-        container.hidden = !visible;
         if (visible) {
-            setProgressMessage(
-                elements.refreshMessage,
-                defaultProgressMessages.refresh,
-                defaultProgressMessages.refresh,
-            );
-        } else if (elements.refreshMessage) {
-            setProgressMessage(
-                elements.refreshMessage,
-                defaultProgressMessages.refresh,
-                defaultProgressMessages.refresh,
-            );
+            showTask(JOB_TYPES.refresh, {
+                message: 'Preparing IGDB cache…',
+                percent: null,
+            });
+        } else {
+            hideTask(JOB_TYPES.refresh);
         }
     }
 
-    function updateRefreshProgress(processed, queued, phase = state.refreshPhase || 'idle', options = {}) {
-        const countLabel = elements.refreshCount;
-        const percentLabel = elements.refreshPercent;
-        const bar = elements.refreshBar;
-        const processedNumber = Number(processed);
-        const queuedNumber = Number(queued);
-        const processedValue = Number.isFinite(processedNumber)
-            ? Math.max(Math.round(processedNumber), 0)
+    function updateRefreshProgress(processed, total, phase = state.refreshPhase || 'idle', options = {}) {
+        if (!state.taskVisibility.get(JOB_TYPES.refresh)) {
+            return;
+        }
+        const processedValue = toNonNegativeInt(processed, 0);
+        const totalNumber = Number(total);
+        const totalValue = Number.isFinite(totalNumber)
+            ? Math.max(Math.round(totalNumber), 0)
             : 0;
-        const queuedValue = Number.isFinite(queuedNumber)
-            ? Math.max(Math.round(queuedNumber), 0)
-            : 0;
-        const boundedProcessed = queuedValue > 0
-            ? Math.min(processedValue, queuedValue)
-            : processedValue;
-        if (countLabel) {
-            countLabel.textContent = queuedValue > 0
-                ? `${boundedProcessed}/${queuedValue}`
-                : `${boundedProcessed}`;
+        let percent = null;
+        if (totalValue > 0) {
+            percent = (processedValue / totalValue) * 100;
+        } else if (phase === 'idle') {
+            percent = 100;
         }
-        let percentValue = queuedValue > 0
-            ? Math.floor((boundedProcessed / queuedValue) * 100)
-            : (phase === 'idle' ? 100 : 0);
-        if (!Number.isFinite(percentValue)) {
-            percentValue = 0;
+        let message = options && typeof options.message === 'string' && options.message.trim()
+            ? options.message.trim()
+            : '';
+        if (!message) {
+            switch (phase) {
+                case 'pending':
+                    message = 'Preparing IGDB cache…';
+                    break;
+                case 'running':
+                case 'cache':
+                    message = buildProgressMessage(
+                        'Processing',
+                        processed,
+                        total,
+                        'cache rows',
+                        'Updating IGDB cache…',
+                    );
+                    break;
+                case 'idle':
+                    message = 'IGDB cache update complete.';
+                    break;
+                default:
+                    message = 'Updating IGDB cache…';
+                    break;
+            }
         }
-        percentValue = Math.max(0, Math.min(100, percentValue));
-        if (percentLabel) {
-            percentLabel.textContent = `${percentValue}%`;
-        }
-        if (bar) {
-            bar.style.width = `${percentValue}%`;
-        }
-        const message = options && typeof options.message === 'string'
-            ? options.message
-            : (() => {
-                  switch (phase) {
-                      case 'pending':
-                          return 'Preparing IGDB cache…';
-                      case 'running':
-                      case 'cache':
-                          return 'Updating IGDB cache…';
-                      case 'idle':
-                          return 'IGDB cache update complete.';
-                      default:
-                          return defaultProgressMessages.refresh;
-                  }
-              })();
-        setProgressMessage(elements.refreshMessage, message, defaultProgressMessages.refresh);
+        updateTask(JOB_TYPES.refresh, { percent, message });
     }
 
     function setCompareProgressVisible(visible) {
-        const container = elements.compareProgress;
-        if (!container) {
-            return;
-        }
-        container.hidden = !visible;
         if (visible) {
-            setProgressMessage(
-                elements.compareMessage,
-                defaultProgressMessages.compare,
-                defaultProgressMessages.compare,
-            );
+            showTask(JOB_TYPES.compare, {
+                message: 'Preparing comparison…',
+                percent: null,
+            });
         } else {
-            setProgressMessage(
-                elements.compareMessage,
-                defaultProgressMessages.compare,
-                defaultProgressMessages.compare,
-            );
+            hideTask(JOB_TYPES.compare);
         }
     }
 
     function updateCompareProgress(processed, total, options = {}) {
-        const countLabel = elements.compareCount;
-        const percentLabel = elements.comparePercent;
-        const bar = elements.compareBar;
-        const processedNumber = Number(processed);
+        if (!state.taskVisibility.get(JOB_TYPES.compare)) {
+            return;
+        }
+        const processedValue = toNonNegativeInt(processed, 0);
         const totalNumber = Number(total);
-        const totalValue = Number.isFinite(totalNumber) ? Math.max(Math.round(totalNumber), 0) : 0;
-        const processedValue = Number.isFinite(processedNumber)
-            ? Math.max(Math.round(processedNumber), 0)
+        const totalValue = Number.isFinite(totalNumber)
+            ? Math.max(Math.round(totalNumber), 0)
             : 0;
-        const boundedProcessed = totalValue > 0
-            ? Math.min(processedValue, totalValue)
-            : processedValue;
-        if (countLabel) {
-            countLabel.textContent = totalValue > 0
-                ? `${boundedProcessed}/${totalValue}`
-                : `${boundedProcessed}`;
-        }
-        const percentValue = totalValue > 0
-            ? Math.min(100, totalValue > 0 ? (boundedProcessed / totalValue) * 100 : 0)
-            : 0;
-        const percentText = Number.isFinite(percentValue)
-            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
-            : '0';
-        if (percentLabel) {
-            percentLabel.textContent = `${percentText}%`;
-        }
-        if (bar) {
-            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
-        }
-        const data = options && typeof options === 'object' ? options.data : null;
-        let message = options && typeof options.message === 'string' ? options.message : '';
-        if (!message && data && typeof data === 'object') {
-            const phase = typeof data.phase === 'string' ? data.phase : '';
-            if (phase === 'diffs') {
-                const missingCount = Number(data.missing_count);
-                if (Number.isFinite(missingCount) && missingCount > 0) {
-                    message = `Comparing entries… ${missingCount} missing IGDB record${missingCount === 1 ? '' : 's'}.`;
-                } else {
-                    message = 'Comparing processed games with the IGDB cache…';
+        const percent = totalValue > 0 ? (processedValue / totalValue) * 100 : null;
+        let message = options && typeof options.message === 'string' && options.message.trim()
+            ? options.message.trim()
+            : '';
+        if (!message) {
+            const data = options && typeof options === 'object' ? options.data : null;
+            if (data && typeof data === 'object' && typeof data.phase === 'string') {
+                if (data.phase === 'diffs' && Number.isFinite(Number(data.missing_count))) {
+                    const missingCount = Number(data.missing_count);
+                    if (missingCount > 0) {
+                        message = `Comparing entries… ${formatCount(missingCount)} missing IGDB record${missingCount === 1 ? '' : 's'}.`;
+                    }
+                } else if (data.phase === 'idle' || data.phase === 'done') {
+                    message = 'Comparison complete.';
                 }
-            } else if (phase === 'done' || phase === 'idle') {
-                message = 'Comparison complete.';
             }
         }
         if (!message) {
-            if (totalValue > 0 && boundedProcessed >= totalValue) {
-                message = 'Comparison complete.';
-            } else {
-                message = defaultProgressMessages.compare;
-            }
+            message = buildProgressMessage('Comparing', processed, total, 'entries', 'Comparing entries…');
         }
-        setProgressMessage(elements.compareMessage, message, defaultProgressMessages.compare);
+        updateTask(JOB_TYPES.compare, { percent, message });
     }
 
     function updateProgressBar(processed, total) {
         const processedValue = toNonNegativeInt(processed, 0);
         const totalValueRaw = toNonNegativeInt(total, processedValue);
         const normalizedTotal = Math.max(totalValueRaw, processedValue);
-        const hasTotal = normalizedTotal > 0;
-        const queuedValue = hasTotal ? normalizedTotal : processedValue;
-        const phase = hasTotal && processedValue >= normalizedTotal ? 'idle' : 'running';
-        updateRefreshProgress(processedValue, queuedValue, phase);
+        const phase = normalizedTotal > 0 && processedValue >= normalizedTotal ? 'idle' : 'running';
+        updateRefreshProgress(processedValue, normalizedTotal, phase);
     }
 
     function clearJobPoller(jobId) {
@@ -1297,6 +1516,7 @@
             if (status === 'success') {
                 state.detailCache.clear();
                 loadUpdates();
+                loadCacheStatus();
             }
         } else if (type === JOB_TYPES.dedupe) {
             state.deduping = false;
@@ -1909,6 +2129,7 @@
             state.refreshPhase = 'idle';
             state.detailCache.clear();
             await loadUpdates();
+            await loadCacheStatus();
             showToast('IGDB refresh completed', 'success');
         } catch (error) {
             console.error(error);
@@ -2142,5 +2363,6 @@
 
     bindEvents();
     loadExistingJobs();
+    loadCacheStatus();
     loadUpdates();
 })();
