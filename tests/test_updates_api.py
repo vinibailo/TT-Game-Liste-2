@@ -463,6 +463,64 @@ def test_updates_list_respects_cursor_pagination(tmp_path):
     assert third_data['has_more'] is False
 
 
+def test_updates_list_since_filters_new_entries(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{
+            'Source Index': '0',
+            'Name': 'First Game',
+            'igdb_id': '100',
+            'Summary': 'Summary',
+        },
+    )
+    insert_processed_game(
+        app_module,
+        ID=2,
+        **{
+            'Source Index': '1',
+            'Name': 'Second Game',
+            'igdb_id': '101',
+            'Summary': 'Summary',
+        },
+    )
+    insert_processed_game(
+        app_module,
+        ID=3,
+        **{
+            'Source Index': '2',
+            'Name': 'Third Game',
+            'igdb_id': '102',
+            'Summary': 'Summary',
+        },
+    )
+
+    _insert_igdb_update(app_module, 1, '2024-05-01T00:00:00+00:00', has_diff=1)
+    _insert_igdb_update(app_module, 2, '2024-05-02T00:00:00+00:00', has_diff=1)
+    _insert_igdb_update(app_module, 3, '2024-05-03T12:34:56+00:00', has_diff=1)
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    baseline = client.get('/api/updates')
+    assert baseline.status_code == 200
+    baseline_payload = baseline.get_json()
+    assert len(baseline_payload['items']) == 3
+
+    response = client.get('/api/updates?since=2024-05-02T00:00:00+00:00')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert isinstance(payload['items'], list)
+    assert len(payload['items']) == 1
+    entry = payload['items'][0]
+    assert entry['processed_game_id'] == 3
+    assert entry['updated_at'] == '2024-05-03T12:34:56+00:00'
+    assert payload['nextAfter'] is None
+
+
 def test_cache_refresh_creates_entries(tmp_path):
     app_module = load_app(tmp_path)
     client = app_module.app.test_client()

@@ -6,6 +6,8 @@ import json
 from collections.abc import Iterable
 from typing import Any, Mapping
 
+from datetime import datetime
+
 from flask import Blueprint, current_app, jsonify, render_template, request, url_for
 from werkzeug.routing import BaseConverter
 
@@ -662,6 +664,24 @@ def api_updates_list():
     get_db = _ctx('get_db')
     get_processed_games_columns = _ctx('get_processed_games_columns')
 
+    def _normalize_since(value: str | None) -> str | None:
+        if not value or not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if 'T' in text and ' ' in text and '+' not in text and '-' not in text[text.rfind(' ') + 1 :]:
+            text = text.replace(' ', '+', 1)
+        elif 'T' in text and ' ' in text and '+' not in text:
+            text = text.replace(' ', '+', 1)
+        if text.endswith('Z'):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed.isoformat()
+
     try:
         limit = int(request.args.get('limit', 100))
     except (TypeError, ValueError):
@@ -680,6 +700,9 @@ def api_updates_list():
         if parsed_after is not None and parsed_after >= 0:
             after = parsed_after
 
+    since_param = request.args.get('since')
+    normalized_since = _normalize_since(since_param)
+
     fetch_limit = limit + 1
 
     with db_lock:
@@ -691,11 +714,17 @@ def api_updates_list():
             else 'NULL AS cover_url'
         )
 
+        updated_at_expr = (
+            "COALESCE(u.refreshed_at, u.local_last_edited_at, u.igdb_updated_at, '')"
+        )
         where_clauses: list[str] = []
         params: list[Any] = []
         if after is not None:
             where_clauses.append('u.rowid > ?')
             params.append(after)
+        if normalized_since is not None:
+            where_clauses.append(f'{updated_at_expr} > ?')
+            params.append(normalized_since)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ''
 
@@ -708,6 +737,7 @@ def api_updates_list():
                    u.local_last_edited_at,
                    u.refreshed_at,
                    u.has_diff,
+                   {updated_at_expr} AS updated_at,
                    p."Name" AS game_name,
                    p."Cover Path" AS cover_path,
                    {cover_url_select}
@@ -718,8 +748,8 @@ def api_updates_list():
                LIMIT ?'''
         )
 
-        params.append(fetch_limit)
-        rows = conn.execute(query, params).fetchall()
+        query_params = [*params, fetch_limit]
+        rows = conn.execute(query, query_params).fetchall()
 
     has_more = len(rows) > limit
     if has_more:
@@ -754,8 +784,9 @@ def api_updates_list():
                 'igdb_updated_at': row_map.get('igdb_updated_at'),
                 'local_last_edited_at': row_map.get('local_last_edited_at'),
                 'refreshed_at': row_map.get('refreshed_at'),
+                'updated_at': row_map.get('updated_at'),
                 'name': row_map.get('game_name'),
-                'has_diff': bool(row_map.get('has_diff')), 
+                'has_diff': bool(row_map.get('has_diff')),
                 'cover': None,
                 'cover_available': cover_available,
                 'update_type': 'mismatch',
