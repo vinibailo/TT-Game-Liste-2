@@ -45,8 +45,6 @@
     const JOB_POLL_INTERVAL = 2000;
     const JOB_POLL_BACKOFF_FACTOR = 2;
     const JOB_POLL_MAX_INTERVAL = 20000;
-    const REFRESH_STATUS_INTERVAL = 1000;
-    const REFRESH_PENDING_MAX_POLLS = 5;
 
     const TASK_CONFIG = {
         [JOB_TYPES.refresh]: {
@@ -568,118 +566,9 @@
         if (state.refreshStatusTimer) {
             window.clearInterval(state.refreshStatusTimer);
             state.refreshStatusTimer = null;
-            state.refreshPendingPolls = 0;
-            state.waitingForRefreshStart = false;
         }
-    }
-
-    function startRefreshStatusPolling(immediate = false) {
-        if (state.refreshStatusTimer) {
-            return;
-        }
-        if (immediate) {
-            pollRefreshStatus();
-        }
-        state.refreshStatusTimer = window.setInterval(pollRefreshStatus, REFRESH_STATUS_INTERVAL);
-    }
-
-    async function pollRefreshStatus() {
-        const url = config.refreshStatusUrl || '/api/updates/status';
-        try {
-            logFetch(url);
-            const response = await fetch(url, { headers: { Accept: 'application/json' } });
-            if (response.status === 504) {
-                showToast('Server is busy; retrying...', 'warning');
-                return;
-            }
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (err) {
-                payload = null;
-            }
-            if (!response.ok || !payload || payload.error) {
-                throw new Error(payload && payload.error ? payload.error : 'Failed to fetch refresh status.');
-            }
-            applyRefreshStatus(payload);
-        } catch (error) {
-            if (error instanceof TypeError) {
-                showToast('Server is busy; retrying...', 'warning');
-                return;
-            }
-            console.error('Failed to fetch refresh status', error);
-            showToast(error.message || 'Failed to fetch refresh status.', 'warning');
-            clearRefreshStatusTimer();
-            state.refreshObservedActive = false;
-            state.refreshPhase = 'idle';
-            state.refreshing = false;
-            state.refreshPendingPolls = 0;
-            state.waitingForRefreshStart = false;
-            setRefreshButtonLoading(false);
-            setRefreshProgressVisible(false);
-            updateRefreshProgress(0, 0, 'idle');
-        }
-    }
-
-    function applyRefreshStatus(status) {
-        if (!status || typeof status !== 'object') {
-            return;
-        }
-        const phase = typeof status.phase === 'string' ? status.phase : 'idle';
-        const processedNumber = Number(status.processed);
-        const queuedNumber = Number(status.queued);
-        const processed = Number.isFinite(processedNumber) ? Math.max(Math.round(processedNumber), 0) : 0;
-        const queued = Number.isFinite(queuedNumber) ? Math.max(Math.round(queuedNumber), 0) : 0;
-        const total = queued > 0 ? processed + queued : processed;
-        const waitingForStart = state.waitingForRefreshStart;
-
-        state.refreshPhase = phase;
-        const displayPhase = phase === 'idle' && waitingForStart ? 'pending' : phase;
-        updateRefreshProgress(processed, total, displayPhase);
-
-        if (phase !== 'idle') {
-            state.refreshObservedActive = true;
-            state.refreshing = true;
-            state.refreshPendingPolls = 0;
-            state.waitingForRefreshStart = false;
-            setRefreshButtonLoading(true);
-            setRefreshProgressVisible(true);
-            return;
-        }
-
-        if (state.refreshObservedActive) {
-            state.refreshObservedActive = false;
-            clearRefreshStatusTimer();
-            state.refreshing = false;
-            state.refreshPendingPolls = 0;
-            state.waitingForRefreshStart = false;
-            setRefreshButtonLoading(false);
-            setRefreshProgressVisible(false);
-            state.detailCache.clear();
-            loadUpdates();
-            loadCacheStatus();
-            return;
-        }
-
-        if (waitingForStart) {
-            state.refreshPendingPolls += 1;
-            if (state.refreshPendingPolls <= REFRESH_PENDING_MAX_POLLS) {
-                state.refreshing = true;
-                setRefreshButtonLoading(true);
-                setRefreshProgressVisible(true);
-                return;
-            }
-            state.waitingForRefreshStart = false;
-            state.refreshPendingPolls = 0;
-        }
-
-        clearRefreshStatusTimer();
-        state.refreshing = false;
         state.refreshPendingPolls = 0;
         state.waitingForRefreshStart = false;
-        setRefreshButtonLoading(false);
-        setRefreshProgressVisible(false);
-        updateRefreshProgress(0, 0, 'idle');
     }
 
     class HttpError extends Error {
@@ -743,6 +632,56 @@
             throw new HttpError(payload.message, { status, response, payload });
         }
         throw new HttpError(`Request failed with status ${status}`, { status, response, payload });
+    }
+
+    class ProgressStream {
+        constructor(url, options = {}) {
+            this.url = url;
+            this.eventSource = null;
+            this.onMessage = options.onMessage || null;
+            this.onError = options.onError || null;
+            this.onOpen = options.onOpen || null;
+        }
+
+        start() {
+            if (typeof window === 'undefined' || !('EventSource' in window)) {
+                return;
+            }
+            if (this.eventSource) {
+                return;
+            }
+            try {
+                this.eventSource = new EventSource(this.url);
+            } catch (error) {
+                console.error('Failed to open progress stream', error);
+                if (typeof this.onError === 'function') {
+                    this.onError(error);
+                }
+                return;
+            }
+            if (typeof this.onMessage === 'function') {
+                this.eventSource.onmessage = (event) => {
+                    this.onMessage(event);
+                };
+            }
+            if (typeof this.onError === 'function') {
+                this.eventSource.onerror = (event) => {
+                    this.onError(event);
+                };
+            }
+            if (typeof this.onOpen === 'function') {
+                this.eventSource.onopen = (event) => {
+                    this.onOpen(event);
+                };
+            }
+        }
+
+        stop() {
+            if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+            }
+        }
     }
 
     function getJobDetailUrl(jobId) {
@@ -1643,17 +1582,20 @@
                     state.waitingForRefreshStart = false;
                     setRefreshButtonLoading(true);
                     setRefreshProgressVisible(true);
-                    startRefreshStatusPolling(true);
+                    updateRefreshProgress(
+                        job.progress_current || 0,
+                        job.progress_total || 0,
+                        phase,
+                        { message: job.message },
+                    );
                 } else {
-                    if (!state.refreshStatusTimer) {
-                        state.refreshPhase = 'idle';
-                        state.refreshObservedActive = false;
-                        state.refreshPendingPolls = 0;
-                        state.waitingForRefreshStart = false;
-                        setRefreshButtonLoading(false);
-                        setRefreshProgressVisible(false);
-                        updateRefreshProgress(0, 0, 'idle');
-                    }
+                    state.refreshPhase = 'idle';
+                    state.refreshObservedActive = false;
+                    state.refreshPendingPolls = 0;
+                    state.waitingForRefreshStart = false;
+                    setRefreshButtonLoading(false);
+                    setRefreshProgressVisible(false);
+                    updateRefreshProgress(0, 0, 'idle');
                 }
                 if (elements.statusLabel && job.message) {
                     elements.statusLabel.textContent = job.message;
@@ -1789,6 +1731,51 @@
         };
         const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
         state.jobPollers.set(normalizedId, timer);
+    }
+
+    function handleProgressStreamMessage(event) {
+        if (!event || typeof event.data !== 'string' || !event.data) {
+            return;
+        }
+        let payload;
+        try {
+            payload = JSON.parse(event.data);
+        } catch (error) {
+            console.error('Failed to parse progress update', error);
+            return;
+        }
+        if (!payload || typeof payload !== 'object') {
+            return;
+        }
+        const jobsPayload = [];
+        if (Array.isArray(payload.jobs)) {
+            payload.jobs.forEach((job) => {
+                if (job && typeof job === 'object') {
+                    jobsPayload.push(job);
+                }
+            });
+        } else if (payload.jobs && typeof payload.jobs === 'object') {
+            Object.values(payload.jobs).forEach((job) => {
+                if (job && typeof job === 'object') {
+                    jobsPayload.push(job);
+                }
+            });
+        }
+        jobsPayload.forEach((job) => {
+            if (!job || !job.id) {
+                return;
+            }
+            const normalizedId = normalizeJobId(job.id);
+            if (!normalizedId) {
+                return;
+            }
+            const resolvedJob = normalizedId !== job.id ? { ...job, id: normalizedId } : job;
+            updateJobUi(resolvedJob);
+        });
+    }
+
+    function handleProgressStreamError(event) {
+        console.debug('Progress stream error', event);
     }
 
     async function loadExistingJobs() {
@@ -2636,6 +2623,23 @@
     }
 
     bindEvents();
+
+    let progressStream = null;
+    if (typeof window !== 'undefined' && 'EventSource' in window) {
+        progressStream = new ProgressStream('/api/progress/stream', {
+            onMessage: handleProgressStreamMessage,
+            onError: handleProgressStreamError,
+        });
+        progressStream.start();
+        window.addEventListener('beforeunload', () => {
+            if (progressStream) {
+                progressStream.stop();
+            }
+        });
+    } else {
+        console.debug('EventSource not supported; progress updates will fall back to manual polling.');
+    }
+
     loadExistingJobs();
     loadCacheStatus();
     const cachedState = restoreUpdatesFromCache();
