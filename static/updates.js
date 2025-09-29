@@ -17,6 +17,7 @@
         comparing: false,
         jobs: new Map(),
         jobPollers: new Map(),
+        jobPollBackoffs: new Map(),
         activeJobIds: new Map(),
         completedJobs: new Set(),
         refreshStatusTimer: null,
@@ -41,6 +42,8 @@
     });
     const JOB_ACTIVE_STATUSES = new Set(['pending', 'running']);
     const JOB_POLL_INTERVAL = 2000;
+    const JOB_POLL_BACKOFF_FACTOR = 2;
+    const JOB_POLL_MAX_INTERVAL = 20000;
     const REFRESH_STATUS_INTERVAL = 1000;
     const REFRESH_PENDING_MAX_POLLS = 5;
 
@@ -371,6 +374,24 @@
         return parsed;
     }
 
+    function normalizeJobId(value) {
+        if (value === undefined || value === null) {
+            return null;
+        }
+        let text = String(value).trim().toLowerCase();
+        if (!text) {
+            return null;
+        }
+        if (/^[0-9a-f]{32}s$/.test(text)) {
+            text = text.slice(0, -1);
+        }
+        if (/^[0-9a-f]{32}$/.test(text)) {
+            return text;
+        }
+        const match = text.match(/[0-9a-f]{32}/);
+        return match ? match[0] : null;
+    }
+
     function getUpdateById(value) {
         const normalized = normalizeId(value);
         if (normalized !== null && state.updateMap.has(normalized)) {
@@ -500,6 +521,18 @@
         updateRefreshProgress(0, 0, 'idle');
     }
 
+    class HttpError extends Error {
+        constructor(message, options = {}) {
+            super(message);
+            this.name = 'HttpError';
+            this.status = options.status ?? null;
+            this.payload = options.payload;
+            this.response = options.response ?? null;
+            this.isClientError = typeof this.status === 'number' && this.status >= 400 && this.status < 500;
+            this.isServerError = typeof this.status === 'number' && this.status >= 500;
+        }
+    }
+
     async function fetchJson(url, options = {}) {
         const { logRequest = true, headers: providedHeaders, ...rest } = options || {};
         if (logRequest) {
@@ -513,8 +546,9 @@
             headers,
         };
         const response = await fetch(url, requestOptions);
-        if (response.status === 504) {
-            throw new Error('Server timed out (504). Please try again later.');
+        const status = response.status;
+        if (status === 504) {
+            throw new HttpError('Server timed out (504). Please try again later.', { status, response });
         }
         const contentType = (response.headers && response.headers.get('content-type')) || '';
         const isJson = contentType.toLowerCase().includes('application/json');
@@ -530,34 +564,31 @@
                 preview = '';
             }
             const message = preview ? `Non-JSON response: ${preview}` : 'Non-JSON response: (empty)';
-            throw new Error(message);
+            throw new HttpError(message, { status, response });
         }
         let payload;
         try {
             payload = await response.json();
         } catch (err) {
-            throw new Error('Invalid JSON response.');
+            throw new HttpError('Invalid JSON response.', { status, response });
         }
         if (response.ok) {
             return payload;
         }
         if (payload && typeof payload === 'object' && payload.error) {
-            throw new Error(String(payload.error));
+            throw new HttpError(String(payload.error), { status, response, payload });
         }
         if (payload && typeof payload === 'object' && typeof payload.message === 'string') {
-            throw new Error(payload.message);
+            throw new HttpError(payload.message, { status, response, payload });
         }
-        throw new Error(`Request failed with status ${response.status}`);
+        throw new HttpError(`Request failed with status ${status}`, { status, response, payload });
     }
 
     function getJobDetailUrl(jobId) {
         if (!jobId) {
             return null;
         }
-        if (config.jobDetailUrlTemplate) {
-            return config.jobDetailUrlTemplate.replace('{id}', encodeURIComponent(jobId));
-        }
-        return `/api/updates/jobs/${encodeURIComponent(jobId)}`;
+        return `/api/updates/${encodeURIComponent(jobId)}`;
     }
 
     function isJobActive(status) {
@@ -869,8 +900,11 @@
     }
 
     function buildDeleteDuplicateUrl(id) {
-        if (config.deleteDuplicateUrlTemplate) {
-            return config.deleteDuplicateUrlTemplate.replace('{id}', encodeURIComponent(id));
+        if (!id) {
+            return null;
+        }
+        if (config.deleteDuplicateBaseUrl) {
+            return `${config.deleteDuplicateBaseUrl}/${encodeURIComponent(id)}`;
         }
         return `/api/updates/remove-duplicate/${encodeURIComponent(id)}`;
     }
@@ -1361,6 +1395,7 @@
             window.clearTimeout(timer);
             state.jobPollers.delete(jobId);
         }
+        state.jobPollBackoffs.delete(jobId);
     }
 
     async function fetchJobDetail(jobId) {
@@ -1391,13 +1426,18 @@
         if (!job || !job.id) {
             return;
         }
-        state.jobs.set(job.id, job);
+        const normalizedId = normalizeJobId(job.id);
+        if (!normalizedId) {
+            return;
+        }
+        const resolvedJob = normalizedId !== job.id ? { ...job, id: normalizedId } : job;
+        state.jobs.set(normalizedId, resolvedJob);
         const type = job.job_type;
         const active = isJobActive(job.status);
         if (type) {
             if (active) {
-                state.activeJobIds.set(type, job.id);
-            } else if (state.activeJobIds.get(type) === job.id) {
+                state.activeJobIds.set(type, normalizedId);
+            } else if (state.activeJobIds.get(type) === normalizedId) {
                 state.activeJobIds.delete(type);
             }
         }
@@ -1477,14 +1517,19 @@
     }
 
     function handleJobCompletion(job) {
-        if (!job || !job.id || state.completedJobs.has(job.id)) {
+        if (!job || !job.id) {
             return;
         }
-        state.completedJobs.add(job.id);
-        clearJobPoller(job.id);
-        const type = job.job_type;
-        const status = job.status;
-        const result = job.result || {};
+        const normalizedId = normalizeJobId(job.id);
+        if (!normalizedId || state.completedJobs.has(normalizedId)) {
+            return;
+        }
+        const resolvedJob = normalizedId !== job.id ? { ...job, id: normalizedId } : job;
+        state.completedJobs.add(normalizedId);
+        clearJobPoller(normalizedId);
+        const type = resolvedJob.job_type;
+        const status = resolvedJob.status;
+        const result = resolvedJob.result || {};
         if (type === JOB_TYPES.compare) {
             state.comparing = false;
             setCompareButtonLoading(false);
@@ -1530,7 +1575,7 @@
         }
 
         if (status === 'error') {
-            showToast(job.error || 'Background task failed.', 'warning');
+            showToast(resolvedJob.error || 'Background task failed.', 'warning');
         } else if (result && result.message) {
             showToast(result.message, result.toast_type || 'success');
         }
@@ -1540,31 +1585,49 @@
         if (!job || !job.id) {
             return;
         }
-        updateJobUi(job);
-        if (!isJobActive(job.status)) {
-            handleJobCompletion(job);
+        const normalizedId = normalizeJobId(job.id);
+        if (!normalizedId) {
             return;
         }
-        clearJobPoller(job.id);
+        const resolvedJob = normalizedId !== job.id ? { ...job, id: normalizedId } : job;
+        updateJobUi(resolvedJob);
+        if (!isJobActive(resolvedJob.status)) {
+            handleJobCompletion(resolvedJob);
+            return;
+        }
+        clearJobPoller(normalizedId);
+        state.jobPollBackoffs.set(normalizedId, JOB_POLL_INTERVAL);
         const poll = async () => {
             try {
-                const latest = await fetchJobDetail(job.id);
+                const latest = await fetchJobDetail(normalizedId);
+                state.jobPollBackoffs.set(normalizedId, JOB_POLL_INTERVAL);
                 updateJobUi(latest);
                 if (isJobActive(latest.status)) {
-                    const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
-                    state.jobPollers.set(job.id, timer);
+                    const delay = state.jobPollBackoffs.get(normalizedId) || JOB_POLL_INTERVAL;
+                    const timer = window.setTimeout(poll, delay);
+                    state.jobPollers.set(normalizedId, timer);
                 } else {
-                    state.jobPollers.delete(job.id);
+                    state.jobPollers.delete(normalizedId);
                     handleJobCompletion(latest);
                 }
             } catch (error) {
                 console.error('Failed to poll job status', error);
-                state.jobPollers.delete(job.id);
-                showToast(error.message, 'warning');
+                state.jobPollers.delete(normalizedId);
+                if (error instanceof HttpError && (error.isClientError || error.isServerError)) {
+                    showToast(`Stopped polling job ${normalizedId}: ${error.message}`, 'warning');
+                    state.jobPollBackoffs.delete(normalizedId);
+                    return;
+                }
+                const currentDelay = state.jobPollBackoffs.get(normalizedId) || JOB_POLL_INTERVAL;
+                const nextDelay = Math.min(currentDelay * JOB_POLL_BACKOFF_FACTOR, JOB_POLL_MAX_INTERVAL);
+                state.jobPollBackoffs.set(normalizedId, nextDelay);
+                const timer = window.setTimeout(poll, nextDelay);
+                state.jobPollers.set(normalizedId, timer);
+                showToast(`Retrying job ${normalizedId} in ${Math.round(nextDelay / 1000)}s`, 'warning');
             }
         };
         const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
-        state.jobPollers.set(job.id, timer);
+        state.jobPollers.set(normalizedId, timer);
     }
 
     async function loadExistingJobs() {
@@ -1578,21 +1641,26 @@
                 if (!job || !job.id) {
                     return;
                 }
+                const normalizedId = normalizeJobId(job.id);
+                if (!normalizedId) {
+                    return;
+                }
+                const resolvedJob = normalizedId !== job.id ? { ...job, id: normalizedId } : job;
                 if (job.job_type === JOB_TYPES.refresh) {
                     if (isJobActive(job.status)) {
-                        state.completedJobs.delete(job.id);
+                        state.completedJobs.delete(normalizedId);
                     } else {
-                        state.completedJobs.add(job.id);
+                        state.completedJobs.add(normalizedId);
                     }
-                    updateJobUi(job);
+                    updateJobUi(resolvedJob);
                     return;
                 }
                 if (isJobActive(job.status)) {
-                    state.completedJobs.delete(job.id);
-                    monitorJob(job);
+                    state.completedJobs.delete(normalizedId);
+                    monitorJob(resolvedJob);
                 } else {
-                    state.completedJobs.add(job.id);
-                    updateJobUi(job);
+                    state.completedJobs.add(normalizedId);
+                    updateJobUi(resolvedJob);
                 }
             });
         } catch (error) {
@@ -1601,15 +1669,15 @@
     }
 
     function buildDetailUrl(id) {
-        if (config.detailUrlTemplate) {
-            return config.detailUrlTemplate.replace('{id}', encodeURIComponent(id));
+        if (config.detailBaseUrl) {
+            return `${config.detailBaseUrl}/${encodeURIComponent(id)}`;
         }
         return `/api/updates/${encodeURIComponent(id)}`;
     }
 
     function buildCoverUrl(id) {
-        if (config.coverUrlTemplate) {
-            return config.coverUrlTemplate.replace('{id}', encodeURIComponent(id));
+        if (config.coverBaseUrl) {
+            return `${config.coverBaseUrl}/${encodeURIComponent(id)}/cover`;
         }
         return `/api/updates/${encodeURIComponent(id)}/cover`;
     }
@@ -1862,10 +1930,6 @@
         if (!item || !item.processed_game_id) {
             return;
         }
-        if (!config.deleteDuplicateUrlTemplate) {
-            showToast('Duplicate removal endpoint is not configured.', 'warning');
-            return;
-        }
         const id = item.processed_game_id;
         if (button) {
             button.disabled = true;
@@ -1873,6 +1937,10 @@
         }
         try {
             const url = buildDeleteDuplicateUrl(id);
+            if (!url) {
+                showToast('Duplicate removal endpoint is not configured.', 'warning');
+                return;
+            }
             logFetch(url);
             const response = await fetch(url, { method: 'POST' });
             let payload = null;
@@ -2172,32 +2240,31 @@
         }
     }
 
-    async function fetchUpdatesBatch(offset = DEFAULT_OFFSET, limit = DEFAULT_UPDATES_LIMIT) {
-        const resolvedOffset = resolveOffset(offset);
+    async function fetchUpdatesBatch(cursor = null, limit = DEFAULT_UPDATES_LIMIT) {
         const resolvedLimit = resolveLimit(limit, DEFAULT_UPDATES_LIMIT);
-        const url = `/api/updates?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(resolvedLimit)}`;
+        const params = new URLSearchParams({ limit: String(resolvedLimit) });
+        if (cursor) {
+            params.set('cursor', cursor);
+        }
+        const url = `/api/updates?${params.toString()}`;
         logFetch(url);
         const payload = await fetchJson(url, { logRequest: false });
-        if (Array.isArray(payload)) {
-            return {
-                items: payload,
-                total: payload.length,
-                nextOffset: resolvedOffset + payload.length,
-            };
+        if (!payload || typeof payload !== 'object' || !Array.isArray(payload.items)) {
+            throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
         }
-        if (payload && typeof payload === 'object' && Array.isArray(payload.items)) {
-            const total = toNonNegativeInt(
-                payload.total ?? payload.total_available ?? payload.count ?? payload.total_items,
-                payload.items.length,
-            );
-            const nextOffset = resolveOffset(payload.next_offset ?? (resolvedOffset + payload.items.length));
-            return {
-                items: payload.items,
-                total,
-                nextOffset,
-            };
-        }
-        throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
+        const total = toNonNegativeInt(
+            payload.total ?? payload.total_available ?? payload.count ?? payload.total_items,
+            payload.items.length,
+        );
+        const nextCursor = typeof payload.next_cursor === 'string' && payload.next_cursor
+            ? payload.next_cursor
+            : null;
+        return {
+            items: payload.items,
+            total,
+            nextCursor,
+            hasMore: Boolean(payload.has_more) || Boolean(nextCursor),
+        };
     }
 
     async function loadUpdates() {
@@ -2206,18 +2273,17 @@
             const aggregated = [];
             const seenIds = new Set();
             let total = 0;
-            let offset = DEFAULT_OFFSET;
+            let cursor = null;
             let batchLimit = state.pageSize || DEFAULT_UPDATES_LIMIT;
-            const visitedOffsets = new Set();
+            const visitedCursors = new Set();
+            let iteration = 0;
 
             while (true) {
-                const resolvedOffset = resolveOffset(offset);
-                if (visitedOffsets.has(resolvedOffset)) {
+                if (cursor && visitedCursors.has(cursor)) {
                     break;
                 }
-                visitedOffsets.add(resolvedOffset);
                 const normalizedLimit = resolveLimit(batchLimit, DEFAULT_UPDATES_LIMIT);
-                const payload = await fetchUpdatesBatch(resolvedOffset, normalizedLimit);
+                const payload = await fetchUpdatesBatch(cursor, normalizedLimit);
                 const items = Array.isArray(payload.items) ? payload.items : [];
                 const normalizedTotal = toNonNegativeInt(payload.total, items.length);
                 if (normalizedTotal > total) {
@@ -2239,22 +2305,20 @@
                     aggregated.push(item);
                 });
 
-                const received = items.length;
-                if (received === 0) {
+                const nextCursor = payload.nextCursor;
+                if (!payload.hasMore || !nextCursor || items.length === 0) {
                     break;
                 }
-                if (total > 0 && aggregated.length >= total) {
-                    break;
+                if (cursor) {
+                    visitedCursors.add(cursor);
                 }
-                const nextOffset = payload.nextOffset !== undefined
-                    ? resolveOffset(payload.nextOffset)
-                    : resolvedOffset + received;
-                if (nextOffset <= resolvedOffset) {
-                    offset = resolvedOffset + normalizedLimit;
-                    break;
-                }
-                offset = nextOffset;
+                cursor = nextCursor;
                 batchLimit = normalizedLimit;
+                iteration += 1;
+                if (iteration > 50) {
+                    console.warn('Aborting updates fetch due to excessive pagination iterations.');
+                    break;
+                }
             }
 
             state.updates = aggregated;

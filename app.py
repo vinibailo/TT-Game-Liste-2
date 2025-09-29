@@ -1001,6 +1001,14 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 
             try:
                 conn.execute(
+                    'CREATE INDEX IF NOT EXISTS igdb_updates_order_idx '
+                    'ON igdb_updates(refreshed_at, local_last_edited_at, igdb_updated_at, processed_game_id)'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
                     '''UPDATE igdb_updates
                        SET has_diff = CASE
                            WHEN diff IS NULL OR diff = '' OR diff = '{}' THEN 0
@@ -1031,6 +1039,22 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                         cached_at TEXT
                     )
                     '''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS processed_games_igdb_id_idx '
+                    'ON processed_games("igdb_id")'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS processed_games_last_edited_idx '
+                    'ON processed_games(last_edited_at, "ID")'
                 )
             except sqlite3.OperationalError:
                 pass
@@ -2619,9 +2643,107 @@ def _remove_processed_games(ids_to_delete: Iterable[int]) -> tuple[int, int]:
     )
 
 
+def _coerce_cursor_timestamp(value: Any) -> float:
+    if value is None:
+        return float('-inf')
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float('-inf')
+    text = str(value).strip()
+    if not text:
+        return float('-inf')
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    normalized = text.replace('Z', '+00:00')
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return float('-inf')
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _entry_type_rank(entry_type: str) -> int:
+    return 0 if entry_type == 'm' else 1
+
+
+def _compare_entries_desc(entry: Mapping[str, Any], marker: Mapping[str, Any]) -> int:
+    entry_numeric = float(entry.get('cursor_numeric', float('-inf')))
+    marker_numeric = float(marker.get('sort_numeric', float('-inf')))
+    if entry_numeric > marker_numeric:
+        return -1
+    if entry_numeric < marker_numeric:
+        return 1
+    entry_id = int(entry.get('processed_game_id') or 0)
+    marker_id = int(marker.get('processed_game_id') or 0)
+    if entry_id > marker_id:
+        return -1
+    if entry_id < marker_id:
+        return 1
+    entry_rank = _entry_type_rank(str(entry.get('entry_type', 'm')))
+    marker_rank = _entry_type_rank(str(marker.get('entry_type', 'm')))
+    if entry_rank < marker_rank:
+        return -1
+    if entry_rank > marker_rank:
+        return 1
+    return 0
+
+
+def _parse_updates_cursor(cursor: str | None) -> dict[str, Any] | None:
+    if not cursor:
+        return None
+    if not isinstance(cursor, str):
+        return None
+    decoded_value = cursor
+    try:
+        padded = cursor + '=' * (-len(cursor) % 4)
+        decoded_bytes = base64.urlsafe_b64decode(padded.encode('utf-8'))
+        decoded_value = decoded_bytes.decode('utf-8')
+    except Exception:
+        decoded_value = cursor
+    parts = decoded_value.split('|', 2)
+    if len(parts) != 3:
+        return None
+    raw_value, raw_id, raw_type = parts
+    try:
+        processed_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    entry_type = raw_type or 'm'
+    if entry_type not in {'m', 'd'}:
+        entry_type = 'm'
+    return {
+        'sort_value': raw_value,
+        'sort_numeric': _coerce_cursor_timestamp(raw_value),
+        'processed_game_id': processed_id,
+        'entry_type': entry_type,
+    }
+
+
+def _encode_updates_cursor(entry: Mapping[str, Any]) -> str:
+    sort_value = str(entry.get('cursor_value') or '')
+    processed_id = int(entry.get('processed_game_id') or 0)
+    entry_type = str(entry.get('entry_type') or 'm')
+    raw = f"{sort_value}|{processed_id}|{entry_type}"
+    encoded = base64.urlsafe_b64encode(raw.encode('utf-8')).decode('ascii')
+    return encoded.rstrip('=')
+
+
 def fetch_cached_updates(
-    *, offset: int = 0, limit: int = 100
-) -> tuple[list[dict[str, Any]], int, int]:
+    *, cursor: str | None = None, limit: int = 100
+) -> tuple[list[dict[str, Any]], int, str | None, bool]:
+    normalized_limit = limit if isinstance(limit, int) else 100
+    if normalized_limit <= 0:
+        normalized_limit = 100
+    normalized_limit = min(max(int(normalized_limit), 1), 500)
+    fetch_limit = normalized_limit + 1
+    marker = _parse_updates_cursor(cursor)
+
     with db_lock:
         conn = get_db()
         processed_columns = get_processed_games_columns(conn)
@@ -2630,30 +2752,53 @@ def fetch_cached_updates(
             if 'Large Cover Image (URL)' in processed_columns
             else 'NULL AS cover_url'
         )
-        cur = conn.execute(
+        relation_count_sql = ', '.join(
+            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = p."ID") AS {relation["join_table"]}_count'
+            for relation in LOOKUP_RELATIONS
+        )
+
+        order_expr = "COALESCE(u.refreshed_at, u.local_last_edited_at, u.igdb_updated_at, '')"
+        mismatch_where: list[str] = []
+        mismatch_params: list[Any] = []
+        if marker is not None:
+            mismatch_where.append(
+                f"({order_expr} < ? OR ({order_expr} = ? AND u.processed_game_id < ?))"
+            )
+            mismatch_params.extend(
+                [
+                    marker['sort_value'],
+                    marker['sort_value'],
+                    marker['processed_game_id'],
+                ]
+            )
+        mismatch_query = (
             f'''SELECT
                    u.processed_game_id,
                    u.igdb_id,
                    u.igdb_updated_at,
                    u.local_last_edited_at,
                    u.refreshed_at,
-                   u.diff,
                    u.has_diff,
+                   {order_expr} AS order_value,
                    p."Name" AS game_name,
                    p."Cover Path" AS cover_path,
                    {cover_url_select}
                FROM igdb_updates u
                LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
-               ORDER BY p."Name" COLLATE NOCASE
+               {('WHERE ' + ' AND '.join(mismatch_where)) if mismatch_where else ''}
+               ORDER BY {order_expr} DESC, u.processed_game_id DESC
+               LIMIT ?
             '''
         )
-        update_rows = cur.fetchall()
+        mismatch_rows = conn.execute(
+            mismatch_query,
+            (*mismatch_params, fetch_limit),
+        ).fetchall()
 
-        relation_count_sql = ', '.join(
-            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = p."ID") AS {relation["join_table"]}_count'
-            for relation in LOOKUP_RELATIONS
+        duplicate_order_expr = (
+            "COALESCE(p.last_edited_at, CAST(cache.updated_at AS TEXT), '')"
         )
-        duplicate_cur = conn.execute(
+        duplicate_query = (
             f'''SELECT
                    p."ID",
                    p."Source Index",
@@ -2668,83 +2813,114 @@ def fetch_cached_updates(
                    p.last_edited_at,
                    {relation_count_sql},
                    {cover_url_select},
-                   cache.updated_at AS cache_updated_at
+                   cache.updated_at AS cache_updated_at,
+                   {duplicate_order_expr} AS order_value
                FROM processed_games p
+               LEFT JOIN igdb_updates u ON u.processed_game_id = p."ID"
                LEFT JOIN {IGDB_CACHE_TABLE} cache ON cache.igdb_id = p."igdb_id"
-            '''
+               WHERE u.processed_game_id IS NULL
+                 AND p."igdb_id" IS NOT NULL AND TRIM(p."igdb_id") != ''
+                 AND EXISTS (
+                     SELECT 1 FROM processed_games other
+                     WHERE other."igdb_id" = p."igdb_id" AND other."ID" != p."ID"
+                 )
+        '''
         )
-        duplicate_rows = duplicate_cur.fetchall()
+        duplicate_rows = conn.execute(
+            duplicate_query,
+        ).fetchall()
 
-    updates: list[dict[str, Any]] = []
+        mismatch_total = conn.execute('SELECT COUNT(*) FROM igdb_updates').fetchone()[0] or 0
+
+    entries: list[dict[str, Any]] = []
     existing_ids: set[int] = set()
-    for row in update_rows:
-        try:
-            has_diff = bool(row['has_diff'])
-        except (KeyError, TypeError):
-            has_diff = bool(row['diff'])
-        try:
-            processed_id = int(row['processed_game_id'])
-        except (TypeError, ValueError):
-            processed_id = None
-        if processed_id is not None:
-            existing_ids.add(processed_id)
-        cover_available = bool(row['cover_path'] or row['cover_url'])
-        updates.append(
-            {
-                'processed_game_id': row['processed_game_id'],
-                'igdb_id': row['igdb_id'],
-                'igdb_updated_at': row['igdb_updated_at'],
-                'local_last_edited_at': row['local_last_edited_at'],
-                'refreshed_at': row['refreshed_at'],
-                'name': row['game_name'],
-                'has_diff': has_diff,
-                'cover': None,
-                'cover_available': cover_available,
-                'update_type': 'mismatch' if has_diff else None,
-                'detail_available': True,
-            }
-        )
 
+    for row in mismatch_rows:
+        processed_id = int(row['processed_game_id']) if row['processed_game_id'] is not None else None
+        if processed_id is None:
+            continue
+        cover_available = bool(row['cover_path'] or row['cover_url'])
+        entry = {
+            'processed_game_id': processed_id,
+            'igdb_id': row['igdb_id'],
+            'igdb_updated_at': _normalize_timestamp(row['igdb_updated_at']),
+            'local_last_edited_at': _normalize_timestamp(row['local_last_edited_at']),
+            'refreshed_at': _normalize_timestamp(row['refreshed_at']),
+            'name': row['game_name'],
+            'has_diff': bool(row['has_diff']),
+            'cover': None,
+            'cover_available': cover_available,
+            'update_type': 'mismatch',
+            'detail_available': True,
+            'entry_type': 'm',
+            'cursor_value': row['order_value'] or '',
+        }
+        entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
+        entries.append(entry)
+        existing_ids.add(processed_id)
+
+    duplicate_entries: list[dict[str, Any]] = []
     duplicate_resolutions, _, _, _ = _scan_duplicate_candidates(duplicate_rows)
     for resolution in duplicate_resolutions:
-        for row in resolution.duplicates:
-            try:
-                processed_id = int(row['ID'])
-            except (TypeError, ValueError):
-                continue
-            if processed_id in existing_ids:
+        for duplicate_row in resolution.duplicates:
+            row_map = dict(duplicate_row)
+            processed_id = processed_duplicates.coerce_int(row_map.get('ID'))
+            if processed_id is None or processed_id in existing_ids:
                 continue
             existing_ids.add(processed_id)
-            igdb_updated = _normalize_timestamp(row['cache_updated_at']) if row['cache_updated_at'] else ''
-            cover_available = bool(row['Cover Path'] or row['cover_url'])
-            updates.append(
-                {
-                    'processed_game_id': processed_id,
-                    'igdb_id': row['igdb_id'],
-                    'igdb_updated_at': igdb_updated,
-                    'local_last_edited_at': row['last_edited_at'],
-                    'refreshed_at': None,
-                    'name': row['Name'],
-                    'has_diff': False,
-                    'cover': None,
-                    'cover_available': cover_available,
-                    'update_type': 'duplicate',
-                    'detail_available': False,
-                }
-            )
+            cover_available = bool(row_map.get('Cover Path') or row_map.get('cover_url'))
+            order_value = row_map.get('order_value') or row_map.get('last_edited_at') or row_map.get('cache_updated_at')
+            entry = {
+                'processed_game_id': processed_id,
+                'igdb_id': row_map.get('igdb_id'),
+                'igdb_updated_at': _normalize_timestamp(row_map.get('cache_updated_at')),
+                'local_last_edited_at': _normalize_timestamp(row_map.get('last_edited_at')),
+                'refreshed_at': None,
+                'name': row_map.get('Name'),
+                'has_diff': False,
+                'cover': None,
+                'cover_available': cover_available,
+                'update_type': 'duplicate',
+                'detail_available': False,
+                'entry_type': 'd',
+                'cursor_value': order_value or '',
+            }
+            entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
+            duplicate_entries.append(entry)
 
-    total = len(updates)
-    normalized_offset = max(min(offset, total), 0)
-    effective_limit = limit if isinstance(limit, int) and limit is not None else total
-    if effective_limit is None or effective_limit <= 0:
-        effective_limit = total - normalized_offset
-    end = normalized_offset + max(effective_limit, 0)
-    if end < normalized_offset:
-        end = normalized_offset
-    if end > total:
-        end = total
-    paged = updates[normalized_offset:end]
-    return paged, total, normalized_offset
+    entries.extend(duplicate_entries)
+
+    entries.sort(
+        key=lambda item: (
+            -float(item.get('cursor_numeric', float('-inf'))),
+            -int(item.get('processed_game_id') or 0),
+            _entry_type_rank(str(item.get('entry_type', 'm'))),
+        )
+    )
+
+    filtered: list[dict[str, Any]] = []
+    for entry in entries:
+        if marker is not None:
+            comparison = _compare_entries_desc(entry, marker)
+            if comparison != 1:
+                continue
+        filtered.append(entry)
+
+    has_more = False
+    if len(filtered) > normalized_limit:
+        has_more = True
+        filtered = filtered[:normalized_limit]
+    else:
+        has_more = len(mismatch_rows) > normalized_limit or len(duplicate_entries) > normalized_limit
+
+    for entry in filtered:
+        entry.pop('cursor_numeric', None)
+        entry.pop('entry_type', None)
+
+    next_cursor = _encode_updates_cursor(filtered[-1]) if has_more and filtered else None
+    duplicate_total = len(duplicate_entries)
+    total = int(mismatch_total) + int(duplicate_total)
+    return filtered, total, next_cursor, has_more
 
 
 def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
