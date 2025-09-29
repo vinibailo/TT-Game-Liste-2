@@ -658,7 +658,10 @@ def api_updates_job_detail_legacy(job_id: str):
 @updates_blueprint.route('/api/updates', methods=['GET'])
 @handle_api_errors
 def api_updates_list():
-    fetch_cached_updates = _ctx('fetch_cached_updates')
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+    get_processed_games_columns = _ctx('get_processed_games_columns')
+
     try:
         limit = int(request.args.get('limit', 100))
     except (TypeError, ValueError):
@@ -667,21 +670,104 @@ def api_updates_list():
         limit = 100
     limit = min(limit, 500)
 
-    cursor = request.args.get('cursor')
-    items, total, next_cursor, has_more = fetch_cached_updates(
-        cursor=cursor, limit=limit
-    )
-    payload: dict[str, Any] = {
-        'items': items,
-        'total': total,
-        'limit': limit,
-        'has_more': has_more,
-    }
-    if cursor:
-        payload['cursor'] = cursor
-    if next_cursor:
-        payload['next_cursor'] = next_cursor
-    return jsonify(payload)
+    after_param = request.args.get('after', None)
+    after: int | None = None
+    if after_param not in (None, '', 'null'):
+        try:
+            parsed_after = int(after_param)
+        except (TypeError, ValueError):
+            parsed_after = None
+        if parsed_after is not None and parsed_after >= 0:
+            after = parsed_after
+
+    fetch_limit = limit + 1
+
+    with db_lock:
+        conn = get_db()
+        processed_columns = get_processed_games_columns(conn)
+        cover_url_select = (
+            'p."Large Cover Image (URL)" AS cover_url'
+            if 'Large Cover Image (URL)' in processed_columns
+            else 'NULL AS cover_url'
+        )
+
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if after is not None:
+            where_clauses.append('u.rowid > ?')
+            params.append(after)
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ''
+
+        query = (
+            f'''SELECT
+                   u.rowid AS row_id,
+                   u.processed_game_id,
+                   u.igdb_id,
+                   u.igdb_updated_at,
+                   u.local_last_edited_at,
+                   u.refreshed_at,
+                   u.has_diff,
+                   p."Name" AS game_name,
+                   p."Cover Path" AS cover_path,
+                   {cover_url_select}
+               FROM igdb_updates u
+               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
+               {where_sql}
+               ORDER BY u.rowid ASC
+               LIMIT ?'''
+        )
+
+        params.append(fetch_limit)
+        rows = conn.execute(query, params).fetchall()
+
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    items: list[dict[str, Any]] = []
+    next_after: int | None = None
+
+    for row in rows:
+        row_map = dict(row)
+        processed_id = row_map.get('processed_game_id')
+        if processed_id is None:
+            continue
+        try:
+            processed_id_int = int(processed_id)
+        except (TypeError, ValueError):
+            continue
+
+        row_id = row_map.get('row_id')
+        try:
+            row_id_int = int(row_id)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            row_id_int = None
+
+        cover_available = bool(row_map.get('cover_path') or row_map.get('cover_url'))
+
+        items.append(
+            {
+                'id': row_id_int,
+                'processed_game_id': processed_id_int,
+                'igdb_id': row_map.get('igdb_id'),
+                'igdb_updated_at': row_map.get('igdb_updated_at'),
+                'local_last_edited_at': row_map.get('local_last_edited_at'),
+                'refreshed_at': row_map.get('refreshed_at'),
+                'name': row_map.get('game_name'),
+                'has_diff': bool(row_map.get('has_diff')), 
+                'cover': None,
+                'cover_available': cover_available,
+                'update_type': 'mismatch',
+                'detail_available': True,
+            }
+        )
+
+    if has_more and items:
+        last_item = items[-1]
+        next_after = last_item.get('id')
+
+    return jsonify({'items': items, 'nextAfter': next_after})
 
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])
