@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterable
 from typing import Any, Mapping
 
 from datetime import datetime
 
-from flask import Blueprint, current_app, jsonify, render_template, request, url_for
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    jsonify,
+    render_template,
+    request,
+    stream_with_context,
+    url_for,
+)
 from werkzeug.routing import BaseConverter
 
 from updates.service import refresh_igdb_cache
@@ -85,6 +95,66 @@ def _collect_job_errors(job: Mapping[str, Any]) -> list[str]:
                 errors.append(text)
 
     return errors
+
+
+def _build_progress_snapshot() -> dict[str, Any]:
+    """Return a normalized snapshot of background job progress."""
+
+    job_manager = _ctx("job_manager")
+    jobs = job_manager.list_jobs()
+    payload: list[dict[str, Any]] = []
+    for job in jobs:
+        if isinstance(job, Mapping):
+            payload.append(dict(job))
+    return {"jobs": payload}
+
+
+@updates_blueprint.route("/api/progress", methods=["GET"])
+@handle_api_errors
+def api_progress_snapshot():
+    """Return the current background job progress snapshot."""
+
+    return jsonify(_build_progress_snapshot())
+
+
+@updates_blueprint.route("/api/progress/stream", methods=["GET"])
+def api_progress_stream():
+    """Stream background job progress updates using server-sent events."""
+
+    def _event_stream():
+        last_payload = ""
+        last_heartbeat = time.monotonic()
+        keepalive_interval = 15.0
+        poll_interval = 1.0
+
+        try:
+            while True:
+                try:
+                    snapshot = _build_progress_snapshot()
+                except Exception:  # pragma: no cover - defensive logging
+                    current_app.logger.exception("Failed to build progress snapshot")
+                    snapshot = {"jobs": []}
+
+                data = json.dumps(snapshot, sort_keys=True)
+                if data != last_payload:
+                    yield f"data: {data}\n\n"
+                    last_payload = data
+                    last_heartbeat = time.monotonic()
+                elif time.monotonic() - last_heartbeat >= keepalive_interval:
+                    yield ": keep-alive\n\n"
+                    last_heartbeat = time.monotonic()
+
+                time.sleep(poll_interval)
+        except GeneratorExit:  # pragma: no cover - connection closed
+            return
+
+    response = Response(
+        stream_with_context(_event_stream()),
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @updates_blueprint.route('/updates')
