@@ -14,6 +14,7 @@
         fixingNames: false,
         deduping: false,
         refreshing: false,
+        comparing: false,
         jobs: new Map(),
         jobPollers: new Map(),
         activeJobIds: new Map(),
@@ -31,6 +32,7 @@
 
     const JOB_TYPES = Object.freeze({
         refresh: 'refresh_updates',
+        compare: 'compare_updates',
         fix: 'fix_names',
         dedupe: 'remove_duplicates',
     });
@@ -59,6 +61,7 @@
         loadingState: document.querySelector('[data-loading-state]'),
         searchInput: document.querySelector('[data-search]'),
         refreshButton: document.querySelector('[data-refresh]'),
+        compareButton: document.querySelector('[data-compare]'),
         countLabel: document.querySelector('[data-count]'),
         statusLabel: document.querySelector('[data-refresh-status]'),
         sortButtons: Array.from(document.querySelectorAll('.sort-button[data-sort]')),
@@ -67,15 +70,23 @@
         fixCount: document.querySelector('[data-fix-count]'),
         fixPercent: document.querySelector('[data-fix-percent]'),
         fixBar: document.querySelector('[data-fix-bar]'),
+        fixMessage: document.querySelector('[data-fix-message]'),
         dedupeButton: document.querySelector('[data-remove-duplicates]'),
         dedupeProgress: document.querySelector('[data-dedupe-progress]'),
         dedupeCount: document.querySelector('[data-dedupe-count]'),
         dedupePercent: document.querySelector('[data-dedupe-percent]'),
         dedupeBar: document.querySelector('[data-dedupe-bar]'),
+        dedupeMessage: document.querySelector('[data-dedupe-message]'),
         refreshProgress: document.querySelector('[data-refresh-progress]'),
         refreshCount: document.querySelector('[data-refresh-count]'),
         refreshPercent: document.querySelector('[data-refresh-percent]'),
         refreshBar: document.querySelector('[data-refresh-bar]'),
+        refreshMessage: document.querySelector('[data-refresh-message]'),
+        compareProgress: document.querySelector('[data-compare-progress]'),
+        compareCount: document.querySelector('[data-compare-count]'),
+        comparePercent: document.querySelector('[data-compare-percent]'),
+        compareBar: document.querySelector('[data-compare-bar]'),
+        compareMessage: document.querySelector('[data-compare-message]'),
         pagination: document.querySelector('[data-pagination]'),
         paginationInfo: document.querySelector('[data-page-info]'),
         paginationPrev: document.querySelector('[data-page-prev]'),
@@ -100,6 +111,13 @@
     let toastTimer = null;
     let lastFocusedElement = null;
 
+    const defaultProgressMessages = {
+        refresh: elements.refreshMessage ? elements.refreshMessage.textContent : '',
+        compare: elements.compareMessage ? elements.compareMessage.textContent : '',
+        fix: elements.fixMessage ? elements.fixMessage.textContent : '',
+        dedupe: elements.dedupeMessage ? elements.dedupeMessage.textContent : '',
+    };
+
     function showToast(message, type = 'success') {
         if (!toast) {
             return;
@@ -113,6 +131,14 @@
         toastTimer = setTimeout(() => {
             toast.classList.remove('show');
         }, 3200);
+    }
+
+    function setProgressMessage(target, message, fallback = '') {
+        if (!target) {
+            return;
+        }
+        const text = typeof message === 'string' && message.trim() ? message.trim() : fallback;
+        target.textContent = text;
     }
 
     function toNonNegativeInt(value, fallback = 0) {
@@ -781,6 +807,30 @@
         }
     }
 
+    function setCompareButtonLoading(loading) {
+        const button = elements.compareButton;
+        if (!button) {
+            return;
+        }
+        const label = button.querySelector('.btn-label');
+        if (loading) {
+            button.disabled = true;
+            button.setAttribute('aria-busy', 'true');
+            if (label) {
+                if (!button.dataset.originalLabel) {
+                    button.dataset.originalLabel = label.textContent || '';
+                }
+                label.textContent = 'Comparing…';
+            }
+        } else {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+            if (label && button.dataset.originalLabel) {
+                label.textContent = button.dataset.originalLabel;
+            }
+        }
+    }
+
     function setFixButtonLoading(loading) {
         const button = elements.fixButton;
         if (!button) {
@@ -838,6 +888,19 @@
             return;
         }
         container.hidden = !visible;
+        if (visible) {
+            setProgressMessage(
+                elements.dedupeMessage,
+                defaultProgressMessages.dedupe,
+                defaultProgressMessages.dedupe,
+            );
+        } else {
+            setProgressMessage(
+                elements.dedupeMessage,
+                defaultProgressMessages.dedupe,
+                defaultProgressMessages.dedupe,
+            );
+        }
     }
 
     function updateDedupeProgress(processed, total) {
@@ -876,6 +939,11 @@
             return;
         }
         container.hidden = !visible;
+        if (visible) {
+            setProgressMessage(elements.fixMessage, defaultProgressMessages.fix, defaultProgressMessages.fix);
+        } else {
+            setProgressMessage(elements.fixMessage, defaultProgressMessages.fix, defaultProgressMessages.fix);
+        }
     }
 
     function updateFixProgress(processed, total) {
@@ -916,9 +984,22 @@
             return;
         }
         container.hidden = !visible;
+        if (visible) {
+            setProgressMessage(
+                elements.refreshMessage,
+                defaultProgressMessages.refresh,
+                defaultProgressMessages.refresh,
+            );
+        } else if (elements.refreshMessage) {
+            setProgressMessage(
+                elements.refreshMessage,
+                defaultProgressMessages.refresh,
+                defaultProgressMessages.refresh,
+            );
+        }
     }
 
-    function updateRefreshProgress(processed, queued, phase = state.refreshPhase || 'idle') {
+    function updateRefreshProgress(processed, queued, phase = state.refreshPhase || 'idle', options = {}) {
         const countLabel = elements.refreshCount;
         const percentLabel = elements.refreshPercent;
         const bar = elements.refreshBar;
@@ -951,6 +1032,98 @@
         if (bar) {
             bar.style.width = `${percentValue}%`;
         }
+        const message = options && typeof options.message === 'string'
+            ? options.message
+            : (() => {
+                  switch (phase) {
+                      case 'pending':
+                          return 'Preparing IGDB cache…';
+                      case 'running':
+                      case 'cache':
+                          return 'Updating IGDB cache…';
+                      case 'idle':
+                          return 'IGDB cache update complete.';
+                      default:
+                          return defaultProgressMessages.refresh;
+                  }
+              })();
+        setProgressMessage(elements.refreshMessage, message, defaultProgressMessages.refresh);
+    }
+
+    function setCompareProgressVisible(visible) {
+        const container = elements.compareProgress;
+        if (!container) {
+            return;
+        }
+        container.hidden = !visible;
+        if (visible) {
+            setProgressMessage(
+                elements.compareMessage,
+                defaultProgressMessages.compare,
+                defaultProgressMessages.compare,
+            );
+        } else {
+            setProgressMessage(
+                elements.compareMessage,
+                defaultProgressMessages.compare,
+                defaultProgressMessages.compare,
+            );
+        }
+    }
+
+    function updateCompareProgress(processed, total, options = {}) {
+        const countLabel = elements.compareCount;
+        const percentLabel = elements.comparePercent;
+        const bar = elements.compareBar;
+        const processedNumber = Number(processed);
+        const totalNumber = Number(total);
+        const totalValue = Number.isFinite(totalNumber) ? Math.max(Math.round(totalNumber), 0) : 0;
+        const processedValue = Number.isFinite(processedNumber)
+            ? Math.max(Math.round(processedNumber), 0)
+            : 0;
+        const boundedProcessed = totalValue > 0
+            ? Math.min(processedValue, totalValue)
+            : processedValue;
+        if (countLabel) {
+            countLabel.textContent = totalValue > 0
+                ? `${boundedProcessed}/${totalValue}`
+                : `${boundedProcessed}`;
+        }
+        const percentValue = totalValue > 0
+            ? Math.min(100, totalValue > 0 ? (boundedProcessed / totalValue) * 100 : 0)
+            : 0;
+        const percentText = Number.isFinite(percentValue)
+            ? (percentValue % 1 === 0 ? percentValue.toFixed(0) : percentValue.toFixed(1))
+            : '0';
+        if (percentLabel) {
+            percentLabel.textContent = `${percentText}%`;
+        }
+        if (bar) {
+            bar.style.width = `${Math.min(100, Math.max(percentValue, 0))}%`;
+        }
+        const data = options && typeof options === 'object' ? options.data : null;
+        let message = options && typeof options.message === 'string' ? options.message : '';
+        if (!message && data && typeof data === 'object') {
+            const phase = typeof data.phase === 'string' ? data.phase : '';
+            if (phase === 'diffs') {
+                const missingCount = Number(data.missing_count);
+                if (Number.isFinite(missingCount) && missingCount > 0) {
+                    message = `Comparing entries… ${missingCount} missing IGDB record${missingCount === 1 ? '' : 's'}.`;
+                } else {
+                    message = 'Comparing processed games with the IGDB cache…';
+                }
+            } else if (phase === 'done' || phase === 'idle') {
+                message = 'Comparison complete.';
+            }
+        }
+        if (!message) {
+            if (totalValue > 0 && boundedProcessed >= totalValue) {
+                message = 'Comparison complete.';
+            } else {
+                message = defaultProgressMessages.compare;
+            }
+        }
+        setProgressMessage(elements.compareMessage, message, defaultProgressMessages.compare);
     }
 
     function updateProgressBar(processed, total) {
@@ -1011,6 +1184,21 @@
         }
 
         switch (type) {
+            case JOB_TYPES.compare: {
+                state.comparing = active;
+                setCompareButtonLoading(active);
+                if (active) {
+                    setCompareProgressVisible(true);
+                    updateCompareProgress(job.progress_current || 0, job.progress_total || 0, {
+                        data: job.data,
+                        message: job.message,
+                    });
+                } else {
+                    updateCompareProgress(0, 0);
+                    setCompareProgressVisible(false);
+                }
+                break;
+            }
             case JOB_TYPES.fix: {
                 state.fixingNames = active;
                 setFixButtonLoading(active);
@@ -1078,7 +1266,16 @@
         const type = job.job_type;
         const status = job.status;
         const result = job.result || {};
-        if (type === JOB_TYPES.fix) {
+        if (type === JOB_TYPES.compare) {
+            state.comparing = false;
+            setCompareButtonLoading(false);
+            updateCompareProgress(0, 0);
+            setCompareProgressVisible(false);
+            if (status === 'success') {
+                state.detailCache.clear();
+                loadUpdates();
+            }
+        } else if (type === JOB_TYPES.fix) {
             state.fixingNames = false;
             setFixButtonLoading(false);
             updateFixProgress(0, 0);
@@ -1729,6 +1926,31 @@
         }
     }
 
+    async function handleCompare() {
+        if (state.comparing) {
+            return;
+        }
+        if (!config.compareUrl) {
+            showToast('Comparison endpoint is not configured.', 'warning');
+            return;
+        }
+        state.comparing = true;
+        setCompareButtonLoading(true);
+        setCompareProgressVisible(true);
+        updateCompareProgress(0, 0);
+        try {
+            const job = await startJob(config.compareUrl);
+            monitorJob(job);
+        } catch (error) {
+            console.error(error);
+            showToast(error.message, 'warning');
+            state.comparing = false;
+            setCompareButtonLoading(false);
+            updateCompareProgress(0, 0);
+            setCompareProgressVisible(false);
+        }
+    }
+
     async function fetchUpdatesBatch(offset = DEFAULT_OFFSET, limit = DEFAULT_UPDATES_LIMIT) {
         const resolvedOffset = resolveOffset(offset);
         const resolvedLimit = resolveLimit(limit, DEFAULT_UPDATES_LIMIT);
@@ -1879,6 +2101,9 @@
         }
         if (elements.refreshButton) {
             elements.refreshButton.addEventListener('click', handleRefresh);
+        }
+        if (elements.compareButton) {
+            elements.compareButton.addEventListener('click', handleCompare);
         }
         if (elements.fixButton) {
             elements.fixButton.addEventListener('click', handleFixNames);

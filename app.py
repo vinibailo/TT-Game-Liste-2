@@ -3218,6 +3218,30 @@ def _execute_refresh_job(
 
 
 
+def _execute_compare_updates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
+    """Background job helper that recomputes IGDB update diffs only."""
+
+    diff_summary = _run_refresh_diff_phase(update_progress)
+
+    message = diff_summary.get('status_message', '').strip() if diff_summary else ''
+    if not message:
+        message = 'Comparison complete.'
+    toast_type = 'warning' if diff_summary and diff_summary.get('missing_count', 0) else 'success'
+
+    update_progress(message='Comparison complete.', data={'phase': 'done'})
+
+    return {
+        'status': 'ok',
+        'diff_summary': diff_summary,
+        'message': message,
+        'toast_type': toast_type,
+        'updated': diff_summary.get('updated', 0) if diff_summary else 0,
+        'missing': diff_summary.get('missing', []) if diff_summary else [],
+        'missing_count': diff_summary.get('missing_count', 0) if diff_summary else 0,
+    }
+
+
+
 def _execute_fix_names_job(
     update_progress: Callable[..., None],
     *,
@@ -3327,6 +3351,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         '_igdb_prefill_cache': _igdb_prefill_cache,
         'refresh_cache_job': _execute_refresh_cache_job,
         '_execute_refresh_job': _execute_refresh_job,
+        'compare_updates_job': _execute_compare_updates_job,
         'job_manager': job_manager,
         'fix_names_job': _execute_fix_names_job,
         'remove_duplicates_job': _execute_remove_duplicates_job,
