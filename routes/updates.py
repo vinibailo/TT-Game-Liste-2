@@ -105,11 +105,46 @@ def api_igdb_cache_refresh():
 
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
+        exchange_helper = _ctx('exchange_twitch_credentials')
         try:
-            result = refresh_cache_job(
-                lambda **_kwargs: None,
-                offset=offset,
-                limit=limit,
+            helper_result = exchange_helper() if callable(exchange_helper) else exchange_helper
+            if callable(helper_result):
+                exchange_callable = helper_result
+                access_token, client_id = exchange_callable()
+            elif isinstance(helper_result, (tuple, list)) and len(helper_result) >= 2:
+                exchange_callable = None
+                access_token, client_id = helper_result[0], helper_result[1]
+            else:
+                raise RuntimeError('Unable to resolve IGDB credentials')
+
+            download_total_helper = _ctx('download_igdb_game_count')
+            download_total = (
+                download_total_helper()
+                if callable(download_total_helper)
+                else download_total_helper
+            )
+            download_games_helper = _ctx('download_igdb_games')
+            download_games = (
+                download_games_helper()
+                if callable(download_games_helper)
+                else download_games_helper
+            )
+
+            result = refresh_igdb_cache(
+                access_token,
+                client_id,
+                offset,
+                limit,
+                conn=_ctx('get_db')(),
+                db_lock=_ctx('db_lock'),
+                get_cached_total=_ctx('_get_cached_igdb_total'),
+                set_cached_total=_ctx('_set_cached_igdb_total'),
+                download_total=download_total,
+                download_games=download_games,
+                upsert_games=_ctx('_upsert_igdb_cache_entries'),
+                exchange_credentials=exchange_callable,
+                igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
+                igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
             )
         except RuntimeError as exc:
             raise UpstreamServiceError(str(exc)) from exc
