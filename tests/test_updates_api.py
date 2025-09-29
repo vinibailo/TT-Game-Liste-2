@@ -294,6 +294,31 @@ def test_updates_refresh_handles_runtime_error(tmp_path):
     assert response.status_code == 502
     assert response.get_json() == {'error': 'network unavailable'}
 
+
+def test_updates_compare_runs_sync(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    recorded: dict[str, Any] = {}
+
+    def fake_compare_job(update_progress):
+        recorded['called'] = True
+        update_progress(message='Comparing…', data={'phase': 'diffs'})
+        return {'status': 'ok', 'message': 'Comparison complete.', 'toast_type': 'success'}
+
+    app_module.routes_updates._context['compare_updates_job'] = fake_compare_job
+
+    response = client.post('/api/updates/compare?sync=1')
+    assert response.status_code == 200
+    assert response.get_json() == {
+        'status': 'ok',
+        'message': 'Comparison complete.',
+        'toast_type': 'success',
+    }
+    assert recorded['called'] is True
+
+
 def test_refresh_creates_update_records(tmp_path):
     app_module = load_app(tmp_path)
     insert_processed_game(app_module)
@@ -570,6 +595,24 @@ def test_refresh_parses_involved_companies(tmp_path):
     assert diff['Platforms']['added'] == ['Switch']
     assert diff['Platforms']['removed'] == []
     assert 'Game Modes' not in diff
+
+
+def test_compare_updates_job_recomputes_diffs(tmp_path):
+    app_module = load_app(tmp_path)
+    insert_processed_game(app_module)
+    insert_igdb_cache_entry(app_module, 100, name='Cache Game', summary='Updated summary')
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    result = app_module._execute_compare_updates_job(lambda **_kwargs: None)
+    assert result['status'] == 'ok'
+    assert result['updated'] == 1
+
+    detail = client.get('/api/updates/1')
+    assert detail.status_code == 200
+    payload = detail.get_json()
+    assert payload['igdb_id'] == '100'
+    assert payload['diff']
 
 
 def test_build_igdb_diff_formats_first_release_date(tmp_path):

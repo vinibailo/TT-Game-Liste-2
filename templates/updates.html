@@ -44,17 +44,17 @@
                         <span class="btn-icon" aria-hidden="true">
                             <span class="material-symbols-rounded">refresh</span>
                         </span>
-                        <span class="btn-label">Update</span>
+                        <span class="btn-label">Update Cache</span>
                     </button>
-                    <div class="progress-indicator updates-progress" data-refresh-progress hidden>
-                        <div class="progress-metrics">
-                            <span class="progress-count" data-refresh-count>0/0</span>
-                            <span class="progress-percent" data-refresh-percent>0%</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" data-refresh-bar></div>
-                        </div>
-                    </div>
+                </div>
+                <div class="updates-bulk-action">
+                    <button type="button" class="btn btn-yellow" data-compare>
+                        <span class="btn-icon" aria-hidden="true">
+                            <span class="material-symbols-rounded">compare_arrows</span>
+                        </span>
+                        <span class="btn-label">Compare</span>
+                        <span class="sr-only">Compare processed games with the cached IGDB data</span>
+                    </button>
                 </div>
                 <div class="updates-bulk-action">
                     <button type="button" class="btn btn-green" data-fix-names>
@@ -64,15 +64,6 @@
                         <span class="btn-label">Fix IGDB Names</span>
                         <span class="sr-only">Fix processed game names using IGDB data</span>
                     </button>
-                    <div class="progress-indicator updates-progress" data-fix-progress hidden>
-                        <div class="progress-metrics">
-                            <span class="progress-count" data-fix-count>0/0</span>
-                            <span class="progress-percent" data-fix-percent>0%</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" data-fix-bar></div>
-                        </div>
-                    </div>
                 </div>
                 <div class="updates-bulk-action">
                     <button type="button" class="btn btn-red" data-remove-duplicates>
@@ -82,18 +73,83 @@
                         <span class="btn-label">Remove Duplicates</span>
                         <span class="sr-only">Remove unprocessed duplicate IGDB entries</span>
                     </button>
-                    <div class="progress-indicator updates-progress" data-dedupe-progress hidden>
-                        <div class="progress-metrics">
-                            <span class="progress-count" data-dedupe-count>0/0</span>
-                            <span class="progress-percent" data-dedupe-percent>0%</span>
-                        </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" data-dedupe-bar></div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </header>
+        <section class="updates-progress-stack" data-progress-stack aria-live="polite">
+            <div class="progress-indicator updates-progress" data-refresh-progress role="status" hidden>
+                <div class="progress-body">
+                    <div class="progress-info">
+                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">refresh</span>
+                        <div class="progress-text">
+                            <span class="progress-title">Updating IGDB cache</span>
+                            <span class="progress-message" data-refresh-message>Preparing IGDB cache…</span>
+                        </div>
+                    </div>
+                    <div class="progress-metrics">
+                        <span class="progress-count" data-refresh-count>0/0</span>
+                        <span class="progress-percent" data-refresh-percent>0%</span>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" data-refresh-bar></div>
+                </div>
+            </div>
+            <div class="progress-indicator updates-progress" data-compare-progress role="status" hidden>
+                <div class="progress-body">
+                    <div class="progress-info">
+                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">compare_arrows</span>
+                        <div class="progress-text">
+                            <span class="progress-title">Comparing catalog entries</span>
+                            <span class="progress-message" data-compare-message>Comparing processed games with the IGDB cache…</span>
+                        </div>
+                    </div>
+                    <div class="progress-metrics">
+                        <span class="progress-count" data-compare-count>0/0</span>
+                        <span class="progress-percent" data-compare-percent>0%</span>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" data-compare-bar></div>
+                </div>
+            </div>
+            <div class="progress-indicator updates-progress" data-fix-progress role="status" hidden>
+                <div class="progress-body">
+                    <div class="progress-info">
+                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">spellcheck</span>
+                        <div class="progress-text">
+                            <span class="progress-title">Fixing IGDB names</span>
+                            <span class="progress-message" data-fix-message>Correcting processed game names using IGDB data…</span>
+                        </div>
+                    </div>
+                    <div class="progress-metrics">
+                        <span class="progress-count" data-fix-count>0/0</span>
+                        <span class="progress-percent" data-fix-percent>0%</span>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" data-fix-bar></div>
+                </div>
+            </div>
+            <div class="progress-indicator updates-progress" data-dedupe-progress role="status" hidden>
+                <div class="progress-body">
+                    <div class="progress-info">
+                        <span class="progress-icon material-symbols-rounded" aria-hidden="true">layers_clear</span>
+                        <div class="progress-text">
+                            <span class="progress-title">Removing duplicates</span>
+                            <span class="progress-message" data-dedupe-message>Cleaning duplicate IGDB entries…</span>
+                        </div>
+                    </div>
+                    <div class="progress-metrics">
+                        <span class="progress-count" data-dedupe-count>0/0</span>
+                        <span class="progress-percent" data-dedupe-percent>0%</span>
+                    </div>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" data-dedupe-bar></div>
+                </div>
+            </div>
+        </section>
         <section class="updates-summary" aria-live="polite">
             <span>Total entries:</span>
             <strong data-count>0</strong>
@@ -197,6 +253,7 @@
             updatesUrl: {{ url_for('updates.api_updates_list')|tojson }},
             refreshUrl: {{ url_for('updates.api_updates_refresh')|tojson }},
             cacheRefreshUrl: {{ url_for('updates.api_igdb_cache_refresh')|tojson }},
+            compareUrl: {{ url_for('updates.api_updates_compare')|tojson }},
             fixNamesUrl: {{ url_for('updates.api_updates_fix_names')|tojson }},
             removeDuplicatesUrl: {{ url_for('updates.api_updates_remove_duplicates')|tojson }},
             deleteDuplicateUrlTemplate: {{ url_for('updates.api_updates_remove_duplicate', processed_game_id=0)|replace('0', '{id}')|tojson }},

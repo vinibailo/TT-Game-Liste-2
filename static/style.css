@@ -781,13 +781,66 @@ textarea {
   flex-wrap: wrap;
 }
 
+.updates-progress-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 16px 0 24px;
+}
+
 .updates-progress {
   min-width: 0;
-  align-items: flex-start;
+  align-items: stretch;
+  padding: 16px 20px;
+  border-radius: 16px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  box-shadow: 0 18px 40px rgba(8, 15, 35, 0.35);
+}
+
+.updates-progress .progress-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.updates-progress .progress-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 220px;
+}
+
+.updates-progress .progress-icon {
+  font-size: 1.8rem;
+  color: var(--color-muted);
+}
+
+.updates-progress .progress-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.updates-progress .progress-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.updates-progress .progress-message {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+
+.updates-progress .progress-metrics {
+  align-items: baseline;
 }
 
 .updates-progress .progress-bar {
-  width: 200px;
+  width: 100%;
   max-width: 100%;
 }
 

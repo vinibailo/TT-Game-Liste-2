@@ -335,6 +335,29 @@ def api_updates_refresh():
     return jsonify(progress)
 
 
+@updates_blueprint.route('/api/updates/compare', methods=['POST'])
+@handle_api_errors
+def api_updates_compare():
+    job_manager = _ctx('job_manager')
+    compare_updates_job = _ctx('compare_updates_job')
+
+    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
+    if run_sync:
+        return jsonify(compare_updates_job(lambda **_kwargs: None))
+
+    job, created = job_manager.enqueue_job(
+        'compare_updates',
+        'app._execute_compare_updates_job',
+        description='Comparing IGDB cache with processed games…',
+    )
+
+    status_code = 202 if created else 200
+    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
+    if job:
+        response.headers['Location'] = url_for('updates.api_updates_job_detail', job_id=job['id'])
+    return response, status_code
+
+
 @updates_blueprint.route('/api/updates/fix-names', methods=['POST'])
 @handle_api_errors
 def api_updates_fix_names():
