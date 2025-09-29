@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
@@ -19,6 +20,73 @@ from igdb.client import (
 
 
 ProgressCallback = Callable[..., None]
+
+
+def _resolve_route_helper(name: str, fallback: Any) -> Any:
+    """Return a helper override from the update routes context if available."""
+
+    try:  # Lazy import to avoid circular imports at module load time.
+        from routes import updates as routes_updates  # type: ignore
+    except Exception:
+        return fallback
+
+    context = getattr(routes_updates, "_context", None)
+    if not isinstance(context, Mapping):
+        return fallback
+
+    helper = context.get(name)
+    candidate = helper
+    if callable(helper):
+        try:
+            candidate = helper()
+        except TypeError:
+            candidate = helper
+        except Exception:
+            return fallback
+
+    if callable(candidate):
+        return candidate
+
+    return fallback
+
+
+def fetch_batches_concurrently(
+    access_token: str,
+    client_id: str,
+    offsets: Iterable[int],
+    limit: int,
+    *,
+    max_workers: int = 4,
+) -> list[tuple[int, Sequence[Mapping[str, Any]]]]:
+    """Fetch multiple IGDB batches concurrently while preserving order."""
+
+    try:
+        worker_count = int(max_workers)
+    except (TypeError, ValueError):
+        worker_count = 1
+    if worker_count <= 0:
+        worker_count = 1
+
+    offset_list = list(offsets)
+    if not offset_list:
+        return []
+
+    futures: dict[Any, tuple[int, int]] = {}
+    results: list[tuple[int, int, Sequence[Mapping[str, Any]]]] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for index, offset in enumerate(offset_list):
+            futures[
+                executor.submit(
+                    client_download_igdb_games, access_token, client_id, offset, limit
+                )
+            ] = (index, offset)
+        for future in as_completed(futures):
+            index, offset = futures[future]
+            games = future.result()
+            results.append((index, offset, games))
+
+    results.sort(key=lambda item: item[0])
+    return [(offset, games) for _, offset, games in results]
 
 def _looks_like_auth_error(error: BaseException) -> bool:
     message = str(error).strip().casefold()
@@ -68,9 +136,11 @@ def refresh_igdb_cache(
     download_total_fn = download_total or partial(
         client_download_igdb_game_count, user_agent=IGDB_USER_AGENT
     )
+    download_total_fn = _resolve_route_helper('download_igdb_game_count', download_total_fn)
     download_games_fn = download_games or partial(
         client_download_igdb_games, user_agent=IGDB_USER_AGENT
     )
+    download_games_fn = _resolve_route_helper('download_igdb_games', download_games_fn)
 
     token_value = (access_token or "").strip()
     client_value = (client_id or "").strip()
@@ -193,8 +263,59 @@ def refresh_igdb_cache(
             'batch_count': 0,
         }
 
+    window_offsets: list[int] = [offset_value]
+    if offset_value > 0:
+        current_offset = offset_value + limit_value
+        max_window = 4
+        while len(window_offsets) < max_window and current_offset < total:
+            window_offsets.append(current_offset)
+            current_offset += limit_value
+
+    if not window_offsets:
+        return {
+            'status': 'ok',
+            'total': total,
+            'processed': offset_value,
+            'inserted': 0,
+            'updated': 0,
+            'unchanged': 0,
+            'done': True,
+            'next_offset': offset_value,
+            'batch_count': 0,
+        }
+
+    def _download_window() -> list[tuple[int, Sequence[Mapping[str, Any]]]]:
+        nonlocal token_value, client_value
+
+        def _perform() -> list[tuple[int, Sequence[Mapping[str, Any]]]]:
+            global client_download_igdb_games
+
+            original_downloader = client_download_igdb_games
+            override_downloader = download_games_fn or original_downloader
+            try:
+                if override_downloader is not original_downloader:
+                    client_download_igdb_games = override_downloader
+                return fetch_batches_concurrently(
+                    token_value,
+                    client_value,
+                    window_offsets,
+                    limit_value,
+                    max_workers=4,
+                )
+            finally:
+                client_download_igdb_games = original_downloader
+
+        token_value, client_value = _ensure_credentials()
+        try:
+            return _perform()
+        except RuntimeError as exc:
+            if exchange_credentials and _looks_like_auth_error(exc):
+                token_value, client_value = _ensure_credentials(force_refresh=True)
+                return _perform()
+            raise
+
     try:
-        payloads = _download_games_with_retry(offset_value, limit_value)
+        batch_payloads = _download_window()
     except RuntimeError as exc:
         return {
             'status': 'error',
@@ -208,26 +329,39 @@ def refresh_igdb_cache(
             'next_offset': max(offset_value, 0),
             'batch_count': 0,
         }
-    batch_count = len(payloads)
+
+    batch_payloads.sort(key=lambda item: item[0])
+    all_games: list[Mapping[str, Any]] = []
+    total_records = 0
+    highest_end = offset_value
+    for batch_offset, games in batch_payloads:
+        batch_list = list(games or [])
+        if batch_list:
+            all_games.extend(batch_list)
+        count = len(batch_list)
+        total_records += count
+        candidate_end = batch_offset + count
+        if candidate_end > highest_end:
+            highest_end = candidate_end
 
     inserted = updated = unchanged = 0
-    if batch_count:
+    if all_games:
         with acquire_lock():
             conn_obj = get_conn()
             with conn_obj:
-                inserted, updated, unchanged = upsert_games(conn_obj, payloads)
+                inserted, updated, unchanged = upsert_games(conn_obj, all_games)
         if igdb_prefill_lock is not None and igdb_prefill_cache is not None:
             with igdb_prefill_lock:
                 igdb_prefill_cache.clear()
 
-    processed = offset_value + batch_count
+    processed = highest_end if total_records else offset_value
     if processed < 0:
         processed = 0
     if total is not None:
         processed = min(processed, total)
 
-    done = processed >= total or batch_count == 0
-    next_offset = offset_value + batch_count if batch_count else processed
+    done = processed >= total or total_records == 0
+    next_offset = highest_end if total_records else processed
 
     return {
         'status': 'ok',
@@ -238,7 +372,7 @@ def refresh_igdb_cache(
         'unchanged': unchanged,
         'done': done,
         'next_offset': next_offset,
-        'batch_count': batch_count,
+        'batch_count': total_records,
     }
 
 
