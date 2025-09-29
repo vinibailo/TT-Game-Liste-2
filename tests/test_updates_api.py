@@ -521,6 +521,40 @@ def test_updates_list_since_filters_new_entries(tmp_path):
     assert payload['nextAfter'] is None
 
 
+def test_updates_list_responds_with_etag_and_304(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{
+            'Source Index': '0',
+            'Name': 'Cached Game',
+            'igdb_id': '200',
+            'Summary': 'Summary',
+        },
+    )
+    _insert_igdb_update(app_module, 1, '2024-05-05T10:00:00+00:00', has_diff=1)
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    first = client.get('/api/updates')
+    assert first.status_code == 200
+    etag = first.headers.get('ETag')
+    assert etag
+    assert first.headers.get('Cache-Control') == 'max-age=30, stale-while-revalidate=120'
+    payload = first.get_json()
+    assert isinstance(payload, dict)
+    assert payload['items']
+
+    second = client.get('/api/updates', headers={'If-None-Match': etag})
+    assert second.status_code == 304
+    assert second.headers.get('ETag') == etag
+    assert second.headers.get('Cache-Control') == 'max-age=30, stale-while-revalidate=120'
+
+
 def test_cache_refresh_creates_entries(tmp_path):
     app_module = load_app(tmp_path)
     client = app_module.app.test_client()
