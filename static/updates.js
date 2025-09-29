@@ -95,6 +95,10 @@
     const DEFAULT_OFFSET = 0;
     const DEFAULT_REFRESH_LIMIT = 200;
     const DEFAULT_UPDATES_LIMIT = 100;
+    const LOCAL_STORAGE_KEYS = Object.freeze({
+        updates: 'updates.cachedRows',
+        lastSeen: 'updates.lastSeenUpdatedAt',
+    });
 
     const elements = {
         tableBody: document.querySelector('[data-updates-body]'),
@@ -157,6 +161,113 @@
         toastTimer = setTimeout(() => {
             toast.classList.remove('show');
         }, 3200);
+    }
+
+    function getLocalStorage() {
+        if (typeof window === 'undefined') {
+            return null;
+        }
+        try {
+            return window.localStorage || null;
+        } catch (error) {
+            console.debug('localStorage is unavailable', error);
+            return null;
+        }
+    }
+
+    function loadCachedUpdates() {
+        const storage = getLocalStorage();
+        if (!storage) {
+            return null;
+        }
+        try {
+            const raw = storage.getItem(LOCAL_STORAGE_KEYS.updates);
+            if (!raw) {
+                return null;
+            }
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') {
+                return null;
+            }
+            const items = Array.isArray(parsed.items) ? parsed.items : [];
+            const nextAfter = parsed.nextAfter ?? parsed.next_after ?? null;
+            return {
+                items,
+                nextAfter,
+            };
+        } catch (error) {
+            console.debug('Failed to load cached updates', error);
+            return null;
+        }
+    }
+
+    function saveUpdatesCache(payload) {
+        const storage = getLocalStorage();
+        if (!storage) {
+            return;
+        }
+        if (!payload || !Array.isArray(payload.items) || payload.items.length === 0) {
+            storage.removeItem(LOCAL_STORAGE_KEYS.updates);
+            return;
+        }
+        try {
+            storage.setItem(
+                LOCAL_STORAGE_KEYS.updates,
+                JSON.stringify({
+                    items: payload.items,
+                    nextAfter: payload.nextAfter ?? null,
+                }),
+            );
+        } catch (error) {
+            console.debug('Failed to persist updates cache', error);
+        }
+    }
+
+    function loadLastSeenUpdatedAt() {
+        const storage = getLocalStorage();
+        if (!storage) {
+            return null;
+        }
+        try {
+            const value = storage.getItem(LOCAL_STORAGE_KEYS.lastSeen);
+            if (!value) {
+                return null;
+            }
+            const trimmed = value.trim();
+            return trimmed ? trimmed : null;
+        } catch (error) {
+            console.debug('Failed to load last seen timestamp', error);
+            return null;
+        }
+    }
+
+    function saveLastSeenUpdatedAt(value) {
+        const storage = getLocalStorage();
+        if (!storage) {
+            return;
+        }
+        if (typeof value !== 'string' || !value.trim()) {
+            storage.removeItem(LOCAL_STORAGE_KEYS.lastSeen);
+            return;
+        }
+        try {
+            storage.setItem(LOCAL_STORAGE_KEYS.lastSeen, value.trim());
+        } catch (error) {
+            console.debug('Failed to persist last seen timestamp', error);
+        }
+    }
+
+    function clearUpdatesCache() {
+        const storage = getLocalStorage();
+        if (!storage) {
+            return;
+        }
+        try {
+            storage.removeItem(LOCAL_STORAGE_KEYS.updates);
+            storage.removeItem(LOCAL_STORAGE_KEYS.lastSeen);
+        } catch (error) {
+            console.debug('Failed to clear cached updates', error);
+        }
     }
 
     function clampPercent(value) {
@@ -373,6 +484,55 @@
             return null;
         }
         return parsed;
+    }
+
+    function normalizeNextAfter(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return Math.max(Math.trunc(value), 0);
+        }
+        if (typeof value === 'string' && value.trim()) {
+            const parsed = Number.parseInt(value, 10);
+            if (!Number.isNaN(parsed) && parsed >= 0) {
+                return parsed;
+            }
+        }
+        return null;
+    }
+
+    function resolveItemUpdatedAt(item) {
+        if (!item || typeof item !== 'object') {
+            return null;
+        }
+        const candidates = [
+            item.updated_at,
+            item.cursor_value,
+            item.refreshed_at,
+            item.local_last_edited_at,
+            item.igdb_updated_at,
+        ];
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate.trim();
+            }
+        }
+        return null;
+    }
+
+    function getLatestUpdatedAt(items) {
+        if (!Array.isArray(items) || !items.length) {
+            return null;
+        }
+        let latest = null;
+        items.forEach((item) => {
+            const candidate = resolveItemUpdatedAt(item);
+            if (!candidate) {
+                return;
+            }
+            if (!latest || candidate > latest) {
+                latest = candidate;
+            }
+        });
+        return latest;
     }
 
     function normalizeJobId(value) {
@@ -2241,7 +2401,11 @@
         }
     }
 
-    async function fetchUpdatesBatch(after = null, limit = DEFAULT_UPDATES_LIMIT) {
+    async function fetchUpdatesBatch({
+        after = null,
+        limit = DEFAULT_UPDATES_LIMIT,
+        since = null,
+    } = {}) {
         const resolvedLimit = resolveLimit(limit, DEFAULT_UPDATES_LIMIT);
         const params = new URLSearchParams({ limit: String(resolvedLimit) });
         if (after !== null && after !== undefined) {
@@ -2250,6 +2414,9 @@
                 params.set('after', String(parsedAfter));
             }
         }
+        if (since && typeof since === 'string' && since.trim()) {
+            params.set('since', since.trim());
+        }
         const url = `/api/updates?${params.toString()}`;
         logFetch(url);
         const payload = await fetchJson(url, { logRequest: false });
@@ -2257,18 +2424,21 @@
             throw new Error(payload && payload.error ? payload.error : 'Failed to load updates.');
         }
         const nextAfterRaw = payload.nextAfter ?? payload.next_after ?? null;
-        let nextAfter = null;
-        if (typeof nextAfterRaw === 'number' && Number.isFinite(nextAfterRaw)) {
-            nextAfter = Math.max(Math.trunc(nextAfterRaw), 0);
-        } else if (typeof nextAfterRaw === 'string' && nextAfterRaw.trim()) {
-            const parsed = Number.parseInt(nextAfterRaw, 10);
-            if (!Number.isNaN(parsed) && parsed >= 0) {
-                nextAfter = parsed;
-            }
-        }
+        const nextAfter = normalizeNextAfter(nextAfterRaw);
+        const hasMore =
+            payload.has_more ??
+            payload.hasMore ??
+            (typeof payload.next_cursor === 'string' && payload.next_cursor ? true : undefined);
         return {
             items: payload.items,
             nextAfter,
+            nextCursor:
+                typeof payload.next_cursor === 'string' && payload.next_cursor.trim()
+                    ? payload.next_cursor.trim()
+                    : null,
+            limit: payload.limit,
+            total: payload.total,
+            hasMore,
         };
     }
 
@@ -2311,17 +2481,21 @@
         updateSortIndicators();
     }
 
-    async function loadUpdates({ append = false } = {}) {
+    async function loadUpdates({ append = false, since = null, preserveExisting = false } = {}) {
         setLoading(true);
         try {
-            if (!append) {
+            if (!append && !preserveExisting) {
                 state.updates = [];
                 state.nextAfter = null;
             }
 
             const limit = state.pageSize || DEFAULT_UPDATES_LIMIT;
             const after = append ? state.nextAfter : null;
-            const payload = await fetchUpdatesBatch(after, limit);
+            const payload = await fetchUpdatesBatch({
+                after,
+                limit,
+                since: !append ? since : null,
+            });
             const items = Array.isArray(payload.items) ? payload.items : [];
 
             const existingIds = new Set();
@@ -2352,17 +2526,15 @@
                 state.updates.push(item);
             });
 
-            state.nextAfter = payload.nextAfter ?? null;
-            if (typeof state.nextAfter === 'number' && Number.isFinite(state.nextAfter)) {
-                state.nextAfter = Math.max(Math.trunc(state.nextAfter), 0);
-            } else if (typeof state.nextAfter === 'string' && state.nextAfter.trim()) {
-                const parsedAfter = Number.parseInt(state.nextAfter, 10);
-                state.nextAfter = Number.isNaN(parsedAfter) ? null : Math.max(parsedAfter, 0);
-            } else {
+            const normalizedNextAfter = normalizeNextAfter(payload.nextAfter);
+            if (normalizedNextAfter !== null) {
+                state.nextAfter = normalizedNextAfter;
+            } else if (!append && !preserveExisting) {
                 state.nextAfter = null;
             }
 
             rebuildUpdatesState({ resetPage: !append });
+            persistUpdatesCache();
         } catch (error) {
             console.error(error);
             setLoading(false);
@@ -2385,9 +2557,37 @@
             updateCount();
             renderPagination();
             updateStatusMessage();
+            clearUpdatesCache();
             return;
         }
         setLoading(false);
+    }
+
+    function persistUpdatesCache() {
+        saveUpdatesCache({
+            items: state.updates,
+            nextAfter: state.nextAfter,
+        });
+        const latest = getLatestUpdatedAt(state.updates);
+        if (latest) {
+            saveLastSeenUpdatedAt(latest);
+        } else {
+            saveLastSeenUpdatedAt('');
+        }
+    }
+
+    function restoreUpdatesFromCache() {
+        const cached = loadCachedUpdates();
+        if (!cached || !Array.isArray(cached.items) || !cached.items.length) {
+            return { hasItems: false, latestUpdatedAt: null };
+        }
+        state.updates = cached.items.slice();
+        state.nextAfter = normalizeNextAfter(cached.nextAfter);
+        rebuildUpdatesState({ resetPage: true });
+        return {
+            hasItems: true,
+            latestUpdatedAt: getLatestUpdatedAt(state.updates),
+        };
     }
 
     function bindEvents() {
@@ -2438,5 +2638,11 @@
     bindEvents();
     loadExistingJobs();
     loadCacheStatus();
-    loadUpdates();
+    const cachedState = restoreUpdatesFromCache();
+    const storedLastSeen = loadLastSeenUpdatedAt();
+    if (!storedLastSeen && cachedState.latestUpdatedAt) {
+        saveLastSeenUpdatedAt(cachedState.latestUpdatedAt);
+    }
+    const initialSince = cachedState.hasItems && storedLastSeen ? storedLastSeen : null;
+    loadUpdates({ since: initialSince, preserveExisting: cachedState.hasItems });
 })();
