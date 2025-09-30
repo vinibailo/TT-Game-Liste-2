@@ -154,6 +154,12 @@ def insert_igdb_cache_entry(app_module, igdb_id: int | str, **overrides):
                 ),
             )
 
+
+def rebuild_updates_cache(app_module):
+    if hasattr(app_module, 'rebuild_updates_list_cache'):
+        app_module.rebuild_updates_list_cache()
+
+
 def clear_processed_tables(app_module):
     tables = (
         'processed_game_developers',
@@ -162,6 +168,7 @@ def clear_processed_tables(app_module):
         'processed_game_game_modes',
         'processed_game_platforms',
         'processed_games',
+        'updates_list',
     )
     with app_module.db_lock:
         with app_module.db:
@@ -337,6 +344,7 @@ def test_refresh_creates_update_records(tmp_path):
     assert result['updated'] == 1
     assert result['missing'] == []
 
+    rebuild_updates_cache(app_module)
     listing = client.get('/api/updates')
     assert listing.status_code == 200
     listing_data = listing.get_json()
@@ -395,6 +403,7 @@ def test_updates_list_includes_duplicates(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
+    rebuild_updates_cache(app_module)
     listing = client.get('/api/updates')
     assert listing.status_code == 200
     data = listing.get_json()
@@ -434,6 +443,7 @@ def test_updates_list_respects_cursor_pagination(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
+    rebuild_updates_cache(app_module)
     first_page = client.get('/api/updates?limit=1')
     assert first_page.status_code == 200
     payload = first_page.get_json()
@@ -505,6 +515,7 @@ def test_updates_list_since_filters_new_entries(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
+    rebuild_updates_cache(app_module)
     baseline = client.get('/api/updates')
     assert baseline.status_code == 200
     baseline_payload = baseline.get_json()
@@ -540,6 +551,7 @@ def test_updates_list_responds_with_etag_and_304(tmp_path):
     client = app_module.app.test_client()
     authenticate(client)
 
+    rebuild_updates_cache(app_module)
     first = client.get('/api/updates')
     assert first.status_code == 200
     etag = first.headers.get('ETag')

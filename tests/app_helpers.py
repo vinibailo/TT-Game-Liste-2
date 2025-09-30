@@ -77,9 +77,17 @@ def load_app(tmp_path: Path) -> object:
             lambda **_kwargs: ('token', 'client')
         )
 
+    if hasattr(module, "_load_lookup_tables") and hasattr(module, "db"):
+        with module.db_lock:
+            module._load_lookup_tables(module.db)
+
     if hasattr(module, "_recreate_lookup_join_tables") and hasattr(module, "db"):
         with module.db_lock:
             module._recreate_lookup_join_tables(module.db)
+
+    if hasattr(module, "_backfill_lookup_relations") and hasattr(module, "db"):
+        with module.db_lock:
+            module._backfill_lookup_relations(module.db)
 
     if hasattr(module, "_ensure_lookup_id_columns") and hasattr(module, "db"):
         with module.db_lock:
