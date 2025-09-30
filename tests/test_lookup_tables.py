@@ -105,6 +105,7 @@ def test_lookup_tables_backfilled(tmp_path):
         assert 'genres_ids' in columns
         assert 'game_modes_ids' in columns
         assert 'platforms_ids' in columns
+        assert 'cache_rank' in columns
 
         def first_lookup_id(query: str, processed_game_id: int) -> int:
             row = app.db.execute(query, (processed_game_id,)).fetchone()

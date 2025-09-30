@@ -10,7 +10,7 @@ import math
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Collection, Iterable, Mapping, MutableMapping, Optional
 from threading import Lock
 import logging
 import logging.config
@@ -258,6 +258,20 @@ LOOKUP_RELATIONS = (
         'join_column': 'platform_id',
     },
 )
+
+
+def _normalize_seed_value(value: Any) -> str:
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    text = str(value).strip()
+    return '' if text.lower() == 'nan' else text
 
 LOOKUP_RELATIONS_BY_COLUMN = {
     relation['processed_column']: relation for relation in LOOKUP_RELATIONS
@@ -868,6 +882,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                 "Cover Path" TEXT,
                 "Width" INTEGER,
                 "Height" INTEGER,
+                cache_rank INTEGER,
                 last_edited_at TEXT
             )
             '''
@@ -931,6 +946,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     "Cover Path" TEXT,
                     "Width" INTEGER,
                     "Height" INTEGER,
+                    cache_rank INTEGER,
                     last_edited_at TEXT
                 )'''
             )
@@ -961,6 +977,11 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    conn.execute('ALTER TABLE processed_games ADD COLUMN cache_rank INTEGER')
+                except sqlite3.OperationalError:
+                    pass
+                db_utils.clear_processed_games_columns_cache()
             try:
                 conn.execute(
                     '''CREATE TABLE IF NOT EXISTS igdb_updates (
@@ -1088,6 +1109,17 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                 conn.execute(
                     'CREATE INDEX IF NOT EXISTS processed_games_igdb_id_idx '
                     'ON processed_games("igdb_id")'
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    '''
+                    CREATE UNIQUE INDEX IF NOT EXISTS processed_games_igdb_cache_idx
+                    ON processed_games("igdb_id", cache_rank)
+                    WHERE "igdb_id" IS NOT NULL AND "igdb_id" != ''
+                    '''
                 )
             except sqlite3.OperationalError:
                 pass
@@ -1696,27 +1728,36 @@ def seed_processed_games_from_source() -> None:
     if games_df is None or games_df.empty:
         return
 
-    def _normalize_name(value: Any) -> str:
-        if value is None:
-            return ''
-        if isinstance(value, str):
-            return value.strip()
-        try:
-            if pd.isna(value):
-                return ''
-        except Exception:
-            pass
-        text = str(value).strip()
-        if text.lower() == 'nan':
-            return ''
-        return text
-
     def _coerce_source_index(value: Any) -> str | None:
         return processed_navigator.GameNavigator.canonical_source_index(value)
 
     with db_lock:
         conn = get_db()
         with conn:
+            processed_columns = get_processed_games_columns(conn)
+            has_cache_rank = 'cache_rank' in processed_columns
+
+            if has_cache_rank:
+                try:
+                    cache_row = conn.execute(
+                        'SELECT MAX(cache_rank) AS max_rank FROM processed_games'
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    cache_row = None
+                max_cache_rank = cache_row['max_rank'] if cache_row else None
+                try:
+                    current_max = int(max_cache_rank) if max_cache_rank is not None else 0
+                except (TypeError, ValueError):
+                    current_max = 0
+                next_cache_rank = current_max + 1
+            else:
+                next_cache_rank = 0
+
+            try:
+                _load_lookup_tables(conn)
+            except Exception:
+                pass
+
             cur = conn.execute(
                 'SELECT "Source Index", "Name", "Summary", "Cover Path" FROM processed_games'
             )
@@ -1741,9 +1782,19 @@ def seed_processed_games_from_source() -> None:
                     cover_value = None
                 existing[canonical] = (
                     stored_text,
-                    _normalize_name(row['Name']),
+                    _normalize_seed_value(row['Name']),
                     is_processed_game_done(summary_value, cover_value),
                 )
+
+            igdb_ids: set[str] = set()
+            if 'igdb_id' in games_df.columns:
+                for value in games_df['igdb_id'].tolist():
+                    normalized = coerce_igdb_id(value)
+                    if normalized:
+                        igdb_ids.add(normalized)
+            metadata_map = (
+                fetch_igdb_metadata(igdb_ids, conn=conn) if igdb_ids else {}
+            )
 
             source_values = (
                 games_df['Source Index'].tolist()
@@ -1774,18 +1825,48 @@ def seed_processed_games_from_source() -> None:
                         if position < row_count
                         else None
                     )
-                igdb_name = _normalize_name(name_value)
+                igdb_name = _normalize_seed_value(name_value)
                 stored_name: str | None = igdb_name if igdb_name else None
 
+                row = games_df.iloc[position]
+                igdb_id = extract_igdb_id(row, allow_generic_id=True)
+                metadata = metadata_map.get(igdb_id) if igdb_id else None
+
+                cache_rank: int | None = None
+                if has_cache_rank:
+                    cache_rank, next_cache_rank = _determine_cache_rank(
+                        metadata, row, next_cache_rank
+                    )
+
                 if src_index not in existing:
+                    processed_row = _igdb_to_processed_row(
+                        row=row,
+                        src_index=src_index,
+                        name=stored_name,
+                        igdb_id=igdb_id,
+                        metadata=metadata,
+                        processed_columns=processed_columns,
+                        conn=conn,
+                        cache_rank=cache_rank,
+                    )
+                    columns = list(processed_row.keys())
+                    column_sql = ', '.join(
+                        db_utils._quote_identifier(column) for column in columns
+                    )
+                    placeholders = ', '.join('?' for _ in columns)
                     conn.execute(
-                        'INSERT OR IGNORE INTO processed_games ("Source Index", "Name") VALUES (?, ?)',
-                        (src_index, stored_name),
+                        f'INSERT OR IGNORE INTO processed_games ({column_sql}) VALUES ({placeholders})',
+                        [processed_row[column] for column in columns],
                     )
                     existing[src_index] = (src_index, igdb_name, False)
                     continue
 
                 stored_source, existing_name, is_done = existing[src_index]
+                if has_cache_rank and cache_rank is not None:
+                    conn.execute(
+                        'UPDATE processed_games SET cache_rank=? WHERE "Source Index"=?',
+                        (cache_rank, src_index),
+                    )
                 if is_done:
                     continue
                 if stored_source != src_index:
@@ -2100,6 +2181,190 @@ def _dedupe_normalized_names(values: Iterable[str]) -> list[str]:
         seen.add(fingerprint)
         names.append(normalized)
     return names
+
+
+def _resolve_lookup_ids(
+    conn: sqlite3.Connection, table_name: str, names: Iterable[str]
+) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for name in _dedupe_normalized_names(names):
+        lookup_id = _get_or_create_lookup_id(conn, table_name, name)
+        if lookup_id is None or lookup_id in seen:
+            continue
+        seen.add(lookup_id)
+        ids.append(lookup_id)
+    return ids
+
+
+def _determine_cache_rank(
+    metadata: Mapping[str, Any] | None,
+    row: Mapping[str, Any],
+    next_cache_rank: int,
+) -> tuple[int | None, int]:
+    candidates: list[Any] = []
+    if metadata is not None:
+        candidates.append(metadata.get('rating_count'))
+    for key in ('Rating Count', 'rating_count'):
+        if isinstance(row, Mapping) and key in row:
+            candidates.append(row.get(key))
+
+    rating_count: int | None = None
+    for candidate in candidates:
+        if candidate in (None, ''):
+            continue
+        try:
+            if isinstance(candidate, numbers.Real) and not isinstance(candidate, bool):
+                rating_count = int(candidate)
+            else:
+                rating_count = int(float(str(candidate).strip()))
+        except (TypeError, ValueError):
+            continue
+        else:
+            break
+
+    if rating_count is not None:
+        if rating_count < 0:
+            rating_count = abs(rating_count)
+        return -rating_count, next_cache_rank
+
+    cache_rank = next_cache_rank
+    return cache_rank, next_cache_rank + 1
+
+
+def _igdb_to_processed_row(
+    *,
+    row: Mapping[str, Any],
+    src_index: str,
+    name: str | None,
+    igdb_id: str | None,
+    metadata: Mapping[str, Any] | None,
+    processed_columns: Collection[str],
+    conn: sqlite3.Connection,
+    cache_rank: int | None,
+) -> dict[str, Any]:
+    processed: dict[str, Any] = {'Source Index': src_index}
+
+    overlay: dict[str, Any] = {}
+    normalized_igdb_id = coerce_igdb_id(igdb_id) if igdb_id else ''
+    if metadata is not None:
+        overlay = _igdb_metadata_to_source_values(metadata, normalized_igdb_id or '')
+        if not normalized_igdb_id:
+            normalized_igdb_id = coerce_igdb_id(metadata.get('id'))
+
+    processed_name = name or _normalize_seed_value(row.get('Name'))
+    processed['Name'] = processed_name or None
+
+    summary_value = overlay.get('Summary') or row.get('Summary')
+    if 'Summary' in processed_columns:
+        summary = _normalize_seed_value(summary_value)
+        processed['Summary'] = summary or None
+
+    if 'First Launch Date' in processed_columns:
+        launch_value = overlay.get('First Launch Date') or row.get('First Launch Date')
+        launch_text = _normalize_seed_value(launch_value)
+        processed['First Launch Date'] = launch_text or None
+
+    if 'Category' in processed_columns:
+        category_value = overlay.get('Category') or row.get('Category')
+        category_text = _normalize_seed_value(category_value)
+        processed['Category'] = category_text or None
+
+    developer_names: list[str] = []
+    publisher_names: list[str] = []
+    platform_names: list[str] = []
+    genre_names: list[str] = []
+    mode_names: list[str] = []
+
+    if metadata is not None:
+        developer_names = _dedupe_normalized_names(
+            _parse_company_names(metadata.get('developers'))
+        )
+        publisher_names = _dedupe_normalized_names(
+            _parse_company_names(metadata.get('publishers'))
+        )
+        platform_names = _dedupe_normalized_names(
+            _parse_iterable(metadata.get('platforms'))
+        )
+        genre_names = _dedupe_normalized_names(
+            map_igdb_genres(_parse_iterable(metadata.get('genres')))
+        )
+        mode_names = _dedupe_normalized_names(
+            map_igdb_modes(_parse_iterable(metadata.get('game_modes')))
+        )
+
+    if not developer_names:
+        developer_names = _dedupe_normalized_names(
+            _parse_iterable(overlay.get('Developers') or row.get('Developers'))
+        )
+    if not publisher_names:
+        publisher_names = _dedupe_normalized_names(
+            _parse_iterable(overlay.get('Publishers') or row.get('Publishers'))
+        )
+    if not platform_names:
+        platform_names = _dedupe_normalized_names(
+            _parse_iterable(overlay.get('Platforms') or row.get('Platforms'))
+        )
+    if not genre_names:
+        genre_names = _dedupe_normalized_names(
+            map_igdb_genres(
+                _parse_iterable(overlay.get('Genres') or row.get('Genres'))
+            )
+        )
+    if not mode_names:
+        mode_names = _dedupe_normalized_names(
+            map_igdb_modes(
+                _parse_iterable(overlay.get('Game Modes') or row.get('Game Modes'))
+            )
+        )
+
+    if 'Developers' in processed_columns:
+        processed['Developers'] = ', '.join(developer_names) if developer_names else None
+    if 'developers_ids' in processed_columns:
+        developer_ids = _resolve_lookup_ids(conn, 'developers', developer_names)
+        processed['developers_ids'] = (
+            _encode_lookup_id_list(developer_ids) if developer_ids else ''
+        )
+
+    if 'Publishers' in processed_columns:
+        processed['Publishers'] = ', '.join(publisher_names) if publisher_names else None
+    if 'publishers_ids' in processed_columns:
+        publisher_ids = _resolve_lookup_ids(conn, 'publishers', publisher_names)
+        processed['publishers_ids'] = (
+            _encode_lookup_id_list(publisher_ids) if publisher_ids else ''
+        )
+
+    if 'Platforms' in processed_columns:
+        processed['Platforms'] = ', '.join(platform_names) if platform_names else None
+    if 'platforms_ids' in processed_columns:
+        platform_ids = _resolve_lookup_ids(conn, 'platforms', platform_names)
+        processed['platforms_ids'] = (
+            _encode_lookup_id_list(platform_ids) if platform_ids else ''
+        )
+
+    if 'Genres' in processed_columns:
+        processed['Genres'] = ', '.join(genre_names) if genre_names else None
+    if 'genres_ids' in processed_columns:
+        genre_ids = _resolve_lookup_ids(conn, 'genres', genre_names)
+        processed['genres_ids'] = (
+            _encode_lookup_id_list(genre_ids) if genre_ids else ''
+        )
+
+    if 'Game Modes' in processed_columns:
+        processed['Game Modes'] = ', '.join(mode_names) if mode_names else None
+    if 'game_modes_ids' in processed_columns:
+        mode_ids = _resolve_lookup_ids(conn, 'game_modes', mode_names)
+        processed['game_modes_ids'] = (
+            _encode_lookup_id_list(mode_ids) if mode_ids else ''
+        )
+
+    if 'igdb_id' in processed_columns:
+        processed['igdb_id'] = normalized_igdb_id or ''
+
+    if 'cache_rank' in processed_columns and cache_rank is not None:
+        processed['cache_rank'] = cache_rank
+
+    return processed
 
 
 def _should_replace_with_prefill(value: Any) -> bool:
