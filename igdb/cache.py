@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import numbers
 import sqlite3
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
@@ -55,6 +56,46 @@ def _ensure_games_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS {_quote(f'{IGDB_CACHE_TABLE}_updated_at_id_idx')}
+        ON {_quote(IGDB_CACHE_TABLE)} (updated_at, igdb_id)
+        """
+    )
+    _ensure_postgres_cache_index(conn)
+
+
+def _ensure_postgres_cache_index(conn: Any) -> None:
+    """Ensure the Postgres cache index exists when ``conn`` is a PG connection."""
+
+    if isinstance(conn, sqlite3.Connection):
+        return
+
+    cursor_factory = getattr(conn, "cursor", None)
+    if cursor_factory is None:
+        return
+
+    try:
+        cursor = cursor_factory()
+    except Exception:  # pragma: no cover - defensive for exotic connections
+        return
+
+    try:
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS igdb_games_updated_at_id_desc_idx
+            ON igdb_games (updated_at DESC, id)
+            """
+        )
+        cursor.execute("ANALYZE igdb_games")
+    except Exception:
+        return
+    finally:
+        with suppress(Exception):
+            cursor.close()
+
+    with suppress(Exception):
+        conn.commit()
 
 
 def _now_utc_iso() -> str:

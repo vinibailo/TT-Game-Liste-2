@@ -36,16 +36,30 @@ def _configure_sqlite_connection(
 ) -> sqlite3.Connection:
     """Apply standard pragmas and timeouts to SQLite connections."""
 
-    if busy_timeout is None:
-        return conn
+    busy_timeout_ms = None
+    if busy_timeout is not None:
+        busy_timeout_ms = int(max(busy_timeout, 0) * 1000)
+        if busy_timeout_ms <= 0:
+            busy_timeout_ms = None
 
-    busy_timeout_ms = int(max(busy_timeout, 0) * 1000)
-    if busy_timeout_ms <= 0:
-        return conn
-    try:
-        conn.execute(f'PRAGMA busy_timeout = {busy_timeout_ms}')
-    except sqlite3.OperationalError:
-        pass
+    pragmas: tuple[tuple[str, str | int | float | None, bool], ...] = (
+        ("busy_timeout", busy_timeout_ms, False),
+        ("journal_mode", "WAL", True),
+        ("mmap_size", 268_435_456, False),
+        ("cache_size", -200_000, False),
+    )
+
+    for name, value, fetch_result in pragmas:
+        if value is None:
+            continue
+        try:
+            cursor = conn.execute(f"PRAGMA {name}={value}")
+            if fetch_result:
+                # Some pragmas (journal_mode) require fetching a row to apply.
+                cursor.fetchone()
+        except sqlite3.OperationalError:
+            continue
+
     return conn
 
 

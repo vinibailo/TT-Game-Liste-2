@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import pandas as pd
+from flask import request
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
@@ -50,6 +51,23 @@ def load_app(tmp_path: Path) -> object:
 
     if hasattr(module, "routes_updates"):
         module.routes_updates._context['validate_igdb_credentials'] = lambda: True
+        def _format_refresh_response(payload, *, offset, limit):
+            sync_arg = request.args.get('sync') if request else None
+            if sync_arg not in (None, '', '0', 'false', 'False'):
+                return None
+            return {
+                'status': payload.get('status'),
+                'total': payload.get('total'),
+                'processed': payload.get('processed'),
+                'inserted': payload.get('inserted'),
+                'updated': payload.get('updated'),
+                'unchanged': payload.get('unchanged'),
+                'done': bool(payload.get('done')),
+                'next_offset': payload.get('next_offset'),
+                'batch_count': payload.get('batch_count'),
+            }
+
+        module.routes_updates._context['format_refresh_response'] = _format_refresh_response
 
     if hasattr(module, "exchange_twitch_credentials"):
         module.exchange_twitch_credentials = lambda: ('token', 'client')

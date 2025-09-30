@@ -252,6 +252,12 @@ def api_igdb_cache_refresh():
             done = True
             payload['done'] = True
 
+        formatter = _context.get('format_refresh_response')
+        if callable(formatter):
+            formatted = formatter(dict(payload), offset=offset, limit=limit)
+            if isinstance(formatted, Mapping):
+                return jsonify(dict(formatted))
+
         message: str
         toast_type = 'info'
         if status_value != 'ok':
@@ -731,9 +737,7 @@ def api_updates_job_detail_legacy(job_id: str):
 @updates_blueprint.route('/api/updates', methods=['GET'])
 @handle_api_errors
 def api_updates_list():
-    db_lock = _ctx('db_lock')
-    get_db = _ctx('get_db')
-    get_processed_games_columns = _ctx('get_processed_games_columns')
+    fetch_cached_updates = _ctx('fetch_cached_updates')
 
     def _normalize_since(value: str | None) -> str | None:
         if not value or not isinstance(value, str):
@@ -753,168 +757,106 @@ def api_updates_list():
             return None
         return parsed.isoformat()
 
-    try:
-        limit = int(request.args.get('limit', 100))
-    except (TypeError, ValueError):
-        limit = 100
-    if limit <= 0:
-        limit = 100
-    limit = min(limit, 500)
+    def _entry_updated(entry: Mapping[str, Any]) -> str:
+        for key in ('refreshed_at', 'local_last_edited_at', 'igdb_updated_at'):
+            value = entry.get(key)
+            if value:
+                return str(value)
+        return ''
 
-    after_param = request.args.get('after', None)
-    after: int | None = None
-    if after_param not in (None, '', 'null'):
-        try:
-            parsed_after = int(after_param)
-        except (TypeError, ValueError):
-            parsed_after = None
-        if parsed_after is not None and parsed_after >= 0:
-            after = parsed_after
+    try:
+        raw_limit = int(request.args.get('limit', 100))
+    except (TypeError, ValueError):
+        raw_limit = 100
+    if raw_limit <= 0:
+        raw_limit = 100
+    limit = min(raw_limit, 500)
+
+    cursor_param = request.args.get('cursor')
+    cursor_value = cursor_param.strip() if isinstance(cursor_param, str) else None
+    cursor_value = cursor_value or None
 
     since_param = request.args.get('since')
     normalized_since = _normalize_since(since_param)
 
-    fetch_limit = limit + 1
+    entries, total_count_value, next_cursor, has_more = fetch_cached_updates(
+        cursor=cursor_value,
+        limit=limit,
+    )
 
-    etag_header_value: str | None = None
-
-    with db_lock:
-        conn = get_db()
-        processed_columns = get_processed_games_columns(conn)
-        cover_url_select = (
-            'p."Large Cover Image (URL)" AS cover_url'
-            if 'Large Cover Image (URL)' in processed_columns
-            else 'NULL AS cover_url'
-        )
-
-        updated_at_expr = (
-            "COALESCE(u.refreshed_at, u.local_last_edited_at, u.igdb_updated_at, '')"
-        )
-        where_clauses: list[str] = []
-        params: list[Any] = []
-        if after is not None:
-            where_clauses.append('u.rowid > ?')
-            params.append(after)
-        if normalized_since is not None:
-            where_clauses.append(f'{updated_at_expr} > ?')
-            params.append(normalized_since)
-
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ''
-
-        metadata_query = (
-            f"""SELECT
-                    MAX({updated_at_expr}) AS max_updated_at,
-                    COUNT(*) AS total_count
-                FROM igdb_updates u
-                {where_sql}"""
-        )
-
-        metadata_row = conn.execute(metadata_query, params).fetchone()
-        max_updated_at_value = ''
-        if metadata_row is not None:
-            raw_max_updated_at = metadata_row['max_updated_at']
-            if raw_max_updated_at:
-                max_updated_at_value = str(raw_max_updated_at)
-        total_count_value = 0
-        if metadata_row is not None:
-            total_count_value = int(metadata_row['total_count'] or 0)
-
-        etag_source = f"{max_updated_at_value}:{total_count_value}"
-        etag_hash = hashlib.sha256(etag_source.encode('utf-8')).hexdigest()
-        etag_header_value = f'W/"{etag_hash}"'
-
-        if_none_match_header = request.headers.get('If-None-Match', '')
-        if if_none_match_header:
-            candidates = [token.strip() for token in if_none_match_header.split(',') if token.strip()]
-            normalized_candidates = set(candidates)
-            for candidate in candidates:
-                if candidate.startswith('W/'):
-                    normalized_candidates.add(candidate[2:])
-            target_values = {etag_header_value}
-            if etag_header_value.startswith('W/'):
-                target_values.add(etag_header_value[2:])
-            if '*' in normalized_candidates or target_values & normalized_candidates:
-                response = Response(status=304)
-                response.headers['ETag'] = etag_header_value
-                response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
-                return response
-
-        query = (
-            f'''SELECT
-                   u.rowid AS row_id,
-                   u.processed_game_id,
-                   u.igdb_id,
-                   u.igdb_updated_at,
-                   u.local_last_edited_at,
-                   u.refreshed_at,
-                   u.has_diff,
-                   {updated_at_expr} AS updated_at,
-                   p."Name" AS game_name,
-                   p."Cover Path" AS cover_path,
-                   {cover_url_select}
-               FROM igdb_updates u
-               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
-               {where_sql}
-               ORDER BY u.rowid ASC
-               LIMIT ?'''
-        )
-
-        query_params = [*params, fetch_limit]
-        rows = conn.execute(query, query_params).fetchall()
-
-    has_more = len(rows) > limit
-    if has_more:
-        rows = rows[:limit]
+    if normalized_since:
+        filtered_entries = [
+            entry
+            for entry in entries
+            if _entry_updated(entry) and _entry_updated(entry) > normalized_since
+        ]
+        entries = filtered_entries
+        has_more = False
+        next_cursor = None
 
     items: list[dict[str, Any]] = []
-    next_after: int | None = None
-
-    for row in rows:
-        row_map = dict(row)
-        processed_id = row_map.get('processed_game_id')
-        if processed_id is None:
-            continue
-        try:
-            processed_id_int = int(processed_id)
-        except (TypeError, ValueError):
-            continue
-
-        row_id = row_map.get('row_id')
-        try:
-            row_id_int = int(row_id)
-        except (TypeError, ValueError):  # pragma: no cover - defensive
-            row_id_int = None
-
-        cover_available = bool(row_map.get('cover_path') or row_map.get('cover_url'))
-
+    for entry in entries[:limit]:
+        updated_at_value = _entry_updated(entry)
         items.append(
             {
-                'id': row_id_int,
-                'processed_game_id': processed_id_int,
-                'igdb_id': row_map.get('igdb_id'),
-                'igdb_updated_at': row_map.get('igdb_updated_at'),
-                'local_last_edited_at': row_map.get('local_last_edited_at'),
-                'refreshed_at': row_map.get('refreshed_at'),
-                'updated_at': row_map.get('updated_at'),
-                'name': row_map.get('game_name'),
-                'has_diff': bool(row_map.get('has_diff')),
-                'cover': None,
-                'cover_available': cover_available,
-                'update_type': 'mismatch',
-                'detail_available': True,
+                'id': entry.get('processed_game_id'),
+                'processed_game_id': entry.get('processed_game_id'),
+                'igdb_id': entry.get('igdb_id'),
+                'igdb_updated_at': entry.get('igdb_updated_at'),
+                'local_last_edited_at': entry.get('local_last_edited_at'),
+                'refreshed_at': entry.get('refreshed_at'),
+                'updated_at': updated_at_value,
+                'name': entry.get('name'),
+                'has_diff': bool(entry.get('has_diff')),
+                'cover': entry.get('cover'),
+                'cover_available': bool(entry.get('cover_available')),
+                'update_type': entry.get('update_type') or 'mismatch',
+                'detail_available': bool(entry.get('detail_available')),
             }
         )
 
-    if has_more and items:
-        last_item = items[-1]
-        next_after = last_item.get('id')
+    max_updated_at_value = ''
+    if items:
+        max_updated_at_value = max(_entry_updated(entry) for entry in entries[:limit]) or ''
+    elif normalized_since:
+        max_updated_at_value = normalized_since
 
-    response = jsonify({'items': items, 'nextAfter': next_after})
-    if etag_header_value:
-        response.headers['ETag'] = etag_header_value
+    etag_source = f"{max_updated_at_value}:{int(total_count_value or 0)}"
+    etag_hash = hashlib.sha256(etag_source.encode('utf-8')).hexdigest()
+    etag_header_value = f'W/"{etag_hash}"'
+
+    if_none_match_header = request.headers.get('If-None-Match', '')
+    if if_none_match_header:
+        candidates = [token.strip() for token in if_none_match_header.split(',') if token.strip()]
+        normalized_candidates = set(candidates)
+        for candidate in candidates:
+            if candidate.startswith('W/'):
+                normalized_candidates.add(candidate[2:])
+        target_values = {etag_header_value}
+        if etag_header_value.startswith('W/'):
+            target_values.add(etag_header_value[2:])
+        if '*' in normalized_candidates or target_values & normalized_candidates:
+            response = Response(status=304)
+            response.headers['ETag'] = etag_header_value
+            response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
+            return response
+
+    payload: dict[str, Any] = {
+        'items': items,
+        'total': int(total_count_value or 0),
+        'limit': limit,
+        'has_more': bool(has_more and next_cursor),
+        'nextAfter': None,
+    }
+    if payload['has_more'] and next_cursor:
+        payload['next_cursor'] = next_cursor
+    else:
+        payload['has_more'] = False
+
+    response = jsonify(payload)
+    response.headers['ETag'] = etag_header_value
     response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
     return response
-
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])
 @handle_api_errors
