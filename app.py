@@ -6,6 +6,7 @@ import sqlite3
 import numbers
 import re
 import time
+import math
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
@@ -434,6 +435,7 @@ _configure_logging(app)
 
 IGDB_CACHE_TABLE = 'igdb_games'
 IGDB_CACHE_STATE_TABLE = 'igdb_cache_state'
+UPDATES_LIST_TABLE = 'updates_list'
 
 def _igdb_category_display(value: Any) -> str:
     return IGDBClient.translate_category(value)
@@ -1015,6 +1017,37 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                            ELSE 1
                        END
                        WHERE has_diff NOT IN (0, 1) OR has_diff IS NULL'''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    f'''CREATE TABLE IF NOT EXISTS {UPDATES_LIST_TABLE} (
+                            processed_game_id INTEGER PRIMARY KEY,
+                            igdb_id TEXT,
+                            igdb_updated_at TEXT,
+                            local_last_edited_at TEXT,
+                            refreshed_at TEXT,
+                            name TEXT,
+                            has_diff INTEGER NOT NULL DEFAULT 0,
+                            cover TEXT,
+                            cover_available INTEGER NOT NULL DEFAULT 0,
+                            update_type TEXT NOT NULL,
+                            detail_available INTEGER NOT NULL DEFAULT 0,
+                            cursor_value TEXT,
+                            sort_numeric REAL,
+                            entry_type TEXT NOT NULL DEFAULT 'm',
+                            entry_rank INTEGER NOT NULL DEFAULT 0
+                        )'''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
+                    f'''CREATE INDEX IF NOT EXISTS {UPDATES_LIST_TABLE}_sort_idx '''
+                    f'''ON {UPDATES_LIST_TABLE}(sort_numeric DESC, processed_game_id DESC, entry_rank ASC)'''
                 )
             except sqlite3.OperationalError:
                 pass
@@ -2685,26 +2718,198 @@ def _entry_type_rank(entry_type: str) -> int:
     return 0 if entry_type == 'm' else 1
 
 
-def _compare_entries_desc(entry: Mapping[str, Any], marker: Mapping[str, Any]) -> int:
-    entry_numeric = float(entry.get('cursor_numeric', float('-inf')))
-    marker_numeric = float(marker.get('sort_numeric', float('-inf')))
-    if entry_numeric > marker_numeric:
-        return -1
-    if entry_numeric < marker_numeric:
-        return 1
-    entry_id = int(entry.get('processed_game_id') or 0)
-    marker_id = int(marker.get('processed_game_id') or 0)
-    if entry_id > marker_id:
-        return -1
-    if entry_id < marker_id:
-        return 1
-    entry_rank = _entry_type_rank(str(entry.get('entry_type', 'm')))
-    marker_rank = _entry_type_rank(str(marker.get('entry_type', 'm')))
-    if entry_rank < marker_rank:
-        return -1
-    if entry_rank > marker_rank:
-        return 1
-    return 0
+def _normalize_sort_numeric(value: Any) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float('-inf')
+    if math.isnan(numeric):
+        return float('-inf')
+    return numeric
+
+
+def _collect_updates_list_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    processed_columns = get_processed_games_columns(conn)
+    cover_url_select = (
+        'p."Large Cover Image (URL)" AS cover_url'
+        if 'Large Cover Image (URL)' in processed_columns
+        else 'NULL AS cover_url'
+    )
+    relation_count_sql = ', '.join(
+        f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = p."ID") AS {relation["join_table"]}_count'
+        for relation in LOOKUP_RELATIONS
+    )
+
+    order_expr = "COALESCE(u.refreshed_at, u.local_last_edited_at, u.igdb_updated_at, '')"
+    mismatch_query = (
+        f'''SELECT
+               u.processed_game_id,
+               u.igdb_id,
+               u.igdb_updated_at,
+               u.local_last_edited_at,
+               u.refreshed_at,
+               u.has_diff,
+               {order_expr} AS order_value,
+               p."Name" AS game_name,
+               p."Cover Path" AS cover_path,
+               {cover_url_select}
+           FROM igdb_updates u
+           LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
+           ORDER BY {order_expr} DESC, u.processed_game_id DESC
+        '''
+    )
+    mismatch_rows = conn.execute(mismatch_query).fetchall()
+
+    duplicate_order_expr = "COALESCE(p.last_edited_at, CAST(cache.updated_at AS TEXT), '')"
+    duplicate_query = (
+        f'''SELECT
+               p."ID",
+               p."Source Index",
+               p."Name",
+               p."igdb_id",
+               p."Summary",
+               p."Cover Path",
+               p."First Launch Date",
+               p."Category",
+               p."Width",
+               p."Height",
+               p.last_edited_at,
+               {relation_count_sql},
+               {cover_url_select},
+               cache.updated_at AS cache_updated_at,
+               {duplicate_order_expr} AS order_value
+           FROM processed_games p
+           LEFT JOIN igdb_updates u ON u.processed_game_id = p."ID"
+           LEFT JOIN {IGDB_CACHE_TABLE} cache ON cache.igdb_id = p."igdb_id"
+           WHERE u.processed_game_id IS NULL
+             AND p."igdb_id" IS NOT NULL AND TRIM(p."igdb_id") != ''
+             AND EXISTS (
+                 SELECT 1 FROM processed_games other
+                 WHERE other."igdb_id" = p."igdb_id" AND other."ID" != p."ID"
+             )
+        '''
+    )
+    duplicate_rows = conn.execute(duplicate_query).fetchall()
+
+    entries: list[dict[str, Any]] = []
+    existing_ids: set[int] = set()
+
+    for row in mismatch_rows:
+        processed_id = int(row['processed_game_id']) if row['processed_game_id'] is not None else None
+        if processed_id is None:
+            continue
+        cover_available = bool(row['cover_path'] or row['cover_url'])
+        entry = {
+            'processed_game_id': processed_id,
+            'igdb_id': row['igdb_id'],
+            'igdb_updated_at': _normalize_timestamp(row['igdb_updated_at']),
+            'local_last_edited_at': _normalize_timestamp(row['local_last_edited_at']),
+            'refreshed_at': _normalize_timestamp(row['refreshed_at']),
+            'name': row['game_name'],
+            'has_diff': bool(row['has_diff']),
+            'cover': None,
+            'cover_available': cover_available,
+            'update_type': 'mismatch',
+            'detail_available': True,
+            'entry_type': 'm',
+            'cursor_value': row['order_value'] or '',
+        }
+        entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
+        entry['entry_rank'] = _entry_type_rank(entry['entry_type'])
+        entries.append(entry)
+        existing_ids.add(processed_id)
+
+    duplicate_resolutions, _, _, _ = _scan_duplicate_candidates(duplicate_rows)
+    for resolution in duplicate_resolutions:
+        for duplicate_row in resolution.duplicates:
+            row_map = dict(duplicate_row)
+            processed_id = processed_duplicates.coerce_int(row_map.get('ID'))
+            if processed_id is None or processed_id in existing_ids:
+                continue
+            existing_ids.add(processed_id)
+            cover_available = bool(row_map.get('Cover Path') or row_map.get('cover_url'))
+            order_value = row_map.get('order_value') or row_map.get('last_edited_at') or row_map.get('cache_updated_at')
+            entry = {
+                'processed_game_id': processed_id,
+                'igdb_id': row_map.get('igdb_id'),
+                'igdb_updated_at': _normalize_timestamp(row_map.get('cache_updated_at')),
+                'local_last_edited_at': _normalize_timestamp(row_map.get('last_edited_at')),
+                'refreshed_at': None,
+                'name': row_map.get('Name'),
+                'has_diff': False,
+                'cover': None,
+                'cover_available': cover_available,
+                'update_type': 'duplicate',
+                'detail_available': False,
+                'entry_type': 'd',
+                'cursor_value': order_value or '',
+            }
+            entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
+            entry['entry_rank'] = _entry_type_rank(entry['entry_type'])
+            entries.append(entry)
+
+    entries.sort(
+        key=lambda item: (
+            -float(item.get('cursor_numeric', float('-inf'))),
+            -int(item.get('processed_game_id') or 0),
+            item.get('entry_rank', 0),
+        )
+    )
+
+    return entries
+
+
+def _populate_updates_list_locked(conn: sqlite3.Connection) -> int:
+    entries = _collect_updates_list_entries(conn)
+    with conn:
+        conn.execute(f'DELETE FROM {UPDATES_LIST_TABLE}')
+        if entries:
+            conn.executemany(
+                f'''INSERT INTO {UPDATES_LIST_TABLE} (
+                        processed_game_id,
+                        igdb_id,
+                        igdb_updated_at,
+                        local_last_edited_at,
+                        refreshed_at,
+                        name,
+                        has_diff,
+                        cover,
+                        cover_available,
+                        update_type,
+                        detail_available,
+                        cursor_value,
+                        sort_numeric,
+                        entry_type,
+                        entry_rank
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                [
+                    (
+                        entry['processed_game_id'],
+                        entry.get('igdb_id'),
+                        entry.get('igdb_updated_at'),
+                        entry.get('local_last_edited_at'),
+                        entry.get('refreshed_at'),
+                        entry.get('name'),
+                        1 if entry.get('has_diff') else 0,
+                        entry.get('cover'),
+                        1 if entry.get('cover_available') else 0,
+                        entry.get('update_type'),
+                        1 if entry.get('detail_available') else 0,
+                        entry.get('cursor_value'),
+                        _normalize_sort_numeric(entry.get('cursor_numeric')),
+                        entry.get('entry_type', 'm'),
+                        entry.get('entry_rank', 0),
+                    )
+                    for entry in entries
+                ],
+            )
+    return len(entries)
+
+
+def rebuild_updates_list_cache() -> int:
+    with db_lock:
+        conn = get_db()
+        return _populate_updates_list_locked(conn)
 
 
 def _parse_updates_cursor(cursor: str | None) -> dict[str, Any] | None:
@@ -2759,181 +2964,73 @@ def fetch_cached_updates(
 
     with db_lock:
         conn = get_db()
-        processed_columns = get_processed_games_columns(conn)
-        cover_url_select = (
-            'p."Large Cover Image (URL)" AS cover_url'
-            if 'Large Cover Image (URL)' in processed_columns
-            else 'NULL AS cover_url'
-        )
-        relation_count_sql = ', '.join(
-            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = p."ID") AS {relation["join_table"]}_count'
-            for relation in LOOKUP_RELATIONS
-        )
+        total_row = conn.execute(
+            f'SELECT COUNT(*) FROM {UPDATES_LIST_TABLE}'
+        ).fetchone()
+        total_count_value = int(total_row[0] or 0)
+        if total_count_value == 0:
+            total_count_value = _populate_updates_list_locked(conn)
 
-        order_expr = "COALESCE(u.refreshed_at, u.local_last_edited_at, u.igdb_updated_at, '')"
-        mismatch_where: list[str] = []
-        mismatch_params: list[Any] = []
+        params: list[Any] = []
+        where_clause = ''
         if marker is not None:
-            mismatch_where.append(
-                f"({order_expr} < ? OR ({order_expr} = ? AND u.processed_game_id < ?))"
+            marker_numeric = float(marker.get('sort_numeric', float('-inf')))
+            marker_id = int(marker.get('processed_game_id') or 0)
+            marker_rank = _entry_type_rank(str(marker.get('entry_type', 'm')))
+            where_clause = (
+                'WHERE sort_numeric < ? '
+                'OR (sort_numeric = ? AND processed_game_id < ?) '
+                'OR (sort_numeric = ? AND processed_game_id = ? AND entry_rank > ?)'
             )
-            mismatch_params.extend(
+            params.extend(
                 [
-                    marker['sort_value'],
-                    marker['sort_value'],
-                    marker['processed_game_id'],
+                    marker_numeric,
+                    marker_numeric,
+                    marker_id,
+                    marker_numeric,
+                    marker_id,
+                    marker_rank,
                 ]
             )
-        mismatch_query = (
-            f'''SELECT
-                   u.processed_game_id,
-                   u.igdb_id,
-                   u.igdb_updated_at,
-                   u.local_last_edited_at,
-                   u.refreshed_at,
-                   u.has_diff,
-                   {order_expr} AS order_value,
-                   p."Name" AS game_name,
-                   p."Cover Path" AS cover_path,
-                   {cover_url_select}
-               FROM igdb_updates u
-               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
-               {('WHERE ' + ' AND '.join(mismatch_where)) if mismatch_where else ''}
-               ORDER BY {order_expr} DESC, u.processed_game_id DESC
-               LIMIT ?
-            '''
-        )
-        mismatch_rows = conn.execute(
-            mismatch_query,
-            (*mismatch_params, fetch_limit),
-        ).fetchall()
 
-        duplicate_order_expr = (
-            "COALESCE(p.last_edited_at, CAST(cache.updated_at AS TEXT), '')"
+        query = (
+            f'''SELECT processed_game_id, igdb_id, igdb_updated_at, local_last_edited_at,
+                       refreshed_at, name, has_diff, cover, cover_available,
+                       update_type, detail_available, cursor_value, entry_type
+                  FROM {UPDATES_LIST_TABLE}
+                  {where_clause}
+                 ORDER BY sort_numeric DESC, processed_game_id DESC, entry_rank ASC
+                 LIMIT ?'''
         )
-        duplicate_query = (
-            f'''SELECT
-                   p."ID",
-                   p."Source Index",
-                   p."Name",
-                   p."igdb_id",
-                   p."Summary",
-                   p."Cover Path",
-                   p."First Launch Date",
-                   p."Category",
-                   p."Width",
-                   p."Height",
-                   p.last_edited_at,
-                   {relation_count_sql},
-                   {cover_url_select},
-                   cache.updated_at AS cache_updated_at,
-                   {duplicate_order_expr} AS order_value
-               FROM processed_games p
-               LEFT JOIN igdb_updates u ON u.processed_game_id = p."ID"
-               LEFT JOIN {IGDB_CACHE_TABLE} cache ON cache.igdb_id = p."igdb_id"
-               WHERE u.processed_game_id IS NULL
-                 AND p."igdb_id" IS NOT NULL AND TRIM(p."igdb_id") != ''
-                 AND EXISTS (
-                     SELECT 1 FROM processed_games other
-                     WHERE other."igdb_id" = p."igdb_id" AND other."ID" != p."ID"
-                 )
-        '''
-        )
-        duplicate_rows = conn.execute(
-            duplicate_query,
-        ).fetchall()
-
-        mismatch_total = conn.execute('SELECT COUNT(*) FROM igdb_updates').fetchone()[0] or 0
+        rows = conn.execute(query, (*params, fetch_limit)).fetchall()
 
     entries: list[dict[str, Any]] = []
-    existing_ids: set[int] = set()
-
-    for row in mismatch_rows:
-        processed_id = int(row['processed_game_id']) if row['processed_game_id'] is not None else None
-        if processed_id is None:
-            continue
-        cover_available = bool(row['cover_path'] or row['cover_url'])
+    for row in rows:
+        row_map = dict(row)
         entry = {
-            'processed_game_id': processed_id,
-            'igdb_id': row['igdb_id'],
-            'igdb_updated_at': _normalize_timestamp(row['igdb_updated_at']),
-            'local_last_edited_at': _normalize_timestamp(row['local_last_edited_at']),
-            'refreshed_at': _normalize_timestamp(row['refreshed_at']),
-            'name': row['game_name'],
-            'has_diff': bool(row['has_diff']),
-            'cover': None,
-            'cover_available': cover_available,
-            'update_type': 'mismatch',
-            'detail_available': True,
-            'entry_type': 'm',
-            'cursor_value': row['order_value'] or '',
+            'processed_game_id': row_map.get('processed_game_id'),
+            'igdb_id': row_map.get('igdb_id'),
+            'igdb_updated_at': row_map.get('igdb_updated_at'),
+            'local_last_edited_at': row_map.get('local_last_edited_at'),
+            'refreshed_at': row_map.get('refreshed_at'),
+            'name': row_map.get('name'),
+            'has_diff': bool(row_map.get('has_diff')),
+            'cover': row_map.get('cover'),
+            'cover_available': bool(row_map.get('cover_available')),
+            'update_type': row_map.get('update_type') or 'mismatch',
+            'detail_available': bool(row_map.get('detail_available')),
+            'cursor_value': row_map.get('cursor_value') or '',
+            'entry_type': row_map.get('entry_type') or 'm',
         }
-        entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
         entries.append(entry)
-        existing_ids.add(processed_id)
-
-    duplicate_entries: list[dict[str, Any]] = []
-    duplicate_resolutions, _, _, _ = _scan_duplicate_candidates(duplicate_rows)
-    for resolution in duplicate_resolutions:
-        for duplicate_row in resolution.duplicates:
-            row_map = dict(duplicate_row)
-            processed_id = processed_duplicates.coerce_int(row_map.get('ID'))
-            if processed_id is None or processed_id in existing_ids:
-                continue
-            existing_ids.add(processed_id)
-            cover_available = bool(row_map.get('Cover Path') or row_map.get('cover_url'))
-            order_value = row_map.get('order_value') or row_map.get('last_edited_at') or row_map.get('cache_updated_at')
-            entry = {
-                'processed_game_id': processed_id,
-                'igdb_id': row_map.get('igdb_id'),
-                'igdb_updated_at': _normalize_timestamp(row_map.get('cache_updated_at')),
-                'local_last_edited_at': _normalize_timestamp(row_map.get('last_edited_at')),
-                'refreshed_at': None,
-                'name': row_map.get('Name'),
-                'has_diff': False,
-                'cover': None,
-                'cover_available': cover_available,
-                'update_type': 'duplicate',
-                'detail_available': False,
-                'entry_type': 'd',
-                'cursor_value': order_value or '',
-            }
-            entry['cursor_numeric'] = _coerce_cursor_timestamp(entry['cursor_value'])
-            duplicate_entries.append(entry)
-
-    entries.extend(duplicate_entries)
-
-    entries.sort(
-        key=lambda item: (
-            -float(item.get('cursor_numeric', float('-inf'))),
-            -int(item.get('processed_game_id') or 0),
-            _entry_type_rank(str(item.get('entry_type', 'm'))),
-        )
-    )
-
-    filtered: list[dict[str, Any]] = []
-    for entry in entries:
-        if marker is not None:
-            comparison = _compare_entries_desc(entry, marker)
-            if comparison != 1:
-                continue
-        filtered.append(entry)
 
     has_more = False
-    if len(filtered) > normalized_limit:
+    if len(entries) > normalized_limit:
         has_more = True
-        filtered = filtered[:normalized_limit]
-    else:
-        has_more = len(mismatch_rows) > normalized_limit or len(duplicate_entries) > normalized_limit
+        entries = entries[:normalized_limit]
 
-    for entry in filtered:
-        entry.pop('cursor_numeric', None)
-        entry.pop('entry_type', None)
-
-    next_cursor = _encode_updates_cursor(filtered[-1]) if has_more and filtered else None
-    duplicate_total = len(duplicate_entries)
-    total = int(mismatch_total) + int(duplicate_total)
-    return filtered, total, next_cursor, has_more
+    next_cursor = _encode_updates_cursor(entries[-1]) if has_more and entries else None
+    return entries, total_count_value, next_cursor, has_more
 
 
 def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[dict[str, Any]]:
@@ -3139,6 +3236,7 @@ def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, A
                     },
                 )
         conn.commit()
+        _populate_updates_list_locked(conn)
 
     update_progress(
         current=total,

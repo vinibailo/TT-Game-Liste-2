@@ -25,6 +25,7 @@ def clear_processed_tables(app_module):
         'processed_game_game_modes',
         'processed_game_platforms',
         'processed_games',
+        'updates_list',
     )
     with app_module.db_lock:
         with app_module.db:
