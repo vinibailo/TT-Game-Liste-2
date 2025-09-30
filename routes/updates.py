@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from collections.abc import Iterable
 from typing import Any, Mapping
@@ -223,22 +224,33 @@ def api_igdb_cache_refresh():
                 else download_games_helper
             )
 
-            result = refresh_igdb_cache(
-                access_token,
-                client_id,
-                offset,
-                limit,
-                conn=_ctx('get_db')(),
-                db_lock=_ctx('db_lock'),
-                get_cached_total=_ctx('_get_cached_igdb_total'),
-                set_cached_total=_ctx('_set_cached_igdb_total'),
-                download_total=download_total,
-                download_games=download_games,
-                upsert_games=_ctx('_upsert_igdb_cache_entries'),
-                exchange_credentials=exchange_callable,
-                igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
-                igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
-            )
+            attempt = 0
+            while True:
+                try:
+                    result = refresh_igdb_cache(
+                        access_token,
+                        client_id,
+                        offset,
+                        limit,
+                        conn=_ctx('get_db')(),
+                        db_lock=_ctx('db_lock'),
+                        get_cached_total=_ctx('_get_cached_igdb_total'),
+                        set_cached_total=_ctx('_set_cached_igdb_total'),
+                        download_total=download_total,
+                        download_games=download_games,
+                        upsert_games=_ctx('_upsert_igdb_cache_entries'),
+                        exchange_credentials=exchange_callable,
+                        igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
+                        igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
+                    )
+                except sqlite3.OperationalError as exc:
+                    message = str(exc).lower()
+                    if 'locked' not in message or attempt >= 3:
+                        raise
+                    attempt += 1
+                    time.sleep(0.1 * attempt)
+                    continue
+                break
         except RuntimeError as exc:
             raise UpstreamServiceError(str(exc)) from exc
         payload: dict[str, Any] = dict(result) if isinstance(result, Mapping) else {'status': 'error'}
@@ -452,8 +464,15 @@ def api_updates_refresh():
     if not _ctx('validate_igdb_credentials')():
         return jsonify({'error': 'IGDB credentials missing'}), 503
 
+    if 'offset' in request.args:
+        return (
+            jsonify({'error': 'Offset pagination is deprecated. Use ?after=<id>.'}),
+            400,
+        )
+
+    after_param = request.args.get('after')
     try:
-        offset = int(request.args.get('offset', 0))
+        offset = int(after_param) if after_param not in (None, '') else 0
     except (TypeError, ValueError):
         offset = 0
     if offset < 0:

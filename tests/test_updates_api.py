@@ -222,7 +222,7 @@ def test_updates_refresh_returns_progress(tmp_path):
     )
 
     with patch.object(app_module.routes_updates, 'refresh_igdb_cache', side_effect=fake_refresh):
-        response = client.post('/api/updates/refresh?offset=7&limit=120')
+        response = client.post('/api/updates/refresh?after=7&limit=120')
 
     assert response.status_code == 200
     assert response.get_json() == {
@@ -283,6 +283,19 @@ def test_updates_refresh_defaults_query_params(tmp_path):
     assert captured == {'offset': 0, 'limit': 200}
 
 
+def test_updates_refresh_rejects_offset_query(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    response = client.post('/api/updates/refresh?offset=10')
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        'error': 'Offset pagination is deprecated. Use ?after=<id>.',
+    }
+
+
 def test_updates_refresh_handles_runtime_error(tmp_path):
     app_module = load_app(tmp_path)
     client = app_module.app.test_client()
@@ -296,7 +309,7 @@ def test_updates_refresh_handles_runtime_error(tmp_path):
         raise RuntimeError('network unavailable')
 
     with patch.object(app_module.routes_updates, 'refresh_igdb_cache', side_effect=fail_refresh):
-        response = client.post('/api/updates/refresh?offset=3&limit=10')
+        response = client.post('/api/updates/refresh?after=3&limit=10')
 
     assert response.status_code == 502
     assert response.get_json() == {'error': 'network unavailable'}

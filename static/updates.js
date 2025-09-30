@@ -91,7 +91,7 @@
         targets: new Map(),
     };
 
-    const DEFAULT_OFFSET = 0;
+    const DEFAULT_AFTER = null;
     const DEFAULT_REFRESH_LIMIT = 200;
     const DEFAULT_UPDATES_LIMIT = 100;
     const LOCAL_STORAGE_KEYS = Object.freeze({
@@ -463,11 +463,12 @@
         return truncated;
     }
 
-    function resolveOffset(value) {
+    function resolveAfter(value) {
         if (value === undefined || value === null || value === '') {
-            return DEFAULT_OFFSET;
+            return DEFAULT_AFTER;
         }
-        return toNonNegativeInt(value, DEFAULT_OFFSET);
+        const normalized = normalizeNextAfter(value);
+        return normalized === null ? DEFAULT_AFTER : normalized;
     }
 
     function resolveLimit(value, fallback = DEFAULT_REFRESH_LIMIT) {
@@ -2336,17 +2337,28 @@
         updateRefreshProgress(0, 0, 'pending');
         setRefreshButtonLoading(true);
         const limit = DEFAULT_REFRESH_LIMIT;
-        const visitedOffsets = new Set();
-        let offset = DEFAULT_OFFSET;
+        const visitedCursors = new Set();
+        let after = DEFAULT_AFTER;
         try {
             let done = false;
             while (!done) {
-                const resolvedOffset = resolveOffset(offset);
-                if (visitedOffsets.has(resolvedOffset)) {
+                const resolvedAfter = resolveAfter(after);
+                const visitKey = resolvedAfter === null ? '__root__' : String(resolvedAfter);
+                if (visitedCursors.has(visitKey)) {
                     throw new Error('Refresh appears to be stuck.');
                 }
-                visitedOffsets.add(resolvedOffset);
-                const url = `/api/updates/refresh?offset=${encodeURIComponent(resolvedOffset)}&limit=${encodeURIComponent(limit)}`;
+                visitedCursors.add(visitKey);
+                const urlParams = new URLSearchParams();
+                if (resolvedAfter !== null) {
+                    urlParams.set('after', resolvedAfter);
+                }
+                urlParams.set('limit', limit);
+                const refreshUrl =
+                    typeof config.refreshUrl === 'string' && config.refreshUrl.trim()
+                        ? config.refreshUrl.trim()
+                        : '/api/updates/refresh';
+                const url = `${refreshUrl}?${urlParams.toString()}`;
+                logFetch(url);
                 const payload = await fetchJson(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -2366,12 +2378,19 @@
                 state.refreshPhase = typeof payload.phase === 'string' ? payload.phase : 'running';
                 updateProgressBar(processed, total);
                 done = Boolean(payload.done);
-                const nextOffsetRaw = payload.next_offset ?? (resolvedOffset + limit);
-                const nextOffset = resolveOffset(nextOffsetRaw);
+                const nextAfterRaw =
+                    payload.next_after ??
+                    payload.nextAfter ??
+                    payload.next_cursor ??
+                    (resolvedAfter === null ? null : resolvedAfter);
+                const nextAfter = resolveAfter(nextAfterRaw);
                 if (done) {
                     break;
                 }
-                offset = nextOffset > resolvedOffset ? nextOffset : resolvedOffset + limit;
+                if (nextAfter === null && resolvedAfter === null) {
+                    throw new Error('Refresh did not provide a continuation cursor.');
+                }
+                after = nextAfter !== null ? nextAfter : resolvedAfter;
                 await new Promise((resolve) => {
                     window.setTimeout(resolve, 300);
                 });
