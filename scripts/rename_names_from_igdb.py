@@ -38,11 +38,21 @@ except ModuleNotFoundError:
 
     def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
         busy_timeout_ms = int(max(SQLITE_TIMEOUT_SECONDS, 0) * 1000)
-        if busy_timeout_ms > 0:
+        pragmas: tuple[tuple[str, str | int | float | None, bool], ...] = (
+            ("busy_timeout", busy_timeout_ms if busy_timeout_ms > 0 else None, False),
+            ("journal_mode", "WAL", True),
+            ("mmap_size", 268_435_456, False),
+            ("cache_size", -200_000, False),
+        )
+        for name, value, fetch_result in pragmas:
+            if value is None:
+                continue
             try:
-                conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+                cursor = conn.execute(f"PRAGMA {name}={value}")
+                if fetch_result:
+                    cursor.fetchone()
             except sqlite3.OperationalError:
-                pass
+                continue
         return conn
 
     def get_db() -> sqlite3.Connection:

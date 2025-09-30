@@ -1045,6 +1045,14 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 
             try:
                 conn.execute(
+                    f'''CREATE INDEX IF NOT EXISTS {IGDB_CACHE_TABLE}_updated_at_id_idx '''
+                    f'''ON {IGDB_CACHE_TABLE}(updated_at, igdb_id)'''
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute(
                     'CREATE INDEX IF NOT EXISTS processed_games_igdb_id_idx '
                     'ON processed_games("igdb_id")'
                 )
@@ -1162,6 +1170,11 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                             game_id,
                         )
                         continue
+            if run_migrations:
+                try:
+                    conn.execute('ANALYZE')
+                except sqlite3.OperationalError:
+                    pass
     finally:
         conn.close()
 
