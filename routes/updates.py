@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from collections.abc import Iterable
 from typing import Any, Mapping
@@ -23,7 +24,7 @@ from flask import (
 from werkzeug.routing import BaseConverter
 
 from updates.service import refresh_igdb_cache
-from igdb.cache import get_cache_status as cache_get_status
+from igdb.cache import IGDB_CACHE_TABLE, get_cache_status as cache_get_status
 
 from jobs.manager import JOB_STATUS_ERROR, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 from routes.api_utils import (
@@ -96,6 +97,57 @@ def _collect_job_errors(job: Mapping[str, Any]) -> list[str]:
                 errors.append(text)
 
     return errors
+
+
+def _fetch_processed_cache_ids() -> list[int]:
+    """Return IGDB cache identifiers that exist for processed games."""
+
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+
+    with db_lock:
+        conn = get_db()
+        query = (
+            f'''SELECT DISTINCT cache.igdb_id AS igdb_id
+                FROM {IGDB_CACHE_TABLE} AS cache
+                INNER JOIN processed_games AS pg
+                    ON pg."igdb_id" IS NOT NULL
+                   AND TRIM(pg."igdb_id") != ''
+                   AND pg."igdb_id" GLOB '[0-9]*'
+                   AND CAST(pg."igdb_id" AS INTEGER) = cache.igdb_id'''
+        )
+        rows = conn.execute(query).fetchall()
+
+    cache_ids: list[int] = []
+    for row in rows:
+        value: Any
+        try:
+            value = row['igdb_id']  # type: ignore[index]
+        except Exception:
+            try:
+                value = row[0]  # type: ignore[index]
+            except Exception:
+                value = None
+        try:
+            if value is None:
+                continue
+            cache_ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    return cache_ids
+
+
+def _safe_set_cached_total(conn: Any, total: int | None) -> None:
+    """Persist IGDB cache totals, tolerating transient database locks."""
+
+    setter = _ctx('_set_cached_igdb_total')
+    try:
+        setter(conn, total)
+    except sqlite3.OperationalError as exc:
+        message = str(exc).lower()
+        if 'locked' not in message:
+            raise
 
 
 def _build_progress_snapshot() -> dict[str, Any]:
@@ -228,10 +280,10 @@ def api_igdb_cache_refresh():
                 client_id,
                 offset,
                 limit,
-                conn=_ctx('get_db')(),
                 db_lock=_ctx('db_lock'),
+                get_db=_ctx('get_db'),
                 get_cached_total=_ctx('_get_cached_igdb_total'),
-                set_cached_total=_ctx('_set_cached_igdb_total'),
+                set_cached_total=_safe_set_cached_total,
                 download_total=download_total,
                 download_games=download_games,
                 upsert_games=_ctx('_upsert_igdb_cache_entries'),
@@ -500,10 +552,10 @@ def api_updates_refresh():
             client_id,
             offset,
             limit_value,
-            conn=_ctx('get_db')(),
             db_lock=_ctx('db_lock'),
+            get_db=_ctx('get_db'),
             get_cached_total=_ctx('_get_cached_igdb_total'),
-            set_cached_total=_ctx('_set_cached_igdb_total'),
+            set_cached_total=_safe_set_cached_total,
             download_total=download_total,
             download_games=download_games,
             upsert_games=_ctx('_upsert_igdb_cache_entries'),
@@ -539,14 +591,18 @@ def api_updates_compare():
     job_manager = _ctx('job_manager')
     compare_updates_job = _ctx('compare_updates_job')
 
+    cache_ids = _fetch_processed_cache_ids()
+    job_kwargs = {'igdb_ids': list(cache_ids)}
+
     run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
     if run_sync:
-        return jsonify(compare_updates_job(lambda **_kwargs: None))
+        return jsonify(compare_updates_job(lambda **_kwargs: None, **job_kwargs))
 
     job, created = job_manager.enqueue_job(
         'compare_updates',
         'app._execute_compare_updates_job',
         description='Comparing IGDB cache with processed games…',
+        kwargs=job_kwargs,
     )
 
     status_code = 202 if created else 200

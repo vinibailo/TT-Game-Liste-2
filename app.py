@@ -3397,8 +3397,24 @@ def _run_refresh_cache_phase(update_progress: Callable[..., None]) -> Optional[d
     }
 
 
-def _run_refresh_diff_phase(update_progress: Callable[..., None]) -> dict[str, Any]:
+def _run_refresh_diff_phase(
+    update_progress: Callable[..., None],
+    *,
+    allowed_cache_ids: set[str] | None = None,
+) -> dict[str, Any]:
     processed_rows = _collect_processed_games_with_igdb()
+
+    if allowed_cache_ids is not None:
+        if not allowed_cache_ids:
+            processed_rows = []
+        else:
+            filtered_rows: list[dict[str, Any]] = []
+            for row in processed_rows:
+                normalized = coerce_igdb_id(row.get('igdb_id'))
+                if normalized and normalized in allowed_cache_ids:
+                    filtered_rows.append(row)
+            processed_rows = filtered_rows
+
     total = len(processed_rows)
     update_progress(
         total=total,
@@ -3770,10 +3786,23 @@ def _execute_refresh_job(
 
 
 
-def _execute_compare_updates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
+def _execute_compare_updates_job(
+    update_progress: Callable[..., None],
+    *,
+    igdb_ids: Iterable[int | str] | None = None,
+) -> dict[str, Any]:
     """Background job helper that recomputes IGDB update diffs only."""
 
-    diff_summary = _run_refresh_diff_phase(update_progress)
+    allowed_cache_ids: set[str] | None = None
+    if igdb_ids is not None:
+        normalized_ids: set[str] = set()
+        for value in igdb_ids:
+            normalized = coerce_igdb_id(value)
+            if normalized:
+                normalized_ids.add(normalized)
+        allowed_cache_ids = normalized_ids
+
+    diff_summary = _run_refresh_diff_phase(update_progress, allowed_cache_ids=allowed_cache_ids)
 
     message = diff_summary.get('status_message', '').strip() if diff_summary else ''
     if not message:

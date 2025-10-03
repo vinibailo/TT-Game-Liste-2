@@ -309,8 +309,9 @@ def test_updates_compare_runs_sync(tmp_path):
 
     recorded: dict[str, Any] = {}
 
-    def fake_compare_job(update_progress):
+    def fake_compare_job(update_progress, **kwargs):
         recorded['called'] = True
+        recorded['kwargs'] = kwargs
         update_progress(message='Comparing…', data={'phase': 'diffs'})
         return {'status': 'ok', 'message': 'Comparison complete.', 'toast_type': 'success'}
 
@@ -324,6 +325,34 @@ def test_updates_compare_runs_sync(tmp_path):
         'toast_type': 'success',
     }
     assert recorded['called'] is True
+    assert recorded['kwargs']['igdb_ids'] == []
+
+
+def test_updates_compare_filters_cache_ids(tmp_path):
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    insert_processed_game(app_module, ID=1, **{"Source Index": "0"}, igdb_id="100", Name="Game 100")
+    insert_processed_game(app_module, ID=2, **{"Source Index": "1"}, igdb_id="abc", Name="Game ABC")
+    insert_processed_game(app_module, ID=3, **{"Source Index": "2"}, igdb_id="200", Name="Game 200")
+
+    insert_igdb_cache_entry(app_module, 100)
+    insert_igdb_cache_entry(app_module, 200)
+    insert_igdb_cache_entry(app_module, 300)
+
+    captured: dict[str, Any] = {}
+
+    def fake_compare_job(update_progress, **kwargs):
+        captured['ids'] = kwargs.get('igdb_ids')
+        update_progress(message='Comparing…', data={'phase': 'diffs'})
+        return {'status': 'ok', 'message': 'Done', 'toast_type': 'success'}
+
+    app_module.routes_updates._context['compare_updates_job'] = fake_compare_job
+
+    response = client.post('/api/updates/compare?sync=1')
+    assert response.status_code == 200
+    assert sorted(captured['ids']) == [100, 200]
 
 
 def test_refresh_creates_update_records(tmp_path):
