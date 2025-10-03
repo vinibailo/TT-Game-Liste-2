@@ -1532,16 +1532,79 @@
         state.jobPollBackoffs.delete(jobId);
     }
 
+    function resolveJobType(jobId) {
+        if (!jobId) {
+            return null;
+        }
+        const existing = state.jobs.get(jobId);
+        if (existing && existing.job_type) {
+            return existing.job_type;
+        }
+        for (const [type, activeId] of state.activeJobIds.entries()) {
+            if (activeId === jobId) {
+                return type;
+            }
+        }
+        return null;
+    }
+
+    function createFailedJob(jobId, error, fallbackMessage = 'Background task failed.') {
+        const existing = state.jobs.get(jobId);
+        const base = existing ? { ...existing } : {};
+        let message = fallbackMessage;
+        if (error instanceof HttpError && error.status === 404) {
+            message = 'Background job could not be found.';
+        } else if (error && typeof error.message === 'string' && error.message.trim()) {
+            message = error.message.trim();
+        }
+        const resolvedType = base.job_type || resolveJobType(jobId);
+        return {
+            ...base,
+            id: jobId,
+            job_type: resolvedType || null,
+            status: 'error',
+            error: message,
+            message,
+        };
+    }
+
+    function hasJobProgressChanged(previousJob, nextJob) {
+        if (!previousJob || !nextJob) {
+            return true;
+        }
+        if (previousJob.status !== nextJob.status) {
+            return true;
+        }
+        const prevCurrent = Number(previousJob.progress_current) || 0;
+        const nextCurrent = Number(nextJob.progress_current) || 0;
+        if (prevCurrent !== nextCurrent) {
+            return true;
+        }
+        const prevTotal = Number(previousJob.progress_total) || 0;
+        const nextTotal = Number(nextJob.progress_total) || 0;
+        if (prevTotal !== nextTotal) {
+            return true;
+        }
+        const prevMessage = (previousJob.message || '').trim();
+        const nextMessage = (nextJob.message || '').trim();
+        return prevMessage !== nextMessage;
+    }
+
     async function fetchJobDetail(jobId) {
         const url = getJobDetailUrl(jobId);
         if (!url) {
             throw new Error('Job tracking endpoint is not configured.');
         }
-        const payload = await fetchJson(url);
-        if (!payload || !payload.job) {
-            throw new Error('Failed to retrieve job details.');
+        try {
+            const payload = await fetchJson(url);
+            if (!payload || !payload.job) {
+                throw new Error('Failed to retrieve job details.');
+            }
+            return payload.job;
+        } catch (error) {
+            console.error('Failed to fetch job detail', error);
+            return createFailedJob(jobId, error, 'Failed to retrieve job details.');
         }
-        return payload.job;
     }
 
     async function startJob(url) {
@@ -1733,16 +1796,25 @@
             return;
         }
         clearJobPoller(normalizedId);
-        state.jobPollBackoffs.set(normalizedId, JOB_POLL_INTERVAL);
         const poll = async () => {
             try {
                 const latest = await fetchJobDetail(normalizedId);
-                state.jobPollBackoffs.set(normalizedId, JOB_POLL_INTERVAL);
+                const previous = state.jobs.get(normalizedId) || null;
                 updateJobUi(latest);
                 if (isJobActive(latest.status)) {
-                    const delay = state.jobPollBackoffs.get(normalizedId) || JOB_POLL_INTERVAL;
+                    let delay = state.jobPollBackoffs.get(normalizedId);
+                    if (!Number.isFinite(delay) || delay < JOB_POLL_INTERVAL) {
+                        delay = JOB_POLL_INTERVAL;
+                    } else {
+                        delay = Math.min(delay, JOB_POLL_MAX_INTERVAL);
+                    }
+                    if (hasJobProgressChanged(previous, latest)) {
+                        delay = JOB_POLL_INTERVAL;
+                    }
+                    const nextDelay = Math.min(Math.max(delay * JOB_POLL_BACKOFF_FACTOR, JOB_POLL_INTERVAL), JOB_POLL_MAX_INTERVAL);
                     const timer = window.setTimeout(poll, delay);
                     state.jobPollers.set(normalizedId, timer);
+                    state.jobPollBackoffs.set(normalizedId, nextDelay);
                 } else {
                     state.jobPollers.delete(normalizedId);
                     handleJobCompletion(latest);
@@ -1750,21 +1822,14 @@
             } catch (error) {
                 console.error('Failed to poll job status', error);
                 state.jobPollers.delete(normalizedId);
-                if (error instanceof HttpError && (error.isClientError || error.isServerError)) {
-                    showToast(`Stopped polling job ${normalizedId}: ${error.message}`, 'warning');
-                    state.jobPollBackoffs.delete(normalizedId);
-                    return;
-                }
-                const currentDelay = state.jobPollBackoffs.get(normalizedId) || JOB_POLL_INTERVAL;
-                const nextDelay = Math.min(currentDelay * JOB_POLL_BACKOFF_FACTOR, JOB_POLL_MAX_INTERVAL);
-                state.jobPollBackoffs.set(normalizedId, nextDelay);
-                const timer = window.setTimeout(poll, nextDelay);
-                state.jobPollers.set(normalizedId, timer);
-                showToast(`Retrying job ${normalizedId} in ${Math.round(nextDelay / 1000)}s`, 'warning');
+                const failedJob = createFailedJob(normalizedId, error, 'Failed to poll job status.');
+                updateJobUi(failedJob);
+                handleJobCompletion(failedJob);
             }
         };
         const timer = window.setTimeout(poll, JOB_POLL_INTERVAL);
         state.jobPollers.set(normalizedId, timer);
+        state.jobPollBackoffs.set(normalizedId, JOB_POLL_INTERVAL);
     }
 
     function handleProgressStreamMessage(event) {
