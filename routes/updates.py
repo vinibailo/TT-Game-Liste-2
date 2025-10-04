@@ -738,6 +738,8 @@ def api_updates_job_detail_legacy(job_id: str):
 def api_updates_list():
     fetch_cached_updates = _ctx('fetch_cached_updates')
     resolve_cover = _ctx('resolve_cover')
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
 
     def _normalize_since(value: str | None) -> str | None:
         if not value or not isinstance(value, str):
@@ -784,6 +786,8 @@ def api_updates_list():
         limit=limit,
     )
 
+    matching_total = int(total_count_value or 0)
+
     if normalized_since:
         filtered_entries = [
             entry
@@ -793,6 +797,28 @@ def api_updates_list():
         entries = filtered_entries
         has_more = False
         next_cursor = None
+
+        with db_lock:
+            conn = get_db()
+            since_total_row = conn.execute(
+                '''SELECT COUNT(*) AS total
+                     FROM updates_list
+                    WHERE COALESCE(NULLIF(refreshed_at, ''),
+                                   NULLIF(local_last_edited_at, ''),
+                                   NULLIF(igdb_updated_at, '')) > ?''',
+                (normalized_since,),
+            ).fetchone()
+
+        if since_total_row is None:
+            matching_total = 0
+        else:
+            try:
+                matching_total = int(since_total_row['total'])  # type: ignore[index]
+            except Exception:
+                try:
+                    matching_total = int(since_total_row[0])  # type: ignore[index]
+                except Exception:
+                    matching_total = 0
 
     items: list[dict[str, Any]] = []
     for entry in entries[:limit]:
@@ -827,7 +853,7 @@ def api_updates_list():
     elif normalized_since:
         max_updated_at_value = normalized_since
 
-    etag_source = f"{max_updated_at_value}:{int(total_count_value or 0)}"
+    etag_source = f"{max_updated_at_value}:{matching_total}"
     etag_hash = hashlib.sha256(etag_source.encode('utf-8')).hexdigest()
     etag_header_value = f'W/"{etag_hash}"'
 
@@ -849,7 +875,7 @@ def api_updates_list():
 
     payload: dict[str, Any] = {
         'items': items,
-        'total': int(total_count_value or 0),
+        'total': matching_total,
         'limit': limit,
         'has_more': bool(has_more and next_cursor),
         'nextAfter': None,
