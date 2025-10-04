@@ -9,7 +9,7 @@ import math
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Any, Callable, Collection, Iterable, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Collection, Iterable, Mapping, MutableMapping, Optional, Sequence
 from threading import Lock
 import logging
 import logging.config
@@ -300,10 +300,33 @@ LOOKUP_RELATIONS_BY_TABLE = {
 }
 
 
-def _row_value(row: sqlite3.Row | tuple[Any, ...], key: str, index: int) -> Any:
-    if isinstance(row, sqlite3.Row):
-        return row[key]
-    return row[index]
+def _row_value(row: Any, key: str, index: int) -> Any:
+    """Return ``key``/``index`` from ``row`` supporting DBAPI and SQLAlchemy rows."""
+
+    if isinstance(row, Mapping):
+        try:
+            return row[key]
+        except KeyError:
+            if isinstance(row, Sequence):
+                return row[index]
+            raise
+
+    mapping = getattr(row, "_mapping", None)
+    if isinstance(mapping, Mapping):
+        try:
+            return mapping[key]
+        except KeyError:
+            if isinstance(mapping, Sequence):
+                return mapping[index]
+            raise
+
+    if isinstance(row, Sequence):
+        return row[index]
+
+    if hasattr(row, key):
+        return getattr(row, key)
+
+    raise KeyError(f"Unable to resolve value for key '{key}' at index {index}")
 
 
 def _decode_lookup_id_list(raw_value: Any) -> list[int]:
@@ -515,6 +538,30 @@ job_manager = jobs_manager.get_job_manager()
 
 def get_db() -> db_utils.DatabaseHandle:
     return db_utils.get_db(_db_handle_factory)
+
+
+def get_db_handle() -> db_utils.DatabaseHandle:
+    """Return the active :class:`db_utils.DatabaseHandle`."""
+
+    return db_utils.get_db(_db_handle_factory)
+
+
+def get_db_connection():
+    """Yield a DBAPI connection from the configured database handle."""
+
+    return db_utils.get_db_connection(_db_handle_factory)
+
+
+def get_db_sa_connection():
+    """Yield a SQLAlchemy :class:`~sqlalchemy.engine.Connection`."""
+
+    return db_utils.get_db_sa_connection(_db_handle_factory)
+
+
+def get_db_session():
+    """Yield a SQLAlchemy :class:`~sqlalchemy.orm.Session`."""
+
+    return db_utils.get_db_session(_db_handle_factory)
 
 
 def get_processed_games_columns(
