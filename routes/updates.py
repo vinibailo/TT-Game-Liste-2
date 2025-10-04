@@ -547,22 +547,33 @@ def api_updates_refresh():
             else download_games_helper
         )
 
-        result = refresh_igdb_cache(
-            access_token,
-            client_id,
-            offset,
-            limit_value,
-            db_lock=_ctx('db_lock'),
-            get_db=_ctx('get_db'),
-            get_cached_total=_ctx('_get_cached_igdb_total'),
-            set_cached_total=_safe_set_cached_total,
-            download_total=download_total,
-            download_games=download_games,
-            upsert_games=_ctx('_upsert_igdb_cache_entries'),
-            exchange_credentials=exchange_callable,
-            igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
-            igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
-        )
+        get_db_callable = _ctx('get_db')
+        conn = get_db_callable() if callable(get_db_callable) else None
+
+        try:
+            result = refresh_igdb_cache(
+                access_token,
+                client_id,
+                offset,
+                limit_value,
+                db_lock=_ctx('db_lock'),
+                get_db=get_db_callable,
+                conn=conn,
+                get_cached_total=_ctx('_get_cached_igdb_total'),
+                set_cached_total=_safe_set_cached_total,
+                download_total=download_total,
+                download_games=download_games,
+                upsert_games=_ctx('_upsert_igdb_cache_entries'),
+                exchange_credentials=exchange_callable,
+                igdb_prefill_cache=_ctx('_igdb_prefill_cache'),
+                igdb_prefill_lock=_ctx('_igdb_prefill_lock'),
+            )
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # pragma: no cover - cleanup best effort
+                    pass
     except RuntimeError as exc:
         return jsonify({'error': str(exc)}), 502
 
@@ -794,6 +805,7 @@ def api_updates_job_detail_legacy(job_id: str):
 @handle_api_errors
 def api_updates_list():
     fetch_cached_updates = _ctx('fetch_cached_updates')
+    resolve_cover = _ctx('resolve_cover')
 
     def _normalize_since(value: str | None) -> str | None:
         if not value or not isinstance(value, str):
@@ -853,6 +865,11 @@ def api_updates_list():
     items: list[dict[str, Any]] = []
     for entry in entries[:limit]:
         updated_at_value = _entry_updated(entry)
+        resolved_cover_url = resolve_cover(
+            cover_data=entry.get('cover'),
+            cover_path=entry.get('cover_path'),
+            cover_url=entry.get('cover_source_url') or entry.get('cover_url'),
+        )
         items.append(
             {
                 'id': entry.get('processed_game_id'),
@@ -866,6 +883,7 @@ def api_updates_list():
                 'has_diff': bool(entry.get('has_diff')),
                 'cover': entry.get('cover'),
                 'cover_available': bool(entry.get('cover_available')),
+                'cover_url': resolved_cover_url,
                 'update_type': entry.get('update_type') or 'mismatch',
                 'detail_available': bool(entry.get('detail_available')),
             }
@@ -921,6 +939,7 @@ def api_updates_detail(processed_game_id: int):
     get_db = _ctx('get_db')
     get_processed_games_columns = _ctx('get_processed_games_columns')
     load_cover_data = _ctx('load_cover_data')
+    resolve_cover = _ctx('resolve_cover')
 
     with db_lock:
         conn = get_db()
@@ -956,6 +975,11 @@ def api_updates_detail(processed_game_id: int):
     diff = json.loads(row['diff']) if row['diff'] else {}
     cover_available = bool(row['cover_path'] or row['cover_url'])
     cover_data = load_cover_data(row['cover_path'], row['cover_url'])
+    resolved_cover_url = resolve_cover(
+        cover_data=cover_data,
+        cover_path=row['cover_path'],
+        cover_url=row['cover_url'],
+    )
 
     return jsonify(
         {
@@ -969,6 +993,7 @@ def api_updates_detail(processed_game_id: int):
             'name': row['game_name'],
             'cover': cover_data,
             'cover_available': cover_available,
+            'cover_url': resolved_cover_url,
         }
     )
 

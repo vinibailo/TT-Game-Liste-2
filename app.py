@@ -1675,6 +1675,46 @@ def load_cover_data(cover_path: str | None = None, fallback_url: str | None = No
     return cover_data_from_url(fallback_url)
 
 
+def resolve_cover(
+    *,
+    cover_data: str | None = None,
+    cover_path: str | None = None,
+    cover_url: str | None = None,
+    placeholder: str = 'no-image.jpg',
+) -> str:
+    """Resolve a best-effort cover source URL for UI consumption."""
+
+    if cover_data:
+        return cover_data
+
+    normalized_path = str(cover_path or '').strip()
+    if normalized_path:
+        candidates = [normalized_path]
+        if not os.path.isabs(normalized_path):
+            joined = os.path.join(PROCESSED_DIR, normalized_path)
+            if joined not in candidates:
+                candidates.append(joined)
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                cover = cover_data_from_path(candidate)
+                if cover:
+                    return cover
+
+    normalized_url = str(cover_url or '').strip()
+    if normalized_url:
+        return normalized_url
+
+    fallback = str(placeholder or '').strip() or 'no-image.jpg'
+    if fallback.startswith('/'):
+        fallback = fallback.lstrip('/')
+    try:
+        return url_for('static', filename=fallback)
+    except RuntimeError:
+        # ``url_for`` requires an application context. When unavailable fall back
+        # to the conventional static path.
+        return f"/static/{fallback}"
+
+
 def find_cover(row: pd.Series) -> str | None:
     igdb_id = extract_igdb_id(row, allow_generic_id=True)
     prefill = get_igdb_prefill_for_id(igdb_id)
@@ -3243,9 +3283,9 @@ def fetch_cached_updates(
             marker_id = int(marker.get('processed_game_id') or 0)
             marker_rank = _entry_type_rank(str(marker.get('entry_type', 'm')))
             where_clause = (
-                'WHERE sort_numeric < ? '
-                'OR (sort_numeric = ? AND processed_game_id < ?) '
-                'OR (sort_numeric = ? AND processed_game_id = ? AND entry_rank > ?)'
+                'WHERE l.sort_numeric < ? '
+                'OR (l.sort_numeric = ? AND l.processed_game_id < ?) '
+                'OR (l.sort_numeric = ? AND l.processed_game_id = ? AND l.entry_rank > ?)'
             )
             params.extend(
                 [
@@ -3258,13 +3298,23 @@ def fetch_cached_updates(
                 ]
             )
 
+        processed_columns = get_processed_games_columns(conn)
+        cover_url_select = (
+            'p."Large Cover Image (URL)" AS cover_source_url'
+            if 'Large Cover Image (URL)' in processed_columns
+            else 'NULL AS cover_source_url'
+        )
+
         query = (
-            f'''SELECT processed_game_id, igdb_id, igdb_updated_at, local_last_edited_at,
-                       refreshed_at, name, has_diff, cover, cover_available,
-                       update_type, detail_available, cursor_value, entry_type
-                  FROM {UPDATES_LIST_TABLE}
+            f'''SELECT l.processed_game_id, l.igdb_id, l.igdb_updated_at, l.local_last_edited_at,
+                       l.refreshed_at, l.name, l.has_diff, l.cover, l.cover_available,
+                       l.update_type, l.detail_available, l.cursor_value, l.entry_type,
+                       p."Cover Path" AS cover_path,
+                       {cover_url_select}
+                  FROM {UPDATES_LIST_TABLE} AS l
+                  LEFT JOIN processed_games AS p ON p."ID" = l.processed_game_id
                   {where_clause}
-                 ORDER BY sort_numeric DESC, processed_game_id DESC, entry_rank ASC
+                 ORDER BY l.sort_numeric DESC, l.processed_game_id DESC, l.entry_rank ASC
                  LIMIT ?'''
         )
         rows = conn.execute(query, (*params, fetch_limit)).fetchall()
@@ -3272,6 +3322,10 @@ def fetch_cached_updates(
     entries: list[dict[str, Any]] = []
     for row in rows:
         row_map = dict(row)
+        resolved_cover_url = resolve_cover(
+            cover_path=row_map.get('cover_path'),
+            cover_url=row_map.get('cover_source_url'),
+        )
         entry = {
             'processed_game_id': row_map.get('processed_game_id'),
             'igdb_id': row_map.get('igdb_id'),
@@ -3282,6 +3336,9 @@ def fetch_cached_updates(
             'has_diff': bool(row_map.get('has_diff')),
             'cover': row_map.get('cover'),
             'cover_available': bool(row_map.get('cover_available')),
+            'cover_path': row_map.get('cover_path'),
+            'cover_source_url': row_map.get('cover_source_url'),
+            'cover_url': resolved_cover_url,
             'update_type': row_map.get('update_type') or 'mismatch',
             'detail_available': bool(row_map.get('detail_available')),
             'cursor_value': row_map.get('cursor_value') or '',
@@ -3939,6 +3996,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         'fetch_cached_updates': fetch_cached_updates,
         'get_processed_games_columns': get_processed_games_columns,
         'load_cover_data': load_cover_data,
+        'resolve_cover': resolve_cover,
         'get_igdb_timeout_count': get_igdb_timeout_count,
         'LOOKUP_RELATIONS': LOOKUP_RELATIONS,
         '_scan_duplicate_candidates': _scan_duplicate_candidates,

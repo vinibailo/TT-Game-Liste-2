@@ -391,6 +391,7 @@ def test_refresh_creates_update_records(tmp_path):
     assert entry['detail_available'] is True
     assert entry['cover'] is None
     assert entry['cover_available'] is False
+    assert entry['cover_url'] == '/static/no-image.jpg'
 
 
 def test_updates_list_includes_duplicates(tmp_path):
@@ -445,6 +446,46 @@ def test_updates_list_includes_duplicates(tmp_path):
     assert duplicate_entry['has_diff'] is False
     assert duplicate_entry['cover'] is None
     assert duplicate_entry['cover_available'] is False
+    assert duplicate_entry['cover_url'] == '/static/no-image.jpg'
+
+
+def test_updates_list_returns_processed_cover_url(tmp_path):
+    app_module = load_app(tmp_path)
+    clear_processed_tables(app_module)
+
+    cover_path = tmp_path / 'cover.png'
+    Image.new('RGB', (4, 4), color='blue').save(cover_path, format='PNG')
+
+    insert_processed_game(
+        app_module,
+        ID=1,
+        **{
+            'Source Index': '0',
+            'Name': 'Cover Game',
+            'igdb_id': '10',
+            'Summary': 'Done',
+            'Cover Path': str(cover_path),
+        },
+    )
+
+    _insert_igdb_update(
+        app_module,
+        1,
+        '2024-05-01T00:00:00+00:00',
+        has_diff=1,
+    )
+
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    rebuild_updates_cache(app_module)
+    listing = client.get('/api/updates')
+    assert listing.status_code == 200
+    payload = listing.get_json()
+    assert payload['items']
+    entry = payload['items'][0]
+    assert entry['cover_available'] is True
+    assert entry['cover_url'].startswith('data:image/jpeg;base64,')
 
 
 def test_updates_list_respects_cursor_pagination(tmp_path):
@@ -921,6 +962,7 @@ def test_updates_detail_returns_diff(tmp_path):
     assert payload['processed_game_id'] == 1
     assert payload['igdb_id'] == '100'
     assert payload['cover_available'] is False
+    assert payload['cover_url'] == '/static/no-image.jpg'
 
 
 def test_updates_cover_endpoint_returns_image(tmp_path):
