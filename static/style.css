@@ -71,12 +71,16 @@ body.modal-open {
 }
 
 .topbar-brand {
-  font-weight: 600;
-  font-size: 1.1rem;
+  display: inline-flex;
+  align-items: center;
   color: var(--color-text);
   text-decoration: none;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+}
+
+.topbar-brand img {
+  height: 28px;
+  width: auto;
+  display: block;
 }
 
 .topbar-nav {
