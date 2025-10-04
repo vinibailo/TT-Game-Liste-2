@@ -183,7 +183,7 @@ def _configure_logging(flask_app: Flask) -> None:
 _db_engine: db_utils.DatabaseEngine | None = None
 
 
-def _db_handle_factory() -> db_utils.DatabaseHandle:
+def _db_engine_factory() -> db_utils.DatabaseEngine:
     global _db_engine
 
     if _db_engine is None:
@@ -198,7 +198,11 @@ def _db_handle_factory() -> db_utils.DatabaseHandle:
         except ValueError as exc:  # pragma: no cover - defensive guard for new configs
             raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
 
-    return db_utils.DatabaseHandle(_db_engine)
+    return _db_engine
+
+
+def _db_handle_factory() -> db_utils.DatabaseHandle:
+    return db_utils.DatabaseHandle(_db_engine_factory())
 
 LOOKUP_DATA_DIR = get_lookup_data_dir()
 
@@ -537,38 +541,38 @@ job_manager = jobs_manager.get_job_manager()
 
 
 def get_db() -> db_utils.DatabaseHandle:
-    return db_utils.get_db(_db_handle_factory)
+    return db_utils.get_db(_db_engine_factory)
 
 
 def get_db_handle() -> db_utils.DatabaseHandle:
     """Return the active :class:`db_utils.DatabaseHandle`."""
 
-    return db_utils.get_db(_db_handle_factory)
+    return db_utils.get_db(_db_engine_factory)
 
 
 def get_db_connection():
     """Yield a DBAPI connection from the configured database handle."""
 
-    return db_utils.get_db_connection(_db_handle_factory)
+    return db_utils.get_db_connection(_db_engine_factory)
 
 
 def get_db_sa_connection():
     """Yield a SQLAlchemy :class:`~sqlalchemy.engine.Connection`."""
 
-    return db_utils.get_db_sa_connection(_db_handle_factory)
+    return db_utils.get_db_sa_connection(_db_engine_factory)
 
 
 def get_db_session():
     """Yield a SQLAlchemy :class:`~sqlalchemy.orm.Session`."""
 
-    return db_utils.get_db_session(_db_handle_factory)
+    return db_utils.get_db_session(_db_engine_factory)
 
 
 def get_processed_games_columns(
     conn: sqlite3.Connection | db_utils.DatabaseHandle | None = None,
 ) -> set[str]:
     return db_utils.get_processed_games_columns(
-        conn, connection_factory=_db_handle_factory
+        conn, connection_factory=_db_engine_factory
     )
 
 
@@ -2866,14 +2870,16 @@ def generate_pt_summary(game_name: str) -> str:
 
 
 # initial load
-db = initialize_app(
+db_engine = initialize_app(
     ensure_dirs=ensure_dirs,
     init_db=_init_db,
     load_games=load_games,
     set_games_dataframe=_set_games_dataframe,
-    connection_factory=_db_handle_factory,
+    connection_factory=_db_engine_factory,
     run_migrations=RUN_DB_MIGRATIONS,
 )
+
+db = db_utils.DatabaseHandle(db_engine)
 
 def build_game_payload(index: int, seq: int, progress_seq: int | None = None) -> dict:
     games_df = catalog_state.games_df
