@@ -39,15 +39,15 @@ from config import (
     APP_PASSWORD,
     APP_SECRET_KEY,
     COVERS_DIR,
+    DB_CONNECT_TIMEOUT_SECONDS,
+    DB_DSN,
     IGDB_BATCH_SIZE,
     IGDB_USER_AGENT,
     INPUT_XLSX,
     OPENAI_API_KEY,
     OPENAI_SUMMARY_ENABLED,
-    PROCESSED_DB,
     PROCESSED_DIR,
     RUN_DB_MIGRATIONS,
-    SQLITE_TIMEOUT_SECONDS,
     UPLOAD_DIR,
     get_lookup_data_dir,
     LOG_FILE,
@@ -182,9 +182,12 @@ def _configure_logging(flask_app: Flask) -> None:
     logger.setLevel(log_level)
 
 def _db_connection_factory() -> sqlite3.Connection:
-    return db_utils._create_sqlite_connection(
-        PROCESSED_DB, timeout=SQLITE_TIMEOUT_SECONDS
-    )
+    try:
+        return db_utils.create_connection_from_dsn(
+            DB_DSN, timeout=DB_CONNECT_TIMEOUT_SECONDS
+        )
+    except ValueError as exc:  # pragma: no cover - defensive guard for new configs
+        raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
 
 LOOKUP_DATA_DIR = get_lookup_data_dir()
 

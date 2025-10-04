@@ -1,12 +1,15 @@
-"""Shared helpers for working with the processed-games SQLite database."""
+"""Shared helpers for working with the processed-games database."""
 
 from __future__ import annotations
 
+import os
 import sqlite3
+from pathlib import Path
 from threading import Lock
 from typing import Callable
 
 from flask import g, has_app_context
+from urllib.parse import urlparse, unquote
 
 db_lock = Lock()
 """Module-level lock to guard write access to the processed-games database."""
@@ -74,6 +77,46 @@ def _create_sqlite_connection(
     conn = sqlite3.connect(db_path, timeout=effective_timeout)
     conn.row_factory = sqlite3.Row
     return _configure_sqlite_connection(conn, busy_timeout=effective_timeout)
+
+
+def _resolve_sqlite_path_from_dsn(dsn: str) -> str:
+    """Extract a filesystem path from a ``sqlite:///`` DSN string."""
+
+    parsed = urlparse(dsn)
+    if parsed.scheme != "sqlite":
+        raise ValueError(f"Unsupported DSN scheme for SQLite resolver: {parsed.scheme}")
+
+    path = unquote(parsed.path or "")
+    if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+        # Support UNC-like hosts by prefixing them to the path component.
+        path = f"//{parsed.netloc}{path}"
+
+    if not path:
+        raise ValueError("SQLite DSN must include a filesystem path")
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = candidate.resolve()
+    return os.fspath(candidate)
+
+
+def create_connection_from_dsn(
+    dsn: str,
+    *,
+    timeout: float | None = None,
+) -> sqlite3.Connection:
+    """Create a database connection using a DSN string.
+
+    Currently only ``sqlite:///`` DSNs are supported. MariaDB support will be
+    introduced in a future iteration once the application migrates drivers.
+    """
+
+    parsed = urlparse(dsn)
+    if parsed.scheme == "sqlite":
+        sqlite_path = _resolve_sqlite_path_from_dsn(dsn)
+        return _create_sqlite_connection(sqlite_path, timeout=timeout)
+
+    raise ValueError(f"Unsupported DSN scheme: {parsed.scheme}")
 
 
 def get_db(

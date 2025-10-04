@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote_plus
 
 BASE_DIR: Final[Path] = Path(__file__).resolve().parent
 
@@ -80,9 +81,6 @@ def _coerce_truthy_env(value: str | None) -> bool:
 INPUT_XLSX_PATH: Final[Path] = _path_from(
     os.environ.get("INPUT_XLSX"), "igdb_all_games.xlsx"
 )
-PROCESSED_DB_PATH: Final[Path] = _path_from(
-    os.environ.get("PROCESSED_DB"), "processed_games.db"
-)
 UPLOAD_DIR_PATH: Final[Path] = _path_from(
     os.environ.get("UPLOAD_DIR"), "uploaded_sources"
 )
@@ -99,10 +97,49 @@ LOG_FILE_PATH: Final[Path] = _path_from(
 LOG_FILE: Final[str] = os.fspath(LOG_FILE_PATH)
 
 INPUT_XLSX: Final[str] = os.fspath(INPUT_XLSX_PATH)
-PROCESSED_DB: Final[str] = os.fspath(PROCESSED_DB_PATH)
 UPLOAD_DIR: Final[str] = os.fspath(UPLOAD_DIR_PATH)
 PROCESSED_DIR: Final[str] = os.fspath(PROCESSED_DIR_PATH)
 COVERS_DIR: Final[str] = os.fspath(COVERS_DIR_PATH)
+
+DB_HOST: Final[str] = _clean_text(os.environ.get("DB_HOST")) or "localhost"
+DB_PORT: Final[int] = _coerce_positive_int(os.environ.get("DB_PORT"), 3306)
+DB_NAME: Final[str] = _clean_text(os.environ.get("DB_NAME")) or "tt_game_liste"
+DB_USER: Final[str] = _clean_text(os.environ.get("DB_USER"))
+DB_PASSWORD: Final[str] = _clean_text(os.environ.get("DB_PASSWORD"))
+DB_SSL_CA_PATH: Final[Path | None] = (
+    _path_from(os.environ.get("DB_SSL_CA"), "") if os.environ.get("DB_SSL_CA") else None
+)
+DB_SSL_CA: Final[str] = os.fspath(DB_SSL_CA_PATH) if DB_SSL_CA_PATH is not None else ""
+
+
+def _build_db_dsn() -> str:
+    """Return a database DSN constructed from environment configuration."""
+
+    maria_overrides = {
+        key: _clean_text(os.environ.get(key))
+        for key in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+    }
+    if any(value for value in maria_overrides.values()):
+        auth = ""
+        if DB_USER:
+            password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
+            auth = DB_USER
+            if password:
+                auth = f"{auth}:{password}"
+            auth = f"{auth}@"
+
+        query_params = []
+        if DB_SSL_CA:
+            query_params.append(f"ssl_ca={quote_plus(DB_SSL_CA)}")
+
+        query_string = f"?{'&'.join(query_params)}" if query_params else ""
+        return f"mariadb://{auth}{DB_HOST}:{DB_PORT}/{DB_NAME}{query_string}"
+
+    sqlite_path = _path_from(None, BASE_DIR / "processed_games.db").resolve()
+    return f"sqlite:///{sqlite_path.as_posix()}"
+
+
+DB_DSN: Final[str] = _build_db_dsn()
 
 DEFAULT_IGDB_USER_AGENT: Final[str] = "TT-Game-Liste/1.0 (support@example.com)"
 IGDB_USER_AGENT: Final[str] = (
@@ -113,8 +150,11 @@ IGDB_CLIENT_ID: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_ID"))
 IGDB_CLIENT_SECRET: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_SECRET"))
 IGDB_ENABLED: bool = True
 
-SQLITE_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
-    os.environ.get("SQLITE_TIMEOUT"), 120.0
+DB_CONNECT_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
+    os.environ.get("DB_CONNECT_TIMEOUT"), 10.0
+)
+DB_READ_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
+    os.environ.get("DB_READ_TIMEOUT"), 30.0
 )
 RUN_DB_MIGRATIONS: Final[bool] = _coerce_truthy_env(
     os.environ.get("RUN_DB_MIGRATIONS")
@@ -200,12 +240,19 @@ __all__ = [
     "LOG_FILE_PATH",
     "OPENAI_API_KEY",
     "OPENAI_SUMMARY_ENABLED",
-    "PROCESSED_DB",
-    "PROCESSED_DB_PATH",
+    "DB_CONNECT_TIMEOUT_SECONDS",
+    "DB_DSN",
+    "DB_HOST",
+    "DB_NAME",
+    "DB_PASSWORD",
+    "DB_PORT",
+    "DB_READ_TIMEOUT_SECONDS",
+    "DB_SSL_CA",
+    "DB_SSL_CA_PATH",
+    "DB_USER",
     "PROCESSED_DIR",
     "PROCESSED_DIR_PATH",
     "RUN_DB_MIGRATIONS",
-    "SQLITE_TIMEOUT_SECONDS",
     "UPLOAD_DIR",
     "UPLOAD_DIR_PATH",
     "validate_igdb_credentials",
