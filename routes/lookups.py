@@ -108,10 +108,11 @@ def api_lookup_options(lookup_type: str):
                     offset = 0
 
         with db_lock:
-            conn = get_db()
-            items, total = list_lookup_entries(
-                conn, table_name, limit=limit, offset=offset
-            )
+            handle = get_db()
+            with handle.sa_connection() as conn:
+                items, total = list_lookup_entries(
+                    conn, table_name, limit=limit, offset=offset
+                )
 
         has_more = offset + len(items) < total
         payload: dict[str, Any] = {
@@ -137,10 +138,13 @@ def api_lookup_options(lookup_type: str):
         created_item: dict[str, Any] | None
         status: str
         with db_lock:
-            conn = get_db()
-            status, created_item = create_lookup_entry(conn, table_name, raw_name)
-            if status == 'created':
-                conn.commit()
+            handle = get_db()
+            with handle.sa_connection() as conn:
+                status, created_item = create_lookup_entry(
+                    conn, table_name, raw_name
+                )
+                if status == 'created':
+                    conn.commit()
         if created_item is None or status == 'invalid':
             raise BadRequestError('invalid name')
         status_code = 201 if status == 'created' else 200
@@ -158,31 +162,36 @@ def api_lookup_options(lookup_type: str):
         error_status: str | None = None
         updated_item: dict[str, Any] | None = None
         with db_lock:
-            conn = get_db()
-            status, updated_item = update_lookup_entry(conn, table_name, lookup_id, new_name)
-            if status == 'invalid':
-                error_status = 'invalid'
-            elif status == 'not_found':
-                error_status = 'not_found'
-            elif status == 'conflict':
-                error_status = 'conflict'
-            elif updated_item is None:
-                error_status = 'invalid'
-            else:
-                affected_game_ids = (
-                    related_processed_game_ids(conn, relation, lookup_id)
-                    if relation
-                    else []
+            handle = get_db()
+            with handle.sa_connection() as conn:
+                status, updated_item = update_lookup_entry(
+                    conn, table_name, lookup_id, new_name
                 )
-                for game_id in affected_game_ids:
-                    entries_map = {
-                        key: list(value)
-                        for key, value in fetch_lookup_entries_for_game(conn, game_id).items()
-                    }
-                    selections = lookup_entries_to_selection(entries_map)
-                    persist_lookup_relations(conn, game_id, selections)
-                    apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
-                conn.commit()
+                if status == 'invalid':
+                    error_status = 'invalid'
+                elif status == 'not_found':
+                    error_status = 'not_found'
+                elif status == 'conflict':
+                    error_status = 'conflict'
+                elif updated_item is None:
+                    error_status = 'invalid'
+                else:
+                    affected_game_ids = (
+                        related_processed_game_ids(conn, relation, lookup_id)
+                        if relation
+                        else []
+                    )
+                    for game_id in affected_game_ids:
+                        entries_map = {
+                            key: list(value)
+                            for key, value in fetch_lookup_entries_for_game(conn, game_id).items()
+                        }
+                        selections = lookup_entries_to_selection(entries_map)
+                        persist_lookup_relations(conn, game_id, selections)
+                        apply_lookup_entries_to_processed_game(
+                            conn, game_id, entries_map
+                        )
+                    conn.commit()
         if error_status == 'invalid':
             raise BadRequestError('invalid name')
         if error_status == 'not_found':
@@ -194,23 +203,28 @@ def api_lookup_options(lookup_type: str):
     if request.method == 'DELETE':
         deleted_successfully = False
         with db_lock:
-            conn = get_db()
-            if relation:
-                entries_by_game: dict[int, dict[str, list[dict[str, Any]]]] = {}
-                for game_id in related_processed_game_ids(conn, relation, lookup_id):
-                    entries_map = {
-                        key: list(value)
-                        for key, value in fetch_lookup_entries_for_game(conn, game_id).items()
-                    }
-                    remove_lookup_id_from_entries(entries_map, relation, lookup_id)
-                    entries_by_game[game_id] = entries_map
-                for game_id, entries_map in entries_by_game.items():
-                    selections = lookup_entries_to_selection(entries_map)
-                    persist_lookup_relations(conn, game_id, selections)
-                    apply_lookup_entries_to_processed_game(conn, game_id, entries_map)
-            deleted_successfully = delete_lookup_entry(conn, table_name, lookup_id)
-            if deleted_successfully:
-                conn.commit()
+            handle = get_db()
+            with handle.sa_connection() as conn:
+                if relation:
+                    entries_by_game: dict[int, dict[str, list[dict[str, Any]]]] = {}
+                    for game_id in related_processed_game_ids(conn, relation, lookup_id):
+                        entries_map = {
+                            key: list(value)
+                            for key, value in fetch_lookup_entries_for_game(
+                                conn, game_id
+                            ).items()
+                        }
+                        remove_lookup_id_from_entries(entries_map, relation, lookup_id)
+                        entries_by_game[game_id] = entries_map
+                    for game_id, entries_map in entries_by_game.items():
+                        selections = lookup_entries_to_selection(entries_map)
+                        persist_lookup_relations(conn, game_id, selections)
+                        apply_lookup_entries_to_processed_game(
+                            conn, game_id, entries_map
+                        )
+                deleted_successfully = delete_lookup_entry(conn, table_name, lookup_id)
+                if deleted_successfully:
+                    conn.commit()
         if not deleted_successfully:
             raise NotFoundError('lookup not found')
         return jsonify({'status': 'deleted', 'type': table_name, 'id': lookup_id})

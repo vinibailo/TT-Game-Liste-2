@@ -6,6 +6,7 @@ import numbers
 import re
 import time
 import math
+import sqlite3
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+from sqlalchemy.engine import Connection
 
 # Placeholder imports to establish the upcoming modular structure.
 import config as app_config
@@ -400,14 +402,30 @@ _coerce_int = processed_duplicates.coerce_int
 _RELATION_COUNT_COLUMNS = tuple(f"{relation['join_table']}_count" for relation in LOOKUP_RELATIONS)
 
 
-_fetch_lookup_entries_for_game = partial(
-    lookups_service.fetch_lookup_entries_for_game,
-    relations=LOOKUP_RELATIONS,
-    normalize_lookup_name=_normalize_lookup_name,
-    decode_lookup_id_list=_decode_lookup_id_list,
-    parse_iterable=_parse_iterable,
-    row_value=_row_value,
-)
+
+def _fetch_lookup_entries_for_game(
+    conn: Connection | db_utils.DatabaseHandle, processed_game_id: int
+) -> dict[str, list[dict[str, Any]]]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            return lookups_service.fetch_lookup_entries_for_game(
+                sa_conn,
+                processed_game_id,
+                relations=LOOKUP_RELATIONS,
+                normalize_lookup_name=_normalize_lookup_name,
+                decode_lookup_id_list=_decode_lookup_id_list,
+                parse_iterable=_parse_iterable,
+                row_value=_row_value,
+            )
+    return lookups_service.fetch_lookup_entries_for_game(
+        conn,
+        processed_game_id,
+        relations=LOOKUP_RELATIONS,
+        normalize_lookup_name=_normalize_lookup_name,
+        decode_lookup_id_list=_decode_lookup_id_list,
+        parse_iterable=_parse_iterable,
+        row_value=_row_value,
+    )
 
 _iter_lookup_payload = partial(
     lookups_service.iter_lookup_payload,
@@ -419,31 +437,91 @@ _format_lookup_response = partial(
     normalize_lookup_name=_normalize_lookup_name,
 )
 
-_resolve_lookup_selection = partial(
-    lookups_service.resolve_lookup_selection,
-    normalize_lookup_name=_normalize_lookup_name,
-)
 
-_load_lookup_tables = partial(
-    lookups_service.load_lookup_tables,
-    tables=LOOKUP_TABLES,
-    data_dir=LOOKUP_DATA_DIR,
-    normalize_lookup_name=_normalize_lookup_name,
-    log=logger,
-)
+def _resolve_lookup_selection(
+    conn: Connection | db_utils.DatabaseHandle,
+    relation: Mapping[str, Any],
+    raw_value: Any,
+) -> dict[str, Any]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            return lookups_service.resolve_lookup_selection(
+                sa_conn,
+                relation,
+                raw_value,
+                normalize_lookup_name=_normalize_lookup_name,
+            )
+    return lookups_service.resolve_lookup_selection(
+        conn,
+        relation,
+        raw_value,
+        normalize_lookup_name=_normalize_lookup_name,
+    )
 
-_ensure_lookup_id_columns = partial(
-    lookups_service.ensure_lookup_id_columns,
-    relations=LOOKUP_RELATIONS,
-    encode_lookup_id_list=_encode_lookup_id_list,
-    decode_lookup_id_list=_decode_lookup_id_list,
-    row_value=_row_value,
-)
 
-_get_or_create_lookup_id = partial(
-    lookups_service.get_or_create_lookup_id,
-    normalize_lookup_name=_normalize_lookup_name,
-)
+def _load_lookup_tables(conn: Connection | db_utils.DatabaseHandle) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            lookups_service.load_lookup_tables(
+                sa_conn,
+                tables=LOOKUP_TABLES,
+                data_dir=LOOKUP_DATA_DIR,
+                normalize_lookup_name=_normalize_lookup_name,
+                log=logger,
+            )
+            sa_conn.commit()
+        return
+
+    lookups_service.load_lookup_tables(
+        conn,
+        tables=LOOKUP_TABLES,
+        data_dir=LOOKUP_DATA_DIR,
+        normalize_lookup_name=_normalize_lookup_name,
+        log=logger,
+    )
+
+
+def _ensure_lookup_id_columns(conn: Connection | db_utils.DatabaseHandle) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            lookups_service.ensure_lookup_id_columns(
+                sa_conn,
+                relations=LOOKUP_RELATIONS,
+                encode_lookup_id_list=_encode_lookup_id_list,
+                decode_lookup_id_list=_decode_lookup_id_list,
+                row_value=_row_value,
+            )
+            sa_conn.commit()
+        return
+
+    lookups_service.ensure_lookup_id_columns(
+        conn,
+        relations=LOOKUP_RELATIONS,
+        encode_lookup_id_list=_encode_lookup_id_list,
+        decode_lookup_id_list=_decode_lookup_id_list,
+        row_value=_row_value,
+    )
+
+
+def _get_or_create_lookup_id(
+    conn: Connection | db_utils.DatabaseHandle, table_name: str, raw_name: str
+) -> int | None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            result = lookups_service.get_or_create_lookup_id(
+                sa_conn,
+                table_name,
+                raw_name,
+                normalize_lookup_name=_normalize_lookup_name,
+            )
+            sa_conn.commit()
+            return result
+    return lookups_service.get_or_create_lookup_id(
+        conn,
+        table_name,
+        raw_name,
+        normalize_lookup_name=_normalize_lookup_name,
+    )
 
 LOOKUP_TABLES_BY_NAME = {
     table_config['table']: table_config for table_config in LOOKUP_TABLES
@@ -682,14 +760,23 @@ def _lookup_display_text(names: list[str]) -> str:
 
 
 def _lookup_name_for_id(
-    conn: sqlite3.Connection, table_name: str, lookup_id: int
+    conn: Connection | db_utils.DatabaseHandle, table_name: str, lookup_id: int
 ) -> str:
-    name = lookups_service.lookup_name_for_id(
-        conn,
-        table_name,
-        lookup_id,
-        normalize_lookup_name=_normalize_lookup_name,
-    )
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            name = lookups_service.lookup_name_for_id(
+                sa_conn,
+                table_name,
+                lookup_id,
+                normalize_lookup_name=_normalize_lookup_name,
+            )
+    else:
+        name = lookups_service.lookup_name_for_id(
+            conn,
+            table_name,
+            lookup_id,
+            normalize_lookup_name=_normalize_lookup_name,
+        )
     return name or ''
 
 
@@ -753,10 +840,21 @@ def _ensure_lookup_join_tables(conn: sqlite3.Connection) -> None:
 
 
 def _persist_lookup_relations(
-    conn: sqlite3.Connection,
+    conn: Connection | db_utils.DatabaseHandle,
     processed_game_id: int,
     selections: Mapping[str, Mapping[str, Any]] | Mapping[str, Any],
 ) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            lookups_service.persist_relations(
+                sa_conn,
+                processed_game_id,
+                selections,
+                LOOKUP_RELATIONS,
+            )
+            sa_conn.commit()
+        return
+
     lookups_service.persist_relations(
         conn,
         processed_game_id,
@@ -772,10 +870,24 @@ def _lookup_entries_to_selection(
 
 
 def _apply_lookup_entries_to_processed_game(
-    conn: sqlite3.Connection,
+    conn: Connection | db_utils.DatabaseHandle,
     processed_game_id: int,
     entries: Mapping[str, list[dict[str, Any]]],
 ) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            lookups_service.apply_relations_to_game(
+                sa_conn,
+                processed_game_id,
+                entries,
+                LOOKUP_RELATIONS,
+                normalize_lookup_name=_normalize_lookup_name,
+                encode_lookup_id_list=_encode_lookup_id_list,
+                lookup_display_text=_lookup_display_text,
+            )
+            sa_conn.commit()
+        return
+
     lookups_service.apply_relations_to_game(
         conn,
         processed_game_id,
@@ -784,7 +896,6 @@ def _apply_lookup_entries_to_processed_game(
         normalize_lookup_name=_normalize_lookup_name,
         encode_lookup_id_list=_encode_lookup_id_list,
         lookup_display_text=_lookup_display_text,
-        columns=get_processed_games_columns(conn),
     )
 
 
@@ -797,12 +908,21 @@ def _remove_lookup_id_from_entries(
 
 
 def _list_lookup_entries(
-    conn: sqlite3.Connection,
+    conn: Connection | db_utils.DatabaseHandle,
     table_name: str,
     *,
     limit: int,
     offset: int,
 ) -> tuple[list[dict[str, Any]], int]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            return lookups_service.list_lookup_entries(
+                sa_conn,
+                table_name,
+                normalize_lookup_name=_normalize_lookup_name,
+                limit=limit,
+                offset=offset,
+            )
     return lookups_service.list_lookup_entries(
         conn,
         table_name,
@@ -813,16 +933,34 @@ def _list_lookup_entries(
 
 
 def _create_lookup_entry(
-    conn: sqlite3.Connection, table_name: str, name: str
+    conn: Connection | db_utils.DatabaseHandle, table_name: str, name: str
 ) -> tuple[str, dict[str, Any] | None]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            result = lookups_service.create_lookup_entry(
+                sa_conn, table_name, name, normalize_lookup_name=_normalize_lookup_name
+            )
+            sa_conn.commit()
+            return result
     return lookups_service.create_lookup_entry(
         conn, table_name, name, normalize_lookup_name=_normalize_lookup_name
     )
 
 
 def _update_lookup_entry(
-    conn: sqlite3.Connection, table_name: str, lookup_id: int, name: str
+    conn: Connection | db_utils.DatabaseHandle, table_name: str, lookup_id: int, name: str
 ) -> tuple[str, dict[str, Any] | None]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            result = lookups_service.update_lookup_entry(
+                sa_conn,
+                table_name,
+                lookup_id,
+                name,
+                normalize_lookup_name=_normalize_lookup_name,
+            )
+            sa_conn.commit()
+            return result
     return lookups_service.update_lookup_entry(
         conn,
         table_name,
@@ -833,18 +971,42 @@ def _update_lookup_entry(
 
 
 def _delete_lookup_entry(
-    conn: sqlite3.Connection, table_name: str, lookup_id: int
+    conn: Connection | db_utils.DatabaseHandle, table_name: str, lookup_id: int
 ) -> bool:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            result = lookups_service.delete_lookup_entry(sa_conn, table_name, lookup_id)
+            sa_conn.commit()
+            return result
     return lookups_service.delete_lookup_entry(conn, table_name, lookup_id)
 
 
 def _related_processed_game_ids(
-    conn: sqlite3.Connection, relation: Mapping[str, Any], lookup_id: int
+    conn: Connection | db_utils.DatabaseHandle, relation: Mapping[str, Any], lookup_id: int
 ) -> list[int]:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            return lookups_service.get_related_processed_game_ids(
+                sa_conn, relation, lookup_id
+            )
     return lookups_service.get_related_processed_game_ids(conn, relation, lookup_id)
 
 
-def _backfill_lookup_relations(conn: sqlite3.Connection) -> None:
+def _backfill_lookup_relations(conn: Connection | db_utils.DatabaseHandle) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            lookups_service.backfill_relations(
+                sa_conn,
+                LOOKUP_RELATIONS,
+                normalize_lookup_name=_normalize_lookup_name,
+                parse_iterable=_parse_iterable,
+                get_or_create_lookup_id=_get_or_create_lookup_id,
+                decode_lookup_id_list=_decode_lookup_id_list,
+                row_value=_row_value,
+            )
+            sa_conn.commit()
+        return
+
     lookups_service.backfill_relations(
         conn,
         LOOKUP_RELATIONS,
@@ -1857,8 +2019,8 @@ def ensure_dirs() -> None:
 def normalize_processed_games() -> None:
     """Resequence IDs based on the order of ``Source Index``."""
     with db_lock:
-        conn = get_db()
-        with conn:
+        handle = get_db()
+        with handle as conn:
             cur = conn.execute(
                 'SELECT "ID", "Source Index" FROM processed_games '
                 'ORDER BY CAST("Source Index" AS INTEGER)'
@@ -1891,8 +2053,8 @@ def seed_processed_games_from_source() -> None:
         return processed_navigator.GameNavigator.canonical_source_index(value)
 
     with db_lock:
-        conn = get_db()
-        with conn:
+        handle = get_db()
+        with handle as conn:
             processed_columns = get_processed_games_columns(conn)
             has_cache_rank = 'cache_rank' in processed_columns
 
@@ -1913,7 +2075,7 @@ def seed_processed_games_from_source() -> None:
                 next_cache_rank = 0
 
             try:
-                _load_lookup_tables(conn)
+                _load_lookup_tables(handle)
             except Exception:
                 pass
 

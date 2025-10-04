@@ -93,7 +93,7 @@ def load_app(tmp_path: Path) -> object:
         and hasattr(module, "_load_lookup_tables")
         and hasattr(module, "db")
     ):
-        with module.db_lock, module.db.connection() as conn:
+        with module.db_lock, module.db.sa_connection() as conn:
             module._load_lookup_tables(conn)
 
     if (
@@ -109,7 +109,7 @@ def load_app(tmp_path: Path) -> object:
         and hasattr(module, "_backfill_lookup_relations")
         and hasattr(module, "db")
     ):
-        with module.db_lock, module.db.connection() as conn:
+        with module.db_lock, module.db.sa_connection() as conn:
             module._backfill_lookup_relations(conn)
 
     if (
@@ -117,7 +117,7 @@ def load_app(tmp_path: Path) -> object:
         and hasattr(module, "_ensure_lookup_id_columns")
         and hasattr(module, "db")
     ):
-        with module.db_lock, module.db.connection() as conn:
+        with module.db_lock, module.db.sa_connection() as conn:
             module._ensure_lookup_id_columns(conn)
 
     return module
