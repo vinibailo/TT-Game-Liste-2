@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Iterator
+from collections.abc import Mapping
+from typing import Any, Callable, Iterator, Sequence
+
+try:  # pragma: no cover - optional dependency
+    import sqlite3
+except ImportError:  # pragma: no cover - environments without sqlite bindings
+    sqlite3 = None  # type: ignore[assignment]
 
 from flask import g, has_app_context
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.orm import Session, sessionmaker
@@ -18,6 +23,93 @@ from urllib.parse import unquote, urlparse
 
 db_lock = Lock()
 """Module-level lock to guard write access to the processed-games database."""
+
+
+class _DBRow(Mapping[str, Any]):
+    """Lightweight row wrapper supporting mapping-style access."""
+
+    __slots__ = ("_columns", "_values", "_mapping")
+
+    def __init__(self, columns: Sequence[str], values: Sequence[Any]):
+        self._columns = list(columns)
+        self._values = list(values)
+        self._mapping = dict(zip(self._columns, self._values))
+
+    def __getitem__(self, key: int | str) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._mapping[key]
+
+    def get(self, key: str, default: Any | None = None) -> Any | None:
+        return self._mapping.get(key, default)
+
+    def keys(self) -> Sequence[str]:  # pragma: no cover - helper for debugging
+        return list(self._columns)
+
+    def values(self) -> Sequence[Any]:  # pragma: no cover - helper for debugging
+        return list(self._values)
+
+    def items(self):  # pragma: no cover - helper for debugging
+        return self._mapping.items()
+
+    def __contains__(self, item: object) -> bool:  # pragma: no cover - rarely used
+        return item in self._mapping
+
+    def __iter__(self):
+        return iter(self._columns)
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._columns)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging helper
+        return f"_DBRow({self._mapping!r})"
+
+
+class _CursorWrapper:
+    """Thin wrapper normalizing DB-API cursor behaviour."""
+
+    def __init__(self, cursor: Any):
+        self._cursor = cursor
+        description = cursor.description or []
+        self._columns = [col[0] for col in description]
+
+    def _wrap_row(self, values: Sequence[Any]) -> _DBRow:
+        return _DBRow(self._columns, values)
+
+    def fetchone(self) -> _DBRow | None:
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        return self._wrap_row(row)
+
+    def fetchmany(self, size: int | None = None) -> list[_DBRow]:
+        rows = self._cursor.fetchmany(size) if size is not None else self._cursor.fetchmany()
+        return [self._wrap_row(row) for row in rows]
+
+    def fetchall(self) -> list[_DBRow]:
+        rows = self._cursor.fetchall()
+        return [self._wrap_row(row) for row in rows]
+
+    def close(self) -> None:
+        try:
+            self._cursor.close()
+        except Exception:  # pragma: no cover - DBAPI edge cases
+            pass
+
+    @property
+    def rowcount(self) -> int:  # pragma: no cover - passthrough
+        return getattr(self._cursor, "rowcount", -1)
+
+    @property
+    def lastrowid(self) -> Any:  # pragma: no cover - passthrough
+        return getattr(self._cursor, "lastrowid", None)
+
+    def __iter__(self):  # pragma: no cover - rarely used
+        for row in self._cursor:
+            yield self._wrap_row(row)
+
+    def __getattr__(self, item):  # pragma: no cover - passthrough
+        return getattr(self._cursor, item)
 
 
 class DatabaseEngine:
@@ -34,7 +126,7 @@ class DatabaseEngine:
         return self._engine
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[Any]:
         """Yield a DBAPI connection configured by the engine's pool."""
 
         raw = self._engine.raw_connection()
@@ -68,13 +160,13 @@ class DatabaseHandle:
 
     def __init__(self, engine: DatabaseEngine):
         self._engine_wrapper = engine
-        self._connection: sqlite3.Connection | None = None
+        self._connection: Any | None = None
 
     @property
     def engine(self) -> Engine:
         return self._engine_wrapper.engine
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _get_connection(self) -> Any:
         if self._connection is None:
             self._connection = self._engine_wrapper.engine.raw_connection()
         return self._connection
@@ -88,7 +180,7 @@ class DatabaseHandle:
         self._engine_wrapper.dispose()
 
     @contextmanager
-    def connection(self) -> Iterator[sqlite3.Connection]:
+    def connection(self) -> Iterator[Any]:
         with self._engine_wrapper.connection() as conn:
             yield conn
 
@@ -101,6 +193,56 @@ class DatabaseHandle:
     def session(self) -> Iterator[Session]:
         with self._engine_wrapper.session() as session:
             yield session
+
+    def _normalize_sql(self, sql: str) -> str:
+        dialect = self.engine.dialect
+        paramstyle = getattr(dialect, "paramstyle", "qmark")
+        if paramstyle in {"format", "pyformat"} and "?" in sql:
+            return sql.replace("?", "%s")
+        return sql
+
+    def _wrap_cursor(self, cursor: Any) -> _CursorWrapper:
+        try:
+            description = cursor.description
+        except AttributeError:  # pragma: no cover - DBAPI without description attribute
+            return cursor
+        if description is None:
+            return cursor
+        return _CursorWrapper(cursor)
+
+    def execute(
+        self,
+        sql: str,
+        parameters: Sequence[Any] | Mapping[str, Any] | None = None,
+    ):
+        conn = self._get_connection()
+        if hasattr(conn, "execute"):
+            return conn.execute(sql, parameters or ())
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(self._normalize_sql(sql), parameters or ())
+        except Exception:
+            cursor.close()
+            raise
+        return self._wrap_cursor(cursor)
+
+    def executemany(
+        self,
+        sql: str,
+        seq_of_parameters: Sequence[Sequence[Any] | Mapping[str, Any]],
+    ):
+        conn = self._get_connection()
+        if hasattr(conn, "executemany"):
+            return conn.executemany(sql, seq_of_parameters)
+
+        cursor = conn.cursor()
+        try:
+            cursor.executemany(self._normalize_sql(sql), seq_of_parameters)
+        except Exception:
+            cursor.close()
+            raise
+        return cursor
 
     def __getattr__(self, item):
         return getattr(self._get_connection(), item)
@@ -139,12 +281,11 @@ def clear_processed_games_columns_cache() -> None:
     _processed_games_columns_cache = None
 
 
-def _configure_sqlite_connection(
-    conn: sqlite3.Connection,
-    *,
-    busy_timeout: float | None = None,
-) -> sqlite3.Connection:
-    """Apply standard pragmas and timeouts to SQLite connections."""
+def _configure_sqlite_connection(conn: Any, *, busy_timeout: float | None = None) -> Any:
+    """Apply timeout tuning to SQLite connections when available."""
+
+    if sqlite3 is None or not isinstance(conn, sqlite3.Connection):
+        return conn
 
     busy_timeout_ms = None
     if busy_timeout is not None:
@@ -165,10 +306,44 @@ def _configure_sqlite_connection(
         try:
             cursor = conn.execute(f"PRAGMA {name}={value}")
             if fetch_result:
-                # Some pragmas (journal_mode) require fetching a row to apply.
                 cursor.fetchone()
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError:  # pragma: no cover - best effort only
             continue
+
+    return conn
+
+
+def _configure_mariadb_connection(conn: Any, *, lock_timeout: float | None = None) -> Any:
+    """Apply session-level settings for MariaDB connections."""
+
+    if lock_timeout is None:
+        return conn
+
+    timeout_value = max(int(lock_timeout), 1)
+
+    try:
+        cursor = conn.cursor()
+    except AttributeError:  # pragma: no cover - DBAPI without cursor helper
+        return conn
+
+    try:
+        try:
+            cursor.execute("SET SESSION innodb_lock_wait_timeout = %s", (timeout_value,))
+        except Exception:  # pragma: no cover - unavailable variable
+            pass
+        try:
+            cursor.execute("SET SESSION lock_wait_timeout = %s", (timeout_value,))
+        except Exception:  # pragma: no cover - unavailable variable
+            pass
+        try:
+            cursor.execute("SET SESSION wait_timeout = %s", (timeout_value,))
+        except Exception:  # pragma: no cover - unavailable variable
+            pass
+    finally:
+        try:
+            cursor.close()
+        except Exception:  # pragma: no cover - DBAPI edge case
+            pass
 
     return conn
 
@@ -215,6 +390,8 @@ def build_engine_from_dsn(
     else:
         normalized_dsn = dsn
 
+    dialect_name = parsed.scheme.split("+", 1)[0]
+
     engine = create_engine(
         normalized_dsn,
         future=True,
@@ -224,12 +401,20 @@ def build_engine_from_dsn(
         connect_args=connect_args,
     )
 
-    if parsed.scheme == "sqlite":
+    if parsed.scheme == "sqlite" and sqlite3 is not None:
 
         @event.listens_for(engine, "connect")
         def _on_connect(dbapi_conn, connection_record):  # type: ignore[override]
-            dbapi_conn.row_factory = sqlite3.Row
+            try:
+                dbapi_conn.row_factory = sqlite3.Row
+            except AttributeError:  # pragma: no cover - unexpected DB-API
+                pass
             _configure_sqlite_connection(dbapi_conn, busy_timeout=effective_timeout)
+    elif dialect_name in {"mysql", "mariadb"}:
+
+        @event.listens_for(engine, "connect")
+        def _on_connect(dbapi_conn, connection_record):  # type: ignore[override]
+            _configure_mariadb_connection(dbapi_conn, lock_timeout=effective_timeout)
 
     return DatabaseEngine(engine)
 
@@ -305,7 +490,7 @@ def get_db_connection(
     *,
     context_key: str = 'db',
     use_global_fallback: bool = True,
-) -> Iterator[sqlite3.Connection]:
+) -> Iterator[Any]:
     """Yield a DBAPI connection from the active database handle."""
 
     handle = get_db(
@@ -354,7 +539,7 @@ def get_db_session(
 
 
 def get_processed_games_columns(
-    conn: sqlite3.Connection | None = None,
+    conn: Any | None = None,
     *,
     handle: DatabaseHandle | None = None,
     connection_factory: Callable[[], DatabaseHandle | DatabaseEngine] | None = None,
@@ -365,18 +550,24 @@ def get_processed_games_columns(
     if _processed_games_columns_cache is not None:
         return _processed_games_columns_cache
 
-    if conn is not None:
-        cursor = conn.execute('PRAGMA table_info(processed_games)')
-    else:
-        if handle is None:
-            handle = get_db(connection_factory)
-        with handle.connection() as dbapi_conn:
-            cursor = dbapi_conn.execute('PRAGMA table_info(processed_games)')
-            rows = cursor.fetchall()
+    if conn is not None and sqlite3 is not None and isinstance(conn, sqlite3.Connection):
+        rows = conn.execute('PRAGMA table_info(processed_games)').fetchall()
         _processed_games_columns_cache = {row['name'] for row in rows}
         return _processed_games_columns_cache
 
-    _processed_games_columns_cache = {row['name'] for row in cursor.fetchall()}
+    if handle is None:
+        handle = get_db(connection_factory)
+
+    if sqlite3 is not None:
+        with handle.connection() as dbapi_conn:
+            if isinstance(dbapi_conn, sqlite3.Connection):
+                rows = dbapi_conn.execute('PRAGMA table_info(processed_games)').fetchall()
+                _processed_games_columns_cache = {row['name'] for row in rows}
+                return _processed_games_columns_cache
+
+    with handle.sa_connection() as sa_conn:
+        inspector = inspect(sa_conn)
+        _processed_games_columns_cache = {col['name'] for col in inspector.get_columns('processed_games')}
     return _processed_games_columns_cache
 
 

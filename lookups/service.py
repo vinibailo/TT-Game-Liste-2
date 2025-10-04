@@ -20,6 +20,12 @@ from sqlalchemy import (
     update as sa_update,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import insert as sa_insert
+
+try:  # pragma: no cover - mysql dialect optional in some environments
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+except ImportError:  # pragma: no cover
+    mysql_insert = None  # type: ignore[assignment]
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -1040,13 +1046,7 @@ def load_lookup_tables(
             name = normalize_lookup_name(raw_value)
             if not name:
                 continue
-            stmt = sqlite_insert(table).values(name=name)
-            try:
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[name_column], set_={"name": stmt.excluded.name}
-                )
-            except AttributeError:  # pragma: no cover - older SQLite builds
-                pass
+            stmt = _build_lookup_insert(conn, table, name_column, value=name)
             try:
                 conn.execute(stmt)
             except SQLAlchemyError:
@@ -1301,3 +1301,35 @@ def backfill_relations(
 
             _replace_relations(conn, join_table, join_column, game_id, deduped_ids)
 
+def _build_lookup_insert(
+    conn: ConnectionOrSession,
+    table: Table,
+    name_column: Column[Any],
+    *,
+    value: str,
+):
+    """Return an insert statement that performs an upsert for the active dialect."""
+
+    engine = _resolve_engine(conn)
+    dialect_name = engine.dialect.name
+
+    if dialect_name == "sqlite" and sqlite_insert is not None:
+        stmt = sqlite_insert(table).values(name=value)
+        try:
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[name_column],
+                set_={"name": stmt.excluded.name},
+            )
+        except AttributeError:  # pragma: no cover - sqlite builds without upsert support
+            pass
+        return stmt
+
+    if dialect_name in {"mysql", "mariadb"} and mysql_insert is not None:
+        stmt = mysql_insert(table).values(name=value)
+        try:
+            stmt = stmt.on_duplicate_key_update(name=stmt.inserted.name)
+        except AttributeError:  # pragma: no cover - very old SQLAlchemy
+            pass
+        return stmt
+
+    return sa_insert(table).values(name=value)
