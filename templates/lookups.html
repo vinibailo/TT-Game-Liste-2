@@ -12,7 +12,9 @@
     <div id="toast" role="status" aria-live="polite"></div>
     <header class="app-topbar" aria-label="Primary navigation">
         <div class="topbar-content">
-            <a class="topbar-brand" href="{{ url_for('web.index') }}">Game Editor</a>
+            <a class="topbar-brand" href="{{ url_for('web.index') }}">
+                <img src="{{ url_for('static', filename='Logo_TeraTime_Col@2000x.png') }}" alt="Game Editor" />
+            </a>
             <nav class="topbar-nav" aria-label="Global">
                 <a class="topbar-link" href="{{ url_for('web.index') }}">Editor</a>
                 <a class="topbar-link" href="{{ url_for('updates.updates_page') }}">Update</a>
