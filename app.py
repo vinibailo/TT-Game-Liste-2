@@ -39,7 +39,6 @@ from config import (
     APP_PASSWORD,
     APP_SECRET_KEY,
     COVERS_DIR,
-    FIX_NAMES_BATCH_LIMIT,
     IGDB_BATCH_SIZE,
     IGDB_USER_AGENT,
     INPUT_XLSX,
@@ -3878,43 +3877,6 @@ def _execute_compare_updates_job(
         'missing_count': diff_summary.get('missing_count', 0) if diff_summary else 0,
     }
 
-
-
-def _execute_fix_names_job(
-    update_progress: Callable[..., None],
-    *,
-    offset: int = 0,
-    limit: int | None = None,
-    process_all: bool = True,
-) -> dict[str, Any]:
-    return updates_service.fix_names_job(
-        update_progress,
-        db_lock=db_lock,
-        get_db=get_db,
-        fetch_igdb_metadata=fetch_igdb_metadata,
-        coerce_igdb_id=coerce_igdb_id,
-        normalize_text=_normalize_text,
-        now_utc_iso=now_utc_iso,
-        default_limit=FIX_NAMES_BATCH_LIMIT,
-        offset=offset,
-        limit=limit,
-        process_all=process_all,
-    )
-
-
-def _execute_remove_duplicates_job(update_progress: Callable[..., None]) -> dict[str, Any]:
-    return updates_service.remove_duplicates_job(
-        update_progress,
-        catalog_state=catalog_state,
-        db_lock=db_lock,
-        get_db=get_db,
-        lookup_relations=LOOKUP_RELATIONS,
-        scan_duplicate_candidates=_scan_duplicate_candidates,
-        merge_duplicate_resolutions=_merge_duplicate_resolutions,
-        remove_processed_games=_remove_processed_games,
-    )
-
-
 _blueprints_configured = False
 
 
@@ -3975,7 +3937,6 @@ def configure_blueprints(flask_app: Flask) -> None:
 
     routes_updates.configure({
         'IGDB_BATCH_SIZE': IGDB_BATCH_SIZE,
-        'FIX_NAMES_BATCH_LIMIT': FIX_NAMES_BATCH_LIMIT,
         'validate_igdb_credentials': app_config.validate_igdb_credentials,
         'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
         'db_lock': db_lock,
@@ -3992,8 +3953,6 @@ def configure_blueprints(flask_app: Flask) -> None:
         '_execute_refresh_job': _execute_refresh_job,
         'compare_updates_job': _execute_compare_updates_job,
         'job_manager': job_manager,
-        'fix_names_job': _execute_fix_names_job,
-        'remove_duplicates_job': _execute_remove_duplicates_job,
         'fetch_cached_updates': fetch_cached_updates,
         'get_processed_games_columns': get_processed_games_columns,
         'load_cover_data': load_cover_data,

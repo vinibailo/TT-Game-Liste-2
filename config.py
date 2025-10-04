@@ -134,9 +134,6 @@ OPENAI_SUMMARY_ENABLED: Final[bool] = bool(OPENAI_API_KEY)
 IGDB_BATCH_SIZE: Final[int] = _coerce_positive_int(
     os.environ.get("IGDB_BATCH_SIZE"), 500
 )
-FIX_NAMES_BATCH_LIMIT: Final[int] = _coerce_positive_int(
-    os.environ.get("FIX_NAMES_BATCH_LIMIT"), 50
-)
 
 DEFAULT_LOOKUP_DATA_DIR: Final[Path] = BASE_DIR
 
@@ -190,7 +187,6 @@ __all__ = [
     "COVERS_DIR_PATH",
     "DEFAULT_IGDB_USER_AGENT",
     "DEFAULT_LOOKUP_DATA_DIR",
-    "FIX_NAMES_BATCH_LIMIT",
     "IGDB_BATCH_SIZE",
     "IGDB_CLIENT_ID",
     "IGDB_CLIENT_SECRET",

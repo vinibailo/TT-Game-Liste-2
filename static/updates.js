@@ -10,8 +10,6 @@
         searchTerm: '',
         detailCache: new Map(),
         updateMap: new Map(),
-        fixingNames: false,
-        deduping: false,
         refreshing: false,
         comparing: false,
         jobs: new Map(),
@@ -44,8 +42,6 @@
     const JOB_TYPES = Object.freeze({
         refresh: 'refresh_updates',
         compare: 'compare_updates',
-        fix: 'fix_names',
-        dedupe: 'remove_duplicates',
     });
     const JOB_ACTIVE_STATUSES = new Set(['pending', 'running']);
     const JOB_POLL_INTERVAL = 2000;
@@ -63,23 +59,11 @@
             icon: 'compare_arrows',
             defaultMessage: 'Comparing processed games…',
         },
-        [JOB_TYPES.fix]: {
-            name: 'Fixing IGDB names',
-            icon: 'spellcheck',
-            defaultMessage: 'Fixing IGDB names…',
-        },
-        [JOB_TYPES.dedupe]: {
-            name: 'Removing duplicates',
-            icon: 'layers_clear',
-            defaultMessage: 'Removing duplicates…',
-        },
     };
 
     const TASK_ORDER = [
         JOB_TYPES.refresh,
         JOB_TYPES.compare,
-        JOB_TYPES.fix,
-        JOB_TYPES.dedupe,
     ];
 
     Object.values(JOB_TYPES).forEach((jobType) => {
@@ -1309,113 +1293,6 @@
         }
     }
 
-    function setFixButtonLoading(loading) {
-        const button = elements.fixButton;
-        if (!button) {
-            return;
-        }
-        const label = button.querySelector('.btn-label');
-        if (loading) {
-            button.disabled = true;
-            button.setAttribute('aria-busy', 'true');
-            if (label) {
-                if (!button.dataset.originalLabel) {
-                    button.dataset.originalLabel = label.textContent || '';
-                }
-                label.textContent = 'Fixing…';
-            }
-        } else {
-            button.disabled = false;
-            button.removeAttribute('aria-busy');
-            if (label) {
-                const original = button.dataset.originalLabel;
-                if (original) {
-                    label.textContent = original;
-                }
-            }
-        }
-    }
-
-    function setDedupeButtonLoading(loading) {
-        const button = elements.dedupeButton;
-        if (!button) {
-            return;
-        }
-        const label = button.querySelector('.btn-label');
-        if (loading) {
-            button.disabled = true;
-            button.setAttribute('aria-busy', 'true');
-            if (label) {
-                if (!button.dataset.originalLabel) {
-                    button.dataset.originalLabel = label.textContent || '';
-                }
-                label.textContent = 'Removing…';
-            }
-        } else {
-            button.disabled = false;
-            button.removeAttribute('aria-busy');
-            if (label && button.dataset.originalLabel) {
-                label.textContent = button.dataset.originalLabel;
-            }
-        }
-    }
-
-    function setDedupeProgressVisible(visible) {
-        if (visible) {
-            showTask(JOB_TYPES.dedupe, {
-                message: 'Preparing duplicate cleanup…',
-                percent: null,
-            });
-        } else {
-            hideTask(JOB_TYPES.dedupe);
-        }
-    }
-
-    function updateDedupeProgress(processed, total) {
-        if (!state.taskVisibility.get(JOB_TYPES.dedupe)) {
-            return;
-        }
-        const processedValue = toNonNegativeInt(processed, 0);
-        const totalNumber = Number(total);
-        const totalValue = Number.isFinite(totalNumber)
-            ? Math.max(Math.round(totalNumber), 0)
-            : 0;
-        const percent = totalValue > 0 ? (processedValue / totalValue) * 100 : null;
-        const message = buildProgressMessage(
-            'Processing',
-            processed,
-            total,
-            'records',
-            'Removing duplicates…',
-        );
-        updateTask(JOB_TYPES.dedupe, { percent, message });
-    }
-
-    function setFixProgressVisible(visible) {
-        if (visible) {
-            showTask(JOB_TYPES.fix, {
-                message: 'Preparing name fixes…',
-                percent: null,
-            });
-        } else {
-            hideTask(JOB_TYPES.fix);
-        }
-    }
-
-    function updateFixProgress(processed, total) {
-        if (!state.taskVisibility.get(JOB_TYPES.fix)) {
-            return;
-        }
-        const processedValue = toNonNegativeInt(processed, 0);
-        const totalNumber = Number(total);
-        const totalValue = Number.isFinite(totalNumber)
-            ? Math.max(Math.round(totalNumber), 0)
-            : 0;
-        const percent = totalValue > 0 ? (processedValue / totalValue) * 100 : null;
-        const message = buildProgressMessage('Fixing', processed, total, 'names', 'Fixing IGDB names…');
-        updateTask(JOB_TYPES.fix, { percent, message });
-    }
-
     function setRefreshProgressVisible(visible) {
         if (visible) {
             showTask(JOB_TYPES.refresh, {
@@ -1654,18 +1531,6 @@
                 }
                 break;
             }
-            case JOB_TYPES.fix: {
-                state.fixingNames = active;
-                setFixButtonLoading(active);
-                if (active) {
-                    setFixProgressVisible(true);
-                    updateFixProgress(job.progress_current || 0, job.progress_total || 0);
-                } else {
-                    updateFixProgress(0, 0);
-                    setFixProgressVisible(false);
-                }
-                break;
-            }
             case JOB_TYPES.refresh: {
                 state.refreshing = active;
                 if (active) {
@@ -1698,18 +1563,6 @@
                 }
                 break;
             }
-            case JOB_TYPES.dedupe: {
-                state.deduping = active;
-                setDedupeButtonLoading(active);
-                if (active) {
-                    setDedupeProgressVisible(true);
-                    updateDedupeProgress(job.progress_current || 0, job.progress_total || 0);
-                } else {
-                    updateDedupeProgress(0, 0);
-                    setDedupeProgressVisible(false);
-                }
-                break;
-            }
             default:
                 break;
         }
@@ -1738,15 +1591,6 @@
                 state.detailCache.clear();
                 loadUpdates();
             }
-        } else if (type === JOB_TYPES.fix) {
-            state.fixingNames = false;
-            setFixButtonLoading(false);
-            updateFixProgress(0, 0);
-            setFixProgressVisible(false);
-            if (status === 'success') {
-                state.detailCache.clear();
-                loadUpdates();
-            }
         } else if (type === JOB_TYPES.refresh) {
             state.refreshing = false;
             state.refreshPhase = 'idle';
@@ -1761,15 +1605,6 @@
                 state.detailCache.clear();
                 loadUpdates();
                 loadCacheStatus();
-            }
-        } else if (type === JOB_TYPES.dedupe) {
-            state.deduping = false;
-            setDedupeButtonLoading(false);
-            updateDedupeProgress(0, 0);
-            setDedupeProgressVisible(false);
-            if (status === 'success' && Number(result.removed) > 0) {
-                state.detailCache.clear();
-                loadUpdates();
             }
         }
 
