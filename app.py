@@ -1689,7 +1689,7 @@ def resolve_cover(
     cover_data: str | None = None,
     cover_path: str | None = None,
     cover_url: str | None = None,
-    placeholder: str = 'no-image.jpg',
+    placeholder: str = '/static/no-image.jpg',
 ) -> str:
     """Resolve a best-effort cover source URL for UI consumption."""
 
@@ -1713,15 +1713,27 @@ def resolve_cover(
     if normalized_url:
         return normalized_url
 
-    fallback = str(placeholder or '').strip() or 'no-image.jpg'
-    if fallback.startswith('/'):
-        fallback = fallback.lstrip('/')
+    fallback = str(placeholder or '').strip() or '/static/no-image.jpg'
+    if fallback.startswith(('http://', 'https://', 'data:')):
+        return fallback
+
+    normalized_fallback = fallback
+    if normalized_fallback.startswith('/static/'):
+        normalized_fallback = normalized_fallback[len('/static/'):]
+    elif normalized_fallback.startswith('static/'):
+        normalized_fallback = normalized_fallback[len('static/'):]
+    elif normalized_fallback.startswith('/'):
+        # Non-static absolute paths should be returned unchanged.
+        return fallback
+
+    normalized_fallback = normalized_fallback or 'no-image.jpg'
+
     try:
-        return url_for('static', filename=fallback)
+        return url_for('static', filename=normalized_fallback)
     except RuntimeError:
         # ``url_for`` requires an application context. When unavailable fall back
         # to the conventional static path.
-        return f"/static/{fallback}"
+        return f"/static/{normalized_fallback}"
 
 
 def find_cover(row: pd.Series) -> str | None:
