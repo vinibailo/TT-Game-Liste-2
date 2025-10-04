@@ -700,9 +700,19 @@ def _remove_lookup_id_from_entries(
     lookups_service.remove_lookup_id_from_entries(entries, relation, lookup_id)
 
 
-def _list_lookup_entries(conn: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
+def _list_lookup_entries(
+    conn: sqlite3.Connection,
+    table_name: str,
+    *,
+    limit: int,
+    offset: int,
+) -> tuple[list[dict[str, Any]], int]:
     return lookups_service.list_lookup_entries(
-        conn, table_name, normalize_lookup_name=_normalize_lookup_name
+        conn,
+        table_name,
+        normalize_lookup_name=_normalize_lookup_name,
+        limit=limit,
+        offset=offset,
     )
 
 

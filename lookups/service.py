@@ -95,14 +95,16 @@ def list_lookup_entries(
     table_name: str,
     *,
     normalize_lookup_name: Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    """Return lookup entries ordered by name for ``table_name``."""
+    limit: int = 200,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return paginated lookup entries ordered by name for ``table_name``."""
 
     if SQLALCHEMY_AVAILABLE:
         try:
             table = _table_from_connection(conn, table_name)
         except LookupNotFoundError:
-            return []
+            return ([], 0)
 
         engine = _engine_from_connection(conn)
         try:
@@ -114,14 +116,14 @@ def list_lookup_entries(
                 )
                 rows = list(result)
         except SQLAlchemyError:
-            return []
+            return ([], 0)
     else:
         try:
             cur = conn.execute(
                 f'SELECT id, name FROM {table_name} ORDER BY name COLLATE NOCASE, id'
             )
         except sqlite3.OperationalError:
-            return []
+            return ([], 0)
         rows = cur.fetchall()
 
     items: list[dict[str, Any]] = []
@@ -136,7 +138,18 @@ def list_lookup_entries(
             continue
         seen_ids.add(lookup_id)
         items.append({"id": lookup_id, "name": name})
-    return items
+
+    total = len(items)
+    if offset < 0:
+        offset = 0
+    if limit <= 0:
+        paginated_items: list[dict[str, Any]] = []
+    else:
+        start = min(offset, total)
+        end = start + limit
+        paginated_items = items[start:end]
+
+    return paginated_items, total
 
 
 def get_lookup_entry(

@@ -78,10 +78,53 @@ def api_lookup_options(lookup_type: str):
     related_processed_game_ids = _ctx('_related_processed_game_ids')
 
     if request.method == 'GET':
+        try:
+            requested_limit = int(request.args.get('limit', 200))
+        except (TypeError, ValueError):
+            requested_limit = 200
+        if requested_limit <= 0:
+            requested_limit = 200
+        limit = min(requested_limit, 200)
+
+        offset = 0
+        page_value: int | None = None
+        page_param = request.args.get('page')
+        if isinstance(page_param, str) and page_param.strip():
+            try:
+                page_value = int(page_param)
+            except (TypeError, ValueError):
+                page_value = 1
+            if page_value < 1:
+                page_value = 1
+            offset = (page_value - 1) * limit
+        else:
+            offset_param = request.args.get('offset')
+            if isinstance(offset_param, str) and offset_param.strip():
+                try:
+                    offset = int(offset_param)
+                except (TypeError, ValueError):
+                    offset = 0
+                if offset < 0:
+                    offset = 0
+
         with db_lock:
             conn = get_db()
-            items = list_lookup_entries(conn, table_name)
-        return jsonify({'items': items, 'type': table_name})
+            items, total = list_lookup_entries(
+                conn, table_name, limit=limit, offset=offset
+            )
+
+        has_more = offset + len(items) < total
+        payload: dict[str, Any] = {
+            'items': items,
+            'type': table_name,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+            'has_more': has_more,
+        }
+        if page_value is not None:
+            payload['page'] = page_value
+        return jsonify(payload)
 
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, Mapping):
