@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import sqlite3
 import sys
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any, Callable
 
 from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
@@ -268,8 +268,8 @@ def _normalize_text(value: Any) -> str:
 
 
 def _load_processed_rows(
-    conn: db_utils.DatabaseHandle | sqlite3.Connection,
-) -> list[sqlite3.Row]:
+    conn: db_utils.DatabaseHandle | Any,
+) -> list[Mapping[str, Any]]:
     """Load all processed game rows with their identifiers and names."""
 
     with db_lock:
@@ -277,12 +277,24 @@ def _load_processed_rows(
             'SELECT "ID", "Source Index", "igdb_id", "Name" FROM processed_games '
             'ORDER BY "ID"'
         )
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        description = getattr(cursor, "description", None)
+        columns = [col[0] for col in description] if description else []
+
+        normalized: list[Mapping[str, Any]] = []
+        for row in rows:
+            if isinstance(row, Mapping):
+                normalized.append(dict(row))
+            elif columns:
+                normalized.append({col: row[idx] for idx, col in enumerate(columns)})
+            else:
+                normalized.append({})
+        return normalized
 
 
 def rename_processed_games_from_igdb(
     *,
-    conn: db_utils.DatabaseHandle | sqlite3.Connection | None = None,
+    conn: db_utils.DatabaseHandle | Any | None = None,
     exchange_credentials: Callable[[], tuple[str, str]] | None = None,
     metadata_loader: Callable[[str, str, Iterable[str]], Mapping[str, Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:

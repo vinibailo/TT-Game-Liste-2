@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 
 import pandas as pd
@@ -97,7 +98,7 @@ def test_lookup_tables_backfilled(tmp_path):
         assert {row['name'] for row in platform_rows} == {"PC"}
 
         columns = {
-            row['name'] if isinstance(row, sqlite3.Row) else row[1]
+            row['name'] if isinstance(row, Mapping) else row[1]
             for row in app.db.execute('PRAGMA table_info(processed_games)')
         }
         assert 'developers_ids' in columns
@@ -110,7 +111,7 @@ def test_lookup_tables_backfilled(tmp_path):
         def first_lookup_id(query: str, processed_game_id: int) -> int:
             row = app.db.execute(query, (processed_game_id,)).fetchone()
             assert row is not None
-            if isinstance(row, sqlite3.Row):
+            if isinstance(row, Mapping):
                 return row[0]
             return row[0]
 
