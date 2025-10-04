@@ -48,12 +48,15 @@ These steps assume a fresh Ubuntu/Debian-like host. Adjust package manager comma
    pip install -r requirements.txt
    ```
 5. **Seed optional cover assets.** Download or export any existing cover art into the `covers_out/` directory. The server will create other needed folders (`uploaded_sources/`, `processed_covers/`) on first run.【F:app.py†L70-L100】
-6. **Configure environment variables.** Create a `.env` file or export the following before launching:
-   - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` – required to exchange a Twitch OAuth token for IGDB access.【F:app.py†L1515-L1556】【F:app.py†L1858-L1890】
-   - `APP_PASSWORD` – shared password for the login form (defaults to `password`).
-   - `APP_SECRET_KEY` – Flask session secret; set a random string in production.
-   - `OPENAI_API_KEY` – optional, required only if you want to enable AI-generated summaries.
-   - `IGDB_USER_AGENT` – optional, overrides the default User-Agent header if your integration needs a specific contact address.【F:app.py†L146-L147】【F:app.py†L1545-L1562】
+6. **Configure environment variables.** Create a `.env` file (keep it out of version control) or export the following before launching. In production prefer Docker/Kubernetes secrets, cloud secret managers, or other deployment-specific vaults so real credentials never land in Git history:
+    - `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` – required to exchange a Twitch OAuth token for IGDB access.【F:app.py†L1515-L1556】【F:app.py†L1858-L1890】
+    - `APP_PASSWORD` – shared password for the login form (defaults to `password`).
+    - `APP_SECRET_KEY` – Flask session secret; set a random string in production.
+    - `OPENAI_API_KEY` – optional, required only if you want to enable AI-generated summaries.
+    - `IGDB_USER_AGENT` – optional, overrides the default User-Agent header if your integration needs a specific contact address.【F:app.py†L146-L147】【F:app.py†L1545-L1562】
+    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` – MariaDB connection settings used to reach the processed-games database. Keep `DB_PASSWORD` (and any other credentials) in a secure secret store; never commit real passwords or copy them into shared `.env` files.
+    - `DB_SSL_CA` – optional path to a CA bundle when the MariaDB server requires SSL validation.
+    - `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` – optional overrides for connection and read timeouts when tuning long-running queries.
 7. **Initialize or repair existing data (optional).** If you have a legacy `processed_games.db`, run `python scripts/resync_db.py` to align it with the freshly fetched IGDB source order. To normalise old cover filenames execute `python migrate_cover_paths.py`.
 8. **Start the application.**
    ```bash
@@ -66,7 +69,7 @@ These steps assume a fresh Ubuntu/Debian-like host. Adjust package manager comma
 
 - Keep periodic backups of `processed_games.db` and the `processed_covers/` directory—they contain the authoritative edited content.【F:app.py†L248-L338】
 - If the navigation counters ever drift from the IGDB source order, rerun `python scripts/resync_db.py` to resequence IDs and restore alignment.【F:scripts/resync_db.py†L1-L75】
-- Enable HTTPS and set a strong `APP_PASSWORD`/`APP_SECRET_KEY` when deploying on the public internet.
+- Enable HTTPS and set a strong `APP_PASSWORD`/`APP_SECRET_KEY` when deploying on the public internet. Store those secrets alongside your database credentials in your orchestration layer instead of the repository or sample `.env` files.
 - When the AI summary feature is disabled (no OpenAI key), the “Gerar Resumo” button will raise a friendly warning instead of generating text.【F:app.py†L212-L247】【F:static/main.js†L119-L148】
 
 This README complements the short-form instructions in [INSTALL.md](INSTALL.md) with more operational context.

@@ -8,11 +8,17 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from config import IGDB_BATCH_SIZE, IGDB_USER_AGENT, PROCESSED_DB_PATH, SQLITE_TIMEOUT_SECONDS
+from config import (
+    DB_CONNECT_TIMEOUT_SECONDS,
+    DB_DSN,
+    IGDB_BATCH_SIZE,
+    IGDB_USER_AGENT,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from db import utils as db_utils
 try:
     from app import (
         coerce_igdb_id,
@@ -37,7 +43,7 @@ except ModuleNotFoundError:
     db_lock = Lock()
 
     def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
-        busy_timeout_ms = int(max(SQLITE_TIMEOUT_SECONDS, 0) * 1000)
+        busy_timeout_ms = int(max(DB_CONNECT_TIMEOUT_SECONDS, 0) * 1000)
         pragmas: tuple[tuple[str, str | int | float | None, bool], ...] = (
             ("busy_timeout", busy_timeout_ms if busy_timeout_ms > 0 else None, False),
             ("journal_mode", "WAL", True),
@@ -56,10 +62,12 @@ except ModuleNotFoundError:
         return conn
 
     def get_db() -> sqlite3.Connection:
-        db_path = PROCESSED_DB_PATH
-        if not db_path.is_absolute():
-            db_path = (PROJECT_ROOT / db_path).resolve()
-        conn = sqlite3.connect(db_path, timeout=SQLITE_TIMEOUT_SECONDS)
+        try:
+            conn = db_utils.create_connection_from_dsn(
+                DB_DSN, timeout=DB_CONNECT_TIMEOUT_SECONDS
+            )
+        except ValueError as exc:  # pragma: no cover - defensive for unsupported DSNs
+            raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
         conn.row_factory = sqlite3.Row
         return _configure_sqlite_connection(conn)
 
