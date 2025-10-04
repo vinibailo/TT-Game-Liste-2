@@ -28,7 +28,7 @@
         page: 1,
         pageSize: resolvedPageSize,
         pageCount: 1,
-        totalAvailable: 0,
+        totalAvailable: null,
         nextAfter: null,
         updatesEtag: null,
         activeModalId: null,
@@ -768,7 +768,12 @@
         if (!elements.countLabel) {
             return;
         }
-        elements.countLabel.textContent = String(state.filteredAll.length);
+        const fallbackTotal = state.filteredAll.length;
+        const totalEntries =
+            state.totalAvailable === null || state.totalAvailable === undefined
+                ? fallbackTotal
+                : toNonNegativeInt(state.totalAvailable, fallbackTotal);
+        elements.countLabel.textContent = String(totalEntries);
     }
 
     function updateStatusMessage() {
@@ -2522,7 +2527,9 @@
             }
         });
         state.updateMap = new Map(mapEntries);
-        state.totalAvailable = state.updates.length;
+        if (state.totalAvailable === null || state.totalAvailable === undefined) {
+            state.totalAvailable = state.updates.length;
+        }
         if (resetPage) {
             state.page = 1;
         }
@@ -2580,6 +2587,13 @@
                 state.nextAfter = normalizedNextAfter;
             } else if (!append && !preserveExisting) {
                 state.nextAfter = null;
+            }
+
+            const totalFromResponse = payload.total;
+            if (totalFromResponse !== null && totalFromResponse !== undefined) {
+                state.totalAvailable = toNonNegativeInt(totalFromResponse, state.updates.length);
+            } else if (state.totalAvailable === null || state.totalAvailable === undefined) {
+                state.totalAvailable = state.updates.length;
             }
 
             rebuildUpdatesState({ resetPage: !append });
