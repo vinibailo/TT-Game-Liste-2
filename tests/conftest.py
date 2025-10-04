@@ -1,4 +1,9 @@
+import os
+
 import pytest
+
+
+os.environ.setdefault('DB_LEGACY_SQLITE', '1')
 
 
 @pytest.fixture(autouse=True)
