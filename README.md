@@ -1,6 +1,6 @@
 # TT-Game-Liste-2
 
-TT-Game-Liste-2 is a password-protected web application for curating game metadata that arrives in bulk from IGDB. It gives an editor-friendly workspace where you can review each record, polish the text fields, generate fresh Portuguese summaries, and produce square 1080×1080 cover art that is ready for storefront ingestion. Every change is written to a local SQLite database so the team can stop at any time and resume later without losing work.
+TT-Game-Liste-2 is a password-protected web application for curating game metadata that arrives in bulk from IGDB. It gives an editor-friendly workspace where you can review each record, polish the text fields, generate fresh Portuguese summaries, and produce square 1080×1080 cover art that is ready for storefront ingestion. Processed data is stored in a MariaDB instance (via SQLAlchemy-compatible DSNs) or, for legacy deployments, an on-disk SQLite database so the team can stop at any time and resume later without losing work.
 
 ## Feature overview
 
@@ -54,9 +54,11 @@ These steps assume a fresh Ubuntu/Debian-like host. Adjust package manager comma
     - `APP_SECRET_KEY` – Flask session secret; set a random string in production.
     - `OPENAI_API_KEY` – optional, required only if you want to enable AI-generated summaries.
     - `IGDB_USER_AGENT` – optional, overrides the default User-Agent header if your integration needs a specific contact address.【F:app.py†L146-L147】【F:app.py†L1545-L1562】
-    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` – MariaDB connection settings used to reach the processed-games database. Keep `DB_PASSWORD` (and any other credentials) in a secure secret store; never commit real passwords or copy them into shared `.env` files.
+    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` – MariaDB connection settings used to reach the processed-games database. The application emits a SQLAlchemy DSN such as `mysql+pymysql://user:pass@host:3306/dbname` and expects the [`PyMySQL`](https://pypi.org/project/PyMySQL/) driver (installed via `requirements.txt`). Keep `DB_PASSWORD` (and any other credentials) in a secure secret store; never commit real passwords or copy them into shared `.env` files.
     - `DB_SSL_CA` – optional path to a CA bundle when the MariaDB server requires SSL validation.
-    - `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` – optional overrides for connection and read timeouts when tuning long-running queries.
+    - `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` – optional overrides for connection and read timeouts when tuning long-running queries. Their values are forwarded to the SQLAlchemy DSN.
+    - `DB_LEGACY_SQLITE` – set to `1` to continue using the historical `processed_games.db` SQLite file. This flag is intended only for transition periods or environments that cannot run MariaDB.
+    - `DB_SQLITE_PATH` – optional override for the SQLite file location when `DB_LEGACY_SQLITE=1` (defaults to `processed_games.db` in the current working directory).
 7. **Initialize or repair existing data (optional).** If you have a legacy `processed_games.db`, run `python scripts/resync_db.py` to align it with the freshly fetched IGDB source order. To normalise old cover filenames execute `python migrate_cover_paths.py`.
 8. **Start the application.**
    ```bash

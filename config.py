@@ -110,33 +110,45 @@ DB_SSL_CA_PATH: Final[Path | None] = (
     _path_from(os.environ.get("DB_SSL_CA"), "") if os.environ.get("DB_SSL_CA") else None
 )
 DB_SSL_CA: Final[str] = os.fspath(DB_SSL_CA_PATH) if DB_SSL_CA_PATH is not None else ""
+DB_CONNECT_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
+    os.environ.get("DB_CONNECT_TIMEOUT"), 10.0
+)
+DB_READ_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
+    os.environ.get("DB_READ_TIMEOUT"), 30.0
+)
+DB_LEGACY_SQLITE: Final[bool] = _coerce_truthy_env(os.environ.get("DB_LEGACY_SQLITE"))
 
 
 def _build_db_dsn() -> str:
     """Return a database DSN constructed from environment configuration."""
 
-    maria_overrides = {
-        key: _clean_text(os.environ.get(key))
-        for key in ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
-    }
-    if any(value for value in maria_overrides.values()):
-        auth = ""
-        if DB_USER:
-            password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
-            auth = DB_USER
-            if password:
-                auth = f"{auth}:{password}"
-            auth = f"{auth}@"
+    if DB_LEGACY_SQLITE:
+        sqlite_default = Path.cwd() / "processed_games.db"
+        sqlite_path = _path_from(os.environ.get("DB_SQLITE_PATH"), sqlite_default).resolve()
+        return f"sqlite:///{sqlite_path.as_posix()}"
 
-        query_params = []
-        if DB_SSL_CA:
-            query_params.append(f"ssl_ca={quote_plus(DB_SSL_CA)}")
+    auth = ""
+    if DB_USER:
+        password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
+        auth = DB_USER
+        if password:
+            auth = f"{auth}:{password}"
+        auth = f"{auth}@"
 
-        query_string = f"?{'&'.join(query_params)}" if query_params else ""
-        return f"mariadb://{auth}{DB_HOST}:{DB_PORT}/{DB_NAME}{query_string}"
+    query_params = []
+    if DB_SSL_CA:
+        query_params.append(f"ssl_ca={quote_plus(DB_SSL_CA)}")
 
-    sqlite_path = _path_from(None, BASE_DIR / "processed_games.db").resolve()
-    return f"sqlite:///{sqlite_path.as_posix()}"
+    if DB_CONNECT_TIMEOUT_SECONDS > 0:
+        query_params.append(
+            f"connect_timeout={DB_CONNECT_TIMEOUT_SECONDS:g}"
+        )
+
+    if DB_READ_TIMEOUT_SECONDS > 0:
+        query_params.append(f"read_timeout={DB_READ_TIMEOUT_SECONDS:g}")
+
+    query_string = f"?{'&'.join(query_params)}" if query_params else ""
+    return f"mysql+pymysql://{auth}{DB_HOST}:{DB_PORT}/{DB_NAME}{query_string}"
 
 
 DB_DSN: Final[str] = _build_db_dsn()
@@ -149,13 +161,6 @@ IGDB_USER_AGENT: Final[str] = (
 IGDB_CLIENT_ID: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_ID"))
 IGDB_CLIENT_SECRET: Final[str] = _clean_text(os.environ.get("IGDB_CLIENT_SECRET"))
 IGDB_ENABLED: bool = True
-
-DB_CONNECT_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
-    os.environ.get("DB_CONNECT_TIMEOUT"), 10.0
-)
-DB_READ_TIMEOUT_SECONDS: Final[float] = _coerce_positive_float(
-    os.environ.get("DB_READ_TIMEOUT"), 30.0
-)
 RUN_DB_MIGRATIONS: Final[bool] = _coerce_truthy_env(
     os.environ.get("RUN_DB_MIGRATIONS")
 )
@@ -243,6 +248,7 @@ __all__ = [
     "DB_CONNECT_TIMEOUT_SECONDS",
     "DB_DSN",
     "DB_HOST",
+    "DB_LEGACY_SQLITE",
     "DB_NAME",
     "DB_PASSWORD",
     "DB_PORT",

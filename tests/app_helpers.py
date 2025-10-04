@@ -23,9 +23,14 @@ def load_app(tmp_path: Path) -> object:
         raise RuntimeError("Unable to load app module specification")
     module = importlib.util.module_from_spec(spec)
 
-    env_vars = {key: os.environ.get(key) for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")}
+    env_vars = {
+        key: os.environ.get(key)
+        for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET", "DB_LEGACY_SQLITE")
+    }
     for key in env_vars:
         os.environ.pop(key, None)
+
+    os.environ["DB_LEGACY_SQLITE"] = "1"
 
     try:
         spec.loader.exec_module(module)

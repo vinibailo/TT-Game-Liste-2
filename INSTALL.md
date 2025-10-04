@@ -14,6 +14,11 @@
    - Optional variables:
      - `OPENAI_API_KEY` enables automated Portuguese summaries.
      - `IGDB_USER_AGENT` customises the User-Agent header sent to IGDB.
+     - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` configure the MariaDB connection. The app uses SQLAlchemy URLs (`mysql+pymysql://…`) and requires the pure-Python [`PyMySQL`](https://pypi.org/project/PyMySQL/) driver included in `requirements.txt`.
+     - `DB_SSL_CA` provides an SSL CA bundle when the database enforces TLS validation.
+     - `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` tune connection/read timeouts in seconds.
+     - `DB_LEGACY_SQLITE=1` forces the historical `processed_games.db` SQLite file if you cannot provision MariaDB yet.
+     - `DB_SQLITE_PATH` overrides the SQLite location when `DB_LEGACY_SQLITE=1` (defaults to `processed_games.db` in the current working directory).
 
 3. **(Optional) Add existing artwork**
    - Drop any pre-supplied cover assets into the `covers_out/` directory.
