@@ -56,24 +56,6 @@
                         <span class="sr-only">Compare processed games with the cached IGDB data</span>
                     </button>
                 </div>
-                <div class="updates-bulk-action">
-                    <button type="button" class="btn btn-green" data-fix-names>
-                        <span class="btn-icon" aria-hidden="true">
-                            <span class="material-symbols-rounded">spellcheck</span>
-                        </span>
-                        <span class="btn-label">Fix IGDB Names</span>
-                        <span class="sr-only">Fix processed game names using IGDB data</span>
-                    </button>
-                </div>
-                <div class="updates-bulk-action">
-                    <button type="button" class="btn btn-red" data-remove-duplicates>
-                        <span class="btn-icon" aria-hidden="true">
-                            <span class="material-symbols-rounded">layers_clear</span>
-                        </span>
-                        <span class="btn-label">Remove Duplicates</span>
-                        <span class="sr-only">Remove unprocessed duplicate IGDB entries</span>
-                    </button>
-                </div>
             </div>
         </header>
         <section class="updates-progress-stack">
@@ -234,15 +216,12 @@
             refreshUrl: {{ url_for('updates.api_updates_refresh')|tojson }},
             cacheRefreshUrl: {{ url_for('updates.api_igdb_cache_refresh')|tojson }},
             compareUrl: {{ url_for('updates.api_updates_compare')|tojson }},
-            fixNamesUrl: {{ url_for('updates.api_updates_fix_names')|tojson }},
-            removeDuplicatesUrl: {{ url_for('updates.api_updates_remove_duplicates')|tojson }},
             deleteDuplicateBaseUrl: {{ url_for('updates.api_updates_remove_duplicate', processed_game_id=0).rsplit('/', 1)[0]|tojson }},
             jobsUrl: {{ url_for('updates.api_updates_job_list')|tojson }},
             detailBaseUrl: {{ url_for('updates.api_updates_detail', processed_game_id=0).rsplit('/', 1)[0]|tojson }},
             coverBaseUrl: {{ url_for('updates.api_updates_cover', processed_game_id=0).rsplit('/', 2)[0]|tojson }},
             cacheStatusUrl: {{ url_for('updates.api_updates_cache_status')|tojson }},
-            cacheBatchSize: {{ igdb_batch_size|tojson }},
-            fixBatchSize: {{ FIX_NAMES_BATCH_LIMIT|default(50)|tojson }}
+            cacheBatchSize: {{ igdb_batch_size|tojson }}
         };
     </script>
     <script src="{{ url_for('static', filename='updates.js') }}" defer></script>
