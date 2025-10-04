@@ -65,6 +65,45 @@ def create_processed_game_with_entries(app_module, relation, entries, game_id):
 
 
 @pytest.mark.parametrize('lookup_type', LOOKUP_TYPES)
+def test_lookup_get_supports_pagination(app_client, lookup_type):
+    app_module, client = app_client
+    with app_module.db_lock:
+        with app_module.db:
+            app_module.db.execute(f'DELETE FROM {lookup_type}')
+
+    names = [f'Example {lookup_type} {index}' for index in range(5)]
+    for name in names:
+        response = client.post(f'/api/lookups/{lookup_type}', json={'name': name})
+        assert response.status_code in (200, 201)
+
+    sorted_names = sorted(names)
+
+    response = client.get(f'/api/lookups/{lookup_type}?limit=2')
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data['total'] == len(sorted_names)
+    assert data['limit'] == 2
+    assert data['offset'] == 0
+    assert data['has_more'] is True
+    assert [item['name'] for item in data['items']] == sorted_names[:2]
+
+    page_response = client.get(f'/api/lookups/{lookup_type}?limit=2&page=2')
+    assert page_response.status_code == 200
+    page_data = page_response.get_json()
+    assert page_data['offset'] == 2
+    assert page_data['page'] == 2
+    assert page_data['has_more'] is True
+    assert [item['name'] for item in page_data['items']] == sorted_names[2:4]
+
+    offset_response = client.get(f'/api/lookups/{lookup_type}?limit=2&offset=4')
+    assert offset_response.status_code == 200
+    offset_data = offset_response.get_json()
+    assert offset_data['offset'] == 4
+    assert offset_data['has_more'] is False
+    assert [item['name'] for item in offset_data['items']] == sorted_names[4:]
+
+
+@pytest.mark.parametrize('lookup_type', LOOKUP_TYPES)
 def test_lookup_post_creates_entry(app_client, lookup_type):
     app_module, client = app_client
     with app_module.db_lock:
