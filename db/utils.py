@@ -112,15 +112,24 @@ class DatabaseHandle:
         return self._get_connection().__exit__(exc_type, exc, tb)
 
 
-_fallback_connection: DatabaseHandle | None = None
+_fallback_connection: DatabaseHandle | DatabaseEngine | None = None
+_fallback_handle_cache: DatabaseHandle | None = None
 _processed_games_columns_cache: set[str] | None = None
 
 
-def set_fallback_connection(conn: DatabaseHandle | None) -> None:
+def set_fallback_connection(conn: DatabaseHandle | DatabaseEngine | None) -> None:
     """Configure the engine returned when no Flask app context is active."""
 
     global _fallback_connection
+    global _fallback_handle_cache
+
     _fallback_connection = conn
+    if conn is None:
+        _fallback_handle_cache = None
+    elif isinstance(conn, DatabaseHandle):
+        _fallback_handle_cache = conn
+    else:
+        _fallback_handle_cache = None
 
 
 def clear_processed_games_columns_cache() -> None:
@@ -234,6 +243,7 @@ def get_db(
     """Return the active :class:`DatabaseHandle`, creating one if necessary."""
 
     global _fallback_connection
+    global _fallback_handle_cache
 
     def _coerce_handle(value: DatabaseHandle | DatabaseEngine) -> DatabaseHandle:
         if isinstance(value, DatabaseHandle):
@@ -242,12 +252,24 @@ def get_db(
             return DatabaseHandle(value)
         raise TypeError('connection_factory must return DatabaseHandle or DatabaseEngine')
 
+    def _fallback_handle() -> DatabaseHandle:
+        global _fallback_handle_cache
+
+        if _fallback_connection is None:
+            raise RuntimeError('Database connection is not configured')
+        if isinstance(_fallback_connection, DatabaseHandle):
+            _fallback_handle_cache = _fallback_connection
+            return _fallback_connection
+        if _fallback_handle_cache is None:
+            _fallback_handle_cache = DatabaseHandle(_fallback_connection)
+        return _fallback_handle_cache
+
     if has_app_context():
         if not hasattr(g, context_key):
             if connection_factory is not None:
                 setattr(g, context_key, _coerce_handle(connection_factory()))
             elif _fallback_connection is not None:
-                setattr(g, context_key, _fallback_connection)
+                setattr(g, context_key, _fallback_handle())
             else:
                 raise RuntimeError('Database connection is not configured')
         value = getattr(g, context_key)
@@ -269,8 +291,12 @@ def get_db(
     if _fallback_connection is None:
         if connection_factory is None:
             raise RuntimeError('Database connection is not configured')
-        _fallback_connection = _coerce_handle(connection_factory())
-    return _fallback_connection
+        _fallback_connection = connection_factory()
+        if isinstance(_fallback_connection, DatabaseHandle):
+            _fallback_handle_cache = _fallback_connection
+        else:
+            _fallback_handle_cache = None
+    return _fallback_handle()
 
 
 @contextmanager

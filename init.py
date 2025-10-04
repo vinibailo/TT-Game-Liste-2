@@ -19,18 +19,20 @@ def initialize_app(
     init_db: Callable[..., None],
     load_games: Callable[..., pd.DataFrame],
     set_games_dataframe: Callable[..., None],
-    connection_factory: Callable[[], db_utils.DatabaseHandle | db_utils.DatabaseEngine],
+    connection_factory: Callable[[], db_utils.DatabaseEngine | db_utils.DatabaseHandle],
     run_migrations: bool = RUN_DB_MIGRATIONS,
     rebuild_metadata: bool = True,
     rebuild_navigator: bool = True,
     prefer_cache: bool = False,
-) -> db_utils.DatabaseHandle:
+) -> db_utils.DatabaseEngine | db_utils.DatabaseHandle:
     """Perform the core startup tasks required for the application.
 
     The initializer ensures filesystem directories exist, prepares the processed
     games database (including migrations and lookup seeding), establishes the
-    fallback SQLite connection, and loads the source games workbook into the
-    in-memory navigator state.
+    fallback SQLite connection or SQLAlchemy engine, and loads the source games
+    workbook into the in-memory navigator state. The database handle produced by
+    ``connection_factory`` is returned unchanged so callers can reuse the
+    SQLAlchemy-oriented interface directly.
 
     Parameters mirror the existing helper functions in :mod:`app` so that the
     orchestration can remain testable and reusable from scripts.
@@ -41,12 +43,7 @@ def initialize_app(
     init_db(run_migrations=run_migrations)
 
     connection = connection_factory()
-    handle = (
-        connection
-        if isinstance(connection, db_utils.DatabaseHandle)
-        else db_utils.DatabaseHandle(connection)
-    )
-    db_utils.set_fallback_connection(handle)
+    db_utils.set_fallback_connection(connection)
 
     games_df = load_games(prefer_cache=prefer_cache)
 
@@ -60,7 +57,7 @@ def initialize_app(
         logger.exception("Failed to configure navigator state during startup")
         raise
 
-    return handle
+    return connection
 
 
 __all__ = ["initialize_app"]
