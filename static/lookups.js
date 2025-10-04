@@ -26,6 +26,8 @@
         }
     }
 
+    const PAGE_LIMIT = 200;
+
     const state = {
         type: defaultType,
         items: [],
@@ -33,6 +35,9 @@
         search: '',
         editingId: null,
         deletingId: null,
+        page: 1,
+        limit: PAGE_LIMIT,
+        total: 0,
     };
 
     const elements = {
@@ -58,6 +63,10 @@
         confirmDelete: document.querySelector('[data-confirm-delete]'),
         confirmCancel: document.querySelector('[data-cancel-delete]'),
         confirmClose: document.querySelector('[data-close-confirm-modal]'),
+        pagination: null,
+        paginationInfo: null,
+        paginationPrev: null,
+        paginationNext: null,
     };
 
     const toast = document.getElementById('toast');
@@ -108,8 +117,98 @@
         if (!elements.countLabel) {
             return;
         }
-        const count = state.filtered.length;
+        const isSearching = state.search.trim().length > 0;
+        const count = isSearching ? state.filtered.length : state.total;
         elements.countLabel.textContent = formatCount(count);
+    }
+
+    function ensurePaginationElements() {
+        if (elements.pagination && document.body.contains(elements.pagination)) {
+            return;
+        }
+        const card = document.querySelector('.lookups-card');
+        const tableScroll = card ? card.querySelector('.table-scroll') : null;
+        if (!card || !tableScroll) {
+            return;
+        }
+        const pagination = document.createElement('nav');
+        pagination.className = 'table-pagination';
+        pagination.setAttribute('data-pagination', '');
+        pagination.hidden = true;
+        pagination.setAttribute('aria-label', 'Pagination');
+
+        const prevButton = document.createElement('button');
+        prevButton.type = 'button';
+        prevButton.className = 'pagination-button';
+        prevButton.setAttribute('data-page-prev', '');
+        prevButton.setAttribute('aria-label', 'Previous page');
+
+        const prevIcon = document.createElement('span');
+        prevIcon.className = 'material-symbols-rounded';
+        prevIcon.setAttribute('aria-hidden', 'true');
+        prevIcon.textContent = 'chevron_left';
+        prevButton.appendChild(prevIcon);
+
+        const prevLabel = document.createElement('span');
+        prevLabel.className = 'pagination-label';
+        prevLabel.textContent = 'Previous';
+        prevButton.appendChild(prevLabel);
+
+        const info = document.createElement('div');
+        info.className = 'pagination-info';
+        info.setAttribute('data-page-info', '');
+        info.textContent = 'Page 1 of 1';
+
+        const nextButton = document.createElement('button');
+        nextButton.type = 'button';
+        nextButton.className = 'pagination-button';
+        nextButton.setAttribute('data-page-next', '');
+        nextButton.setAttribute('aria-label', 'Next page');
+
+        const nextIcon = document.createElement('span');
+        nextIcon.className = 'material-symbols-rounded';
+        nextIcon.setAttribute('aria-hidden', 'true');
+        nextIcon.textContent = 'chevron_right';
+        nextButton.appendChild(nextIcon);
+
+        const nextLabel = document.createElement('span');
+        nextLabel.className = 'pagination-label';
+        nextLabel.textContent = 'Next';
+        nextButton.appendChild(nextLabel);
+
+        pagination.append(prevButton, info, nextButton);
+        tableScroll.insertAdjacentElement('afterend', pagination);
+
+        elements.pagination = pagination;
+        elements.paginationInfo = info;
+        elements.paginationPrev = prevButton;
+        elements.paginationNext = nextButton;
+    }
+
+    function updatePagination() {
+        if (!elements.pagination) {
+            return;
+        }
+        const isSearching = state.search.trim().length > 0;
+        const totalPages = state.total > 0 ? Math.ceil(state.total / state.limit) : 0;
+        const shouldShow = !isSearching && totalPages > 1;
+        elements.pagination.hidden = !shouldShow;
+        if (!shouldShow) {
+            return;
+        }
+        if (elements.paginationInfo) {
+            elements.paginationInfo.textContent = `Page ${state.page} of ${totalPages}`;
+        }
+        if (elements.paginationPrev) {
+            const disablePrev = state.page <= 1;
+            elements.paginationPrev.disabled = disablePrev;
+            elements.paginationPrev.setAttribute('aria-disabled', disablePrev ? 'true' : 'false');
+        }
+        if (elements.paginationNext) {
+            const disableNext = state.page >= totalPages;
+            elements.paginationNext.disabled = disableNext;
+            elements.paginationNext.setAttribute('aria-disabled', disableNext ? 'true' : 'false');
+        }
     }
 
     function setLoading(loading) {
@@ -143,6 +242,7 @@
             if (elements.emptyState) {
                 elements.emptyState.hidden = false;
             }
+            updatePagination();
             return;
         }
         if (elements.emptyState) {
@@ -190,17 +290,25 @@
             fragment.appendChild(row);
         });
         elements.tableBody.appendChild(fragment);
+        updatePagination();
     }
 
     async function fetchEntries() {
         if (!state.type) {
             state.items = [];
+            state.total = 0;
             applyFilters();
             return;
         }
         setLoading(true);
         try {
-            const response = await fetch(`/api/lookups/${encodeURIComponent(state.type)}`);
+            const params = new URLSearchParams({
+                limit: String(state.limit),
+                page: String(state.page),
+            });
+            const response = await fetch(
+                `/api/lookups/${encodeURIComponent(state.type)}?${params.toString()}`,
+            );
             if (!response.ok) {
                 throw new Error(`Failed to load entries (${response.status})`);
             }
@@ -217,10 +325,22 @@
             normalized.sort((a, b) =>
                 a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
             );
+            const rawTotal = Number(payload.total);
+            const total = Number.isFinite(rawTotal) ? rawTotal : normalized.length;
+            if (total > 0) {
+                const totalPages = Math.max(1, Math.ceil(total / state.limit));
+                if (state.page > totalPages) {
+                    state.page = totalPages;
+                    await fetchEntries();
+                    return;
+                }
+            }
+            state.total = total;
             state.items = normalized;
         } catch (error) {
             console.error(error);
             state.items = [];
+            state.total = 0;
             showToast('Failed to load entries.', 'error');
         } finally {
             setLoading(false);
@@ -458,6 +578,8 @@
         }
         state.type = value;
         state.search = '';
+        state.page = 1;
+        state.total = 0;
         if (elements.searchInput) {
             elements.searchInput.value = '';
         }
@@ -472,6 +594,16 @@
         }
         state.search = target.value;
         applyFilters();
+    }
+
+    function goToPage(page) {
+        const totalPages = state.total > 0 ? Math.max(1, Math.ceil(state.total / state.limit)) : 1;
+        const clamped = Math.min(Math.max(page, 1), totalPages);
+        if (clamped === state.page) {
+            return;
+        }
+        state.page = clamped;
+        fetchEntries();
     }
 
     function handleEscape(event) {
@@ -505,6 +637,17 @@
         }
         if (elements.searchInput) {
             elements.searchInput.addEventListener('input', handleSearchChange);
+        }
+        ensurePaginationElements();
+        if (elements.paginationPrev) {
+            elements.paginationPrev.addEventListener('click', () => {
+                goToPage(state.page - 1);
+            });
+        }
+        if (elements.paginationNext) {
+            elements.paginationNext.addEventListener('click', () => {
+                goToPage(state.page + 1);
+            });
         }
         if (elements.newButton) {
             elements.newButton.addEventListener('click', () => openEntryModal(null));
