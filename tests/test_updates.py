@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import patch
 
 from igdb.cache import IGDB_CACHE_STATE_TABLE, IGDB_CACHE_TABLE
+from sqlalchemy import text
 from updates.service import refresh_igdb_cache
 
 from tests.app_helpers import load_app
@@ -97,10 +98,13 @@ def test_refresh_igdb_cache_inserts_and_updates() -> None:
             'batch_count': 2,
         }
 
-        with db_lock:
-            rows = conn.execute(
-                f'SELECT igdb_id, name, summary FROM {IGDB_CACHE_TABLE} ORDER BY igdb_id'
-            ).fetchall()
+        with db_lock, conn.sa_connection() as sa_conn:
+            rows = sa_conn.execute(
+                text(
+                    f'SELECT igdb_id, name, summary '
+                    f'FROM {IGDB_CACHE_TABLE} ORDER BY igdb_id'
+                )
+            ).mappings().all()
         assert [(row['igdb_id'], row['name'], row['summary']) for row in rows] == [
             (100, 'Example Game', 'Original summary'),
             (200, 'Second Game', 'Summary'),
@@ -127,13 +131,16 @@ def test_refresh_igdb_cache_inserts_and_updates() -> None:
             'batch_count': 2,
         }
 
-        with db_lock:
-            updated_rows = conn.execute(
-                f'SELECT igdb_id, name, summary FROM {IGDB_CACHE_TABLE} ORDER BY igdb_id'
-            ).fetchall()
-            cached_total = conn.execute(
-                f'SELECT total_count FROM {IGDB_CACHE_STATE_TABLE} WHERE id = 1'
-            ).fetchone()
+        with db_lock, conn.sa_connection() as sa_conn:
+            updated_rows = sa_conn.execute(
+                text(
+                    f'SELECT igdb_id, name, summary '
+                    f'FROM {IGDB_CACHE_TABLE} ORDER BY igdb_id'
+                )
+            ).mappings().all()
+            cached_total = sa_conn.execute(
+                text(f'SELECT total_count FROM {IGDB_CACHE_STATE_TABLE} WHERE id = 1')
+            ).mappings().first()
 
     assert [(row['igdb_id'], row['name'], row['summary']) for row in updated_rows] == [
         (100, 'Example Game', 'Updated summary'),

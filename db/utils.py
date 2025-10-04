@@ -273,6 +273,60 @@ def get_db(
     return _fallback_connection
 
 
+@contextmanager
+def get_db_connection(
+    connection_factory: Callable[[], DatabaseHandle | DatabaseEngine] | None = None,
+    *,
+    context_key: str = 'db',
+    use_global_fallback: bool = True,
+) -> Iterator[sqlite3.Connection]:
+    """Yield a DBAPI connection from the active database handle."""
+
+    handle = get_db(
+        connection_factory,
+        context_key=context_key,
+        use_global_fallback=use_global_fallback,
+    )
+    with handle.connection() as conn:
+        yield conn
+
+
+@contextmanager
+def get_db_sa_connection(
+    connection_factory: Callable[[], DatabaseHandle | DatabaseEngine] | None = None,
+    *,
+    context_key: str = 'db',
+    use_global_fallback: bool = True,
+) -> Iterator[Connection]:
+    """Yield a SQLAlchemy :class:`~sqlalchemy.engine.Connection`."""
+
+    handle = get_db(
+        connection_factory,
+        context_key=context_key,
+        use_global_fallback=use_global_fallback,
+    )
+    with handle.sa_connection() as conn:
+        yield conn
+
+
+@contextmanager
+def get_db_session(
+    connection_factory: Callable[[], DatabaseHandle | DatabaseEngine] | None = None,
+    *,
+    context_key: str = 'db',
+    use_global_fallback: bool = True,
+) -> Iterator[Session]:
+    """Yield a SQLAlchemy :class:`~sqlalchemy.orm.Session`."""
+
+    handle = get_db(
+        connection_factory,
+        context_key=context_key,
+        use_global_fallback=use_global_fallback,
+    )
+    with handle.session() as session:
+        yield session
+
+
 def get_processed_games_columns(
     conn: sqlite3.Connection | None = None,
     *,
