@@ -23,11 +23,12 @@ from flask import (
 )
 from werkzeug.routing import BaseConverter
 
-from updates.service import refresh_igdb_cache
+from updates.service import apply_processed_game_patch, refresh_igdb_cache
 from igdb.cache import IGDB_CACHE_TABLE, get_cache_status as cache_get_status
 
 from jobs.manager import JOB_STATUS_ERROR, JOB_STATUS_PENDING, JOB_STATUS_RUNNING
 from routes.api_utils import (
+    BadRequestError,
     NotFoundError,
     UpstreamServiceError,
     handle_api_errors,
@@ -931,6 +932,37 @@ def api_updates_list():
     response.headers['ETag'] = etag_header_value
     response.headers['Cache-Control'] = 'max-age=30, stale-while-revalidate=120'
     return response
+
+@updates_blueprint.route('/api/updates/<int:processed_game_id>/apply', methods=['PATCH'])
+@handle_api_errors
+def api_updates_apply_patch(processed_game_id: int):
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, Mapping):
+        raise BadRequestError('Invalid JSON payload.')
+
+    fields = payload.get('fields')
+    if not isinstance(fields, Mapping):
+        raise BadRequestError('Invalid or missing fields payload.')
+
+    db_lock = _ctx('db_lock')
+    get_db = _ctx('get_db')
+    now_utc_iso = _ctx('now_utc_iso')
+
+    try:
+        result = apply_processed_game_patch(
+            processed_game_id,
+            fields,
+            db_lock=db_lock,
+            get_db=get_db,
+            now_utc_iso=now_utc_iso,
+        )
+    except LookupError as exc:
+        raise NotFoundError(str(exc) or 'Processed game not found.') from exc
+    except ValueError as exc:
+        raise BadRequestError(str(exc) or 'Unable to apply update.') from exc
+
+    return jsonify({'status': 'ok', 'result': result})
+
 
 @updates_blueprint.route('/api/updates/<int:processed_game_id>', methods=['GET'])
 @handle_api_errors
