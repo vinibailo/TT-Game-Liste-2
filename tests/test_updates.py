@@ -1,6 +1,5 @@
 """Unit and integration tests for IGDB cache refresh utilities."""
 from __future__ import annotations
-import sqlite3
 from threading import RLock
 from typing import Any
 from unittest.mock import patch
@@ -9,6 +8,7 @@ from igdb.cache import IGDB_CACHE_STATE_TABLE, IGDB_CACHE_TABLE
 from updates.service import refresh_igdb_cache
 
 from tests.app_helpers import load_app
+from db import utils as db_utils
 
 
 def authenticate(client: Any) -> None:
@@ -54,11 +54,11 @@ def _create_payload(
 def test_refresh_igdb_cache_inserts_and_updates() -> None:
     """Ensure ``refresh_igdb_cache`` performs inserts and updates correctly."""
 
-    conn = sqlite3.connect(':memory:')
-    conn.row_factory = sqlite3.Row
+    engine = db_utils.build_engine_from_dsn('sqlite:///:memory:')
+    conn = db_utils.DatabaseHandle(engine)
     db_lock = RLock()
 
-    def get_db() -> sqlite3.Connection:
+    def get_db() -> db_utils.DatabaseHandle:
         return conn
 
     initial_payloads = [

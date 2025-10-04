@@ -2,7 +2,6 @@ import os
 import json
 import base64
 import io
-import sqlite3
 import numbers
 import re
 import time
@@ -181,13 +180,25 @@ def _configure_logging(flask_app: Flask) -> None:
     flask_app.logger.setLevel(log_level)
     logger.setLevel(log_level)
 
-def _db_connection_factory() -> sqlite3.Connection:
-    try:
-        return db_utils.create_connection_from_dsn(
-            DB_DSN, timeout=DB_CONNECT_TIMEOUT_SECONDS
-        )
-    except ValueError as exc:  # pragma: no cover - defensive guard for new configs
-        raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
+_db_engine: db_utils.DatabaseEngine | None = None
+
+
+def _db_handle_factory() -> db_utils.DatabaseHandle:
+    global _db_engine
+
+    if _db_engine is None:
+        try:
+            _db_engine = db_utils.build_engine_from_dsn(
+                DB_DSN,
+                timeout=DB_CONNECT_TIMEOUT_SECONDS,
+                pool_size=5,
+                pool_recycle=1_800,
+                pool_pre_ping=True,
+            )
+        except ValueError as exc:  # pragma: no cover - defensive guard for new configs
+            raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
+
+    return db_utils.DatabaseHandle(_db_engine)
 
 LOOKUP_DATA_DIR = get_lookup_data_dir()
 
@@ -502,13 +513,15 @@ db_lock = db_utils.db_lock
 job_manager = jobs_manager.get_job_manager()
 
 
-def get_db() -> sqlite3.Connection:
-    return db_utils.get_db(_db_connection_factory)
+def get_db() -> db_utils.DatabaseHandle:
+    return db_utils.get_db(_db_handle_factory)
 
 
-def get_processed_games_columns(conn: sqlite3.Connection | None = None) -> set[str]:
+def get_processed_games_columns(
+    conn: sqlite3.Connection | db_utils.DatabaseHandle | None = None,
+) -> set[str]:
     return db_utils.get_processed_games_columns(
-        conn, connection_factory=_db_connection_factory
+        conn, connection_factory=_db_handle_factory
     )
 
 
@@ -961,7 +974,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
 
 
 def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
-    conn = _db_connection_factory()
+    conn = _db_handle_factory()
     try:
         with conn:
             conn.execute('PRAGMA foreign_keys = ON')
@@ -2811,7 +2824,7 @@ db = initialize_app(
     init_db=_init_db,
     load_games=load_games,
     set_games_dataframe=_set_games_dataframe,
-    connection_factory=_db_connection_factory,
+    connection_factory=_db_handle_factory,
     run_migrations=RUN_DB_MIGRATIONS,
 )
 

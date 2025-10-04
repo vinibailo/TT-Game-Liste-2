@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 from typing import Callable
 
 import pandas as pd
@@ -20,12 +19,12 @@ def initialize_app(
     init_db: Callable[..., None],
     load_games: Callable[..., pd.DataFrame],
     set_games_dataframe: Callable[..., None],
-    connection_factory: Callable[[], sqlite3.Connection],
+    connection_factory: Callable[[], db_utils.DatabaseHandle | db_utils.DatabaseEngine],
     run_migrations: bool = RUN_DB_MIGRATIONS,
     rebuild_metadata: bool = True,
     rebuild_navigator: bool = True,
     prefer_cache: bool = False,
-) -> sqlite3.Connection:
+) -> db_utils.DatabaseHandle:
     """Perform the core startup tasks required for the application.
 
     The initializer ensures filesystem directories exist, prepares the processed
@@ -42,7 +41,12 @@ def initialize_app(
     init_db(run_migrations=run_migrations)
 
     connection = connection_factory()
-    db_utils.set_fallback_connection(connection)
+    handle = (
+        connection
+        if isinstance(connection, db_utils.DatabaseHandle)
+        else db_utils.DatabaseHandle(connection)
+    )
+    db_utils.set_fallback_connection(handle)
 
     games_df = load_games(prefer_cache=prefer_cache)
 
@@ -56,7 +60,7 @@ def initialize_app(
         logger.exception("Failed to configure navigator state during startup")
         raise
 
-    return connection
+    return handle
 
 
 __all__ = ["initialize_app"]

@@ -11,6 +11,7 @@ from functools import partial
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 from config import IGDB_USER_AGENT
+from db import utils as db_utils
 from helpers import _format_first_release_date, _normalize_lookup_name
 from igdb.cache import (
     IGDB_CACHE_TABLE,
@@ -32,12 +33,13 @@ ProgressCallback = Callable[..., None]
 
 
 def _quote_identifier(identifier: str) -> str:
-    text = str(identifier or "")
-    return f'"{text.replace("\"", "\"\"")}"'
+    return db_utils._quote_identifier(identifier)
 
 
 def _fetch_row_dict(
-    conn: sqlite3.Connection, sql: str, params: Iterable[Any] | None = None
+    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    sql: str,
+    params: Iterable[Any] | None = None,
 ) -> dict[str, Any] | None:
     cursor = conn.execute(sql, tuple(params or ()))
     row = cursor.fetchone()
@@ -110,7 +112,9 @@ def _encode_lookup_id_list(values: Iterable[int]) -> str:
 
 
 def _resolve_lookup_ids(
-    conn: sqlite3.Connection, table_name: str, names: Iterable[str]
+    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    table_name: str,
+    names: Iterable[str],
 ) -> list[int]:
     identifiers: list[int] = []
     seen: set[int] = set()
@@ -141,7 +145,7 @@ def apply_processed_game_patch(
     field_actions: Mapping[str, Any],
     *,
     db_lock: Any,
-    get_db: Callable[[], sqlite3.Connection],
+    get_db: Callable[[], db_utils.DatabaseHandle],
     now_utc_iso: Callable[[], str],
 ) -> dict[str, Any]:
     """Apply cache-backed patches to a processed game entry."""
