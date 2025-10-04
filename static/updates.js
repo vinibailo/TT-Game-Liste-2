@@ -33,7 +33,13 @@
         totalAvailable: 0,
         nextAfter: null,
         updatesEtag: null,
+        activeModalId: null,
+        modalSelections: new Map(),
+        modalFieldNames: [],
+        applyingUpdate: false,
     };
+
+    const MAPPED_FIELD_NAMES = new Set(['Genres', 'Game Modes']);
 
     const JOB_TYPES = Object.freeze({
         refresh: 'refresh_updates',
@@ -124,6 +130,7 @@
         backdrop: document.querySelector('[data-modal]'),
         closeButton: document.querySelector('[data-close-modal]'),
         subtitle: document.querySelector('[data-modal-subtitle]'),
+        body: document.querySelector('[data-modal-body]'),
         gameId: document.querySelector('[data-modal-game-id]'),
         igdbId: document.querySelector('[data-modal-igdb-id]'),
         igdbUpdated: document.querySelector('[data-modal-igdb-updated]'),
@@ -131,6 +138,9 @@
         empty: document.querySelector('[data-modal-empty]'),
         diffList: document.querySelector('[data-diff-list]'),
         cover: document.querySelector('[data-modal-cover]'),
+        actions: null,
+        applyButton: null,
+        applyDefaultLabel: 'Apply',
     };
 
     const modalEmptyDefaultText = modal.empty ? modal.empty.textContent : '';
@@ -1913,6 +1923,18 @@
         return `/api/updates/${encodeURIComponent(id)}`;
     }
 
+    function buildApplyUrl(id) {
+        if (id === undefined || id === null) {
+            return null;
+        }
+        const normalized = normalizeId(id);
+        const resolvedId = normalized !== null ? normalized : id;
+        if (config.detailBaseUrl) {
+            return `${config.detailBaseUrl}/${encodeURIComponent(resolvedId)}/apply`;
+        }
+        return `/api/updates/${encodeURIComponent(resolvedId)}/apply`;
+    }
+
     function ensureCoverImageById(id, imgElement, fallbackItem) {
         if (!(imgElement instanceof HTMLImageElement)) {
             return;
@@ -2077,6 +2099,12 @@
             modal.subtitle.textContent = '';
         }
         setModalCover(null, null);
+        state.activeModalId = null;
+        state.modalSelections = new Map();
+        state.modalFieldNames = [];
+        state.applyingUpdate = false;
+        setModalInputsDisabled(false);
+        updateApplyButtonState();
         if (lastFocusedElement && document.body.contains(lastFocusedElement)) {
             lastFocusedElement.focus();
         }
@@ -2090,7 +2118,157 @@
         element.textContent = value ? String(value) : '—';
     }
 
+    function ensureModalActions() {
+        if (!modal.body) {
+            return;
+        }
+        if (modal.actions && modal.applyButton) {
+            return;
+        }
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+        actions.hidden = true;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-blue';
+        button.textContent = modal.applyDefaultLabel || 'Apply';
+        button.setAttribute('aria-disabled', 'true');
+        actions.appendChild(button);
+        modal.body.appendChild(actions);
+        modal.actions = actions;
+        modal.applyButton = button;
+        modal.applyDefaultLabel = button.textContent;
+        button.addEventListener('click', handleApplySelections);
+    }
+
+    function slugifyFieldName(field) {
+        return String(field || '')
+            .trim()
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-+|-+$/g, '')
+            .slice(0, 40) || 'field';
+    }
+
+    function normalizeFieldSelection(field, value) {
+        const action = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (action === 'from_cache_mapped') {
+            return MAPPED_FIELD_NAMES.has(field) ? 'from_cache_mapped' : 'from_cache';
+        }
+        if (action === 'from_cache') {
+            return 'from_cache';
+        }
+        if (action === 'keep_current') {
+            return 'keep_current';
+        }
+        return 'keep_current';
+    }
+
+    function buildFieldSelection(field, index, selection) {
+        const container = document.createElement('div');
+        container.className = 'diff-selection';
+        container.setAttribute('role', 'radiogroup');
+        container.setAttribute('aria-label', `Update preference for ${field}`);
+        const controlName = `diff-choice-${state.activeModalId || 'item'}-${slugifyFieldName(field)}-${index}`;
+        const options = [
+            {
+                value: 'keep_current',
+                label: 'Keep current value',
+            },
+            {
+                value: MAPPED_FIELD_NAMES.has(field) ? 'from_cache_mapped' : 'from_cache',
+                label: MAPPED_FIELD_NAMES.has(field)
+                    ? 'Use IGDB value (mapped)'
+                    : 'Use IGDB value',
+            },
+        ];
+        options.forEach((option) => {
+            const optionId = `${controlName}-${option.value}`;
+            const label = document.createElement('label');
+            label.className = 'diff-option';
+            const input = document.createElement('input');
+            input.type = 'radio';
+            input.name = controlName;
+            input.id = optionId;
+            input.value = option.value;
+            input.dataset.fieldName = field;
+            input.checked = selection === option.value;
+            input.disabled = state.applyingUpdate;
+            input.addEventListener('change', () => {
+                if (input.checked) {
+                    state.modalSelections.set(field, normalizeFieldSelection(field, option.value));
+                    updateApplyButtonState();
+                }
+            });
+            const text = document.createElement('span');
+            text.textContent = option.label;
+            label.appendChild(input);
+            label.appendChild(text);
+            container.appendChild(label);
+        });
+        return container;
+    }
+
+    function buildDiffSection(field, payload, index, selection) {
+        const section = document.createElement('section');
+        section.className = 'diff-field';
+        const heading = document.createElement('h3');
+        heading.textContent = field;
+        section.appendChild(heading);
+        const columns = document.createElement('div');
+        columns.className = 'diff-columns';
+        columns.appendChild(buildDiffColumn('IGDB', payload.added, 'diff-added'));
+        columns.appendChild(buildDiffColumn('Local', payload.removed, 'diff-removed'));
+        section.appendChild(columns);
+        section.appendChild(buildFieldSelection(field, index, selection));
+        return section;
+    }
+
+    function updateApplyButtonState() {
+        if (!modal.actions || !modal.applyButton) {
+            return;
+        }
+        const hasFields = state.activeModalId !== null && state.modalFieldNames.length > 0;
+        modal.actions.hidden = !hasFields;
+        const button = modal.applyButton;
+        if (!hasFields) {
+            button.disabled = true;
+            button.setAttribute('aria-disabled', 'true');
+            button.removeAttribute('aria-busy');
+            button.textContent = modal.applyDefaultLabel || 'Apply';
+            return;
+        }
+        let hasSelection = false;
+        state.modalFieldNames.forEach((field) => {
+            const value = state.modalSelections.get(field) || 'keep_current';
+            if (value !== 'keep_current') {
+                hasSelection = true;
+            }
+        });
+        const shouldDisable = !hasSelection || state.applyingUpdate;
+        button.disabled = shouldDisable;
+        button.setAttribute('aria-disabled', shouldDisable ? 'true' : 'false');
+        if (state.applyingUpdate) {
+            button.textContent = 'Applying…';
+            button.setAttribute('aria-busy', 'true');
+        } else {
+            button.textContent = modal.applyDefaultLabel || 'Apply';
+            button.removeAttribute('aria-busy');
+        }
+    }
+
+    function setModalInputsDisabled(disabled) {
+        if (!modal.diffList) {
+            return;
+        }
+        const inputs = modal.diffList.querySelectorAll('input[type="radio"]');
+        inputs.forEach((input) => {
+            input.disabled = disabled;
+        });
+    }
+
     function renderDiff(diff) {
+        ensureModalActions();
         if (!modal.diffList || !modal.empty) {
             return;
         }
@@ -2099,25 +2277,27 @@
         const entries = Object.entries(diff || {});
         if (!entries.length) {
             modal.empty.hidden = false;
+            state.modalSelections = new Map();
+            state.modalFieldNames = [];
+            updateApplyButtonState();
             return;
         }
         modal.empty.hidden = true;
         entries.sort((a, b) => a[0].localeCompare(b[0]));
+        const previousSelections =
+            state.modalSelections instanceof Map ? state.modalSelections : new Map();
+        const nextSelections = new Map();
         const fragment = document.createDocumentFragment();
-        entries.forEach(([field, payload]) => {
-            const section = document.createElement('section');
-            section.className = 'diff-field';
-            const heading = document.createElement('h3');
-            heading.textContent = field;
-            section.appendChild(heading);
-            const columns = document.createElement('div');
-            columns.className = 'diff-columns';
-            columns.appendChild(buildDiffColumn('IGDB', payload.added, 'diff-added'));
-            columns.appendChild(buildDiffColumn('Local', payload.removed, 'diff-removed'));
-            section.appendChild(columns);
-            fragment.appendChild(section);
+        entries.forEach(([field, payload], index) => {
+            const selection = normalizeFieldSelection(field, previousSelections.get(field));
+            nextSelections.set(field, selection);
+            fragment.appendChild(buildDiffSection(field, payload, index, selection));
         });
+        state.modalSelections = nextSelections;
+        state.modalFieldNames = Array.from(nextSelections.keys());
         modal.diffList.appendChild(fragment);
+        updateApplyButtonState();
+        setModalInputsDisabled(state.applyingUpdate);
     }
 
     function buildDiffColumn(label, value, modifier) {
@@ -2150,12 +2330,195 @@
         return column;
     }
 
+    function applyDetailToUpdate(detail) {
+        if (!detail || typeof detail !== 'object') {
+            return null;
+        }
+        const normalizedId = normalizeId(detail.processed_game_id);
+        const lookupId = normalizedId !== null ? normalizedId : detail.processed_game_id;
+        const update = getUpdateById(lookupId);
+        if (!update) {
+            return null;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'processed_game_id')) {
+            update.processed_game_id = detail.processed_game_id;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'igdb_id')) {
+            update.igdb_id = detail.igdb_id;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'igdb_updated_at')) {
+            update.igdb_updated_at = detail.igdb_updated_at;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'local_last_edited_at')) {
+            update.local_last_edited_at = detail.local_last_edited_at;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'refreshed_at')) {
+            update.refreshed_at = detail.refreshed_at;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'name')) {
+            update.name = detail.name || update.name;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'cover_url')) {
+            update.cover_url = detail.cover_url || null;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'cover_available')) {
+            update.cover_available = detail.cover_available !== false;
+        }
+        if (Object.prototype.hasOwnProperty.call(detail, 'diff')) {
+            const diffPayload = detail.diff || {};
+            update.has_diff = Boolean(diffPayload && Object.keys(diffPayload).length);
+        }
+        update.detail_available = detail.detail_available !== false;
+        return update;
+    }
+
+    function applyDetailToModal(detail, fallbackUpdate = null) {
+        if (!detail || typeof detail !== 'object') {
+            if (modal.diffList) {
+                modal.diffList.innerHTML = '';
+            }
+            if (modal.empty) {
+                modal.empty.textContent = 'Failed to load changes for this game.';
+                modal.empty.hidden = false;
+            }
+            state.modalSelections = new Map();
+            state.modalFieldNames = [];
+            updateApplyButtonState();
+            return;
+        }
+        const normalizedId = normalizeId(detail.processed_game_id);
+        if (normalizedId !== null) {
+            state.activeModalId = normalizedId;
+        }
+        const update =
+            fallbackUpdate ||
+            getUpdateById(normalizedId !== null ? normalizedId : detail.processed_game_id) ||
+            null;
+        setMetaValue(modal.gameId, detail.processed_game_id);
+        setMetaValue(modal.igdbId, detail.igdb_id);
+        setMetaValue(modal.igdbUpdated, formatDate(detail.igdb_updated_at));
+        setMetaValue(modal.localEdited, formatDate(detail.local_last_edited_at));
+        const resolvedName = detail.name || (update && update.name) || '';
+        const coverSource = detail.cover_url || (update && update.cover_url) || null;
+        setModalCover(coverSource, resolvedName);
+        ensureCoverImageById(detail.processed_game_id, modal.cover, update || detail);
+        if (modal.subtitle) {
+            const refreshed = formatDate(detail.refreshed_at);
+            if (resolvedName && refreshed) {
+                modal.subtitle.textContent = `${resolvedName} • Refreshed ${refreshed}`;
+            } else if (resolvedName) {
+                modal.subtitle.textContent = resolvedName;
+            } else if (refreshed) {
+                modal.subtitle.textContent = `Refreshed ${refreshed}`;
+            } else {
+                modal.subtitle.textContent = '';
+            }
+        }
+        state.modalSelections = new Map();
+        state.modalFieldNames = [];
+        renderDiff(detail.diff);
+    }
+
+    async function handleApplySelections() {
+        if (state.applyingUpdate) {
+            return;
+        }
+        const processedId = state.activeModalId;
+        if (processedId === null) {
+            showToast('Select a game to apply updates first.', 'warning');
+            return;
+        }
+        if (!Array.isArray(state.modalFieldNames) || !state.modalFieldNames.length) {
+            showToast('No IGDB fields are available to apply.', 'warning');
+            return;
+        }
+        const fieldsPayload = {};
+        let hasSelection = false;
+        state.modalFieldNames.forEach((field) => {
+            const value = state.modalSelections.get(field) || 'keep_current';
+            fieldsPayload[field] = value;
+            if (value !== 'keep_current') {
+                hasSelection = true;
+            }
+        });
+        if (!hasSelection) {
+            showToast('Select at least one IGDB value to apply.', 'warning');
+            return;
+        }
+        const url = buildApplyUrl(processedId);
+        if (!url) {
+            showToast('Apply endpoint is not configured.', 'warning');
+            return;
+        }
+        state.applyingUpdate = true;
+        updateApplyButtonState();
+        setModalInputsDisabled(true);
+        try {
+            const payload = await fetchJson(url, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fields: fieldsPayload }),
+            });
+            let lastEdited = null;
+            if (payload && typeof payload === 'object') {
+                const result = payload.result && typeof payload.result === 'object' ? payload.result : null;
+                const candidate =
+                    (result && (result.last_edited_at || result.lastEditedAt)) ||
+                    payload.last_edited_at ||
+                    payload.lastEditedAt ||
+                    null;
+                if (typeof candidate === 'string' && candidate.trim()) {
+                    lastEdited = candidate.trim();
+                }
+            }
+            const update = getUpdateById(processedId);
+            if (update && lastEdited) {
+                update.local_last_edited_at = lastEdited;
+            }
+            state.detailCache.delete(processedId);
+            state.detailCache.delete(String(processedId));
+            const detail = await fetchDiffDetail(processedId);
+            const appliedUpdate = applyDetailToUpdate(detail) || update;
+            applyDetailToModal(detail, appliedUpdate || update);
+            applyFilters();
+            persistUpdatesCache();
+            showToast('Applied selected IGDB fields.', 'success');
+        } catch (error) {
+            console.error('Failed to apply IGDB fields', error);
+            const message = error && error.message ? error.message : 'Failed to apply selected IGDB values.';
+            showToast(message, 'warning');
+        } finally {
+            state.applyingUpdate = false;
+            setModalInputsDisabled(false);
+            updateApplyButtonState();
+        }
+    }
+
     async function openDiffModal(id) {
         const update = getUpdateById(id);
         if (!update) {
             showToast('Unable to find update details for that game.', 'warning');
             return;
         }
+        const normalizedId = normalizeId(id);
+        let activeId = normalizedId;
+        if (activeId === null) {
+            const processedIdentifier = update.processed_game_id;
+            const normalizedProcessed = normalizeId(processedIdentifier);
+            if (normalizedProcessed !== null) {
+                activeId = normalizedProcessed;
+            } else if (processedIdentifier !== undefined && processedIdentifier !== null) {
+                activeId = processedIdentifier;
+            } else if (id !== undefined && id !== null) {
+                activeId = id;
+            }
+        }
+        state.activeModalId = activeId;
+        state.modalSelections = new Map();
+        state.modalFieldNames = [];
+        state.applyingUpdate = false;
+        updateApplyButtonState();
+        setModalInputsDisabled(false);
         showModalShell();
         setModalCover(update.cover_url, update.name);
         ensureCoverImageById(id, modal.cover, update);
@@ -2175,29 +2538,8 @@
         }
         try {
             const detail = await fetchDiffDetail(id);
-            const normalizedId = normalizeId(id);
-            if (detail && typeof detail === 'object' && update) {
-                if (Object.prototype.hasOwnProperty.call(detail, 'cover_available')) {
-                    update.cover_available = detail.cover_available !== false;
-                }
-                if (Object.prototype.hasOwnProperty.call(detail, 'cover_url')) {
-                    update.cover_url = detail.cover_url || update.cover_url;
-                }
-            }
-            setMetaValue(modal.gameId, detail.processed_game_id);
-            setMetaValue(modal.igdbId, detail.igdb_id);
-            setMetaValue(modal.igdbUpdated, formatDate(detail.igdb_updated_at));
-            setMetaValue(modal.localEdited, formatDate(detail.local_last_edited_at));
-            const modalSource = detail.cover_url || update.cover_url;
-            setModalCover(modalSource, detail.name || update.name);
-            ensureCoverImageById(id, modal.cover, update || detail);
-            if (modal.subtitle) {
-                const refreshed = formatDate(detail.refreshed_at);
-                modal.subtitle.textContent = detail.name
-                    ? `${detail.name} • Refreshed ${refreshed}`
-                    : `Refreshed ${refreshed}`;
-            }
-            renderDiff(detail.diff);
+            const appliedUpdate = applyDetailToUpdate(detail) || update;
+            applyDetailToModal(detail, appliedUpdate || update);
         } catch (error) {
             console.error(error);
             if (modal.empty) {
@@ -2205,6 +2547,9 @@
                 modal.empty.hidden = false;
             }
             showToast(error.message, 'warning');
+            state.modalSelections = new Map();
+            state.modalFieldNames = [];
+            updateApplyButtonState();
         }
     }
 
