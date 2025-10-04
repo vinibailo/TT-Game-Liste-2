@@ -216,7 +216,6 @@ def updates_page():
     return render_template(
         'updates.html',
         igdb_batch_size=_ctx('IGDB_BATCH_SIZE'),
-        FIX_NAMES_BATCH_LIMIT=_ctx('FIX_NAMES_BATCH_LIMIT'),
     )
 
 
@@ -621,74 +620,6 @@ def api_updates_compare():
     response = jsonify({'status': 'accepted', 'job': job, 'created': created})
     if job:
         response.headers['Location'] = url_for('updates.api_updates_job_detail', job_id=job['id'])
-    return response, status_code
-
-
-@updates_blueprint.route('/api/updates/fix-names', methods=['POST'])
-@handle_api_errors
-def api_updates_fix_names():
-    payload = request.get_json(silent=True) or {}
-    limit_default = _ctx('FIX_NAMES_BATCH_LIMIT')
-    try:
-        offset = int(payload.get('offset', 0))
-    except (TypeError, ValueError):
-        offset = 0
-    try:
-        limit = int(payload.get('limit', limit_default))
-    except (TypeError, ValueError):
-        limit = limit_default
-    if offset < 0:
-        offset = 0
-    if limit <= 0:
-        limit = limit_default
-    job_manager = _ctx('job_manager')
-    execute_fix_names_job = _ctx('fix_names_job')
-
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
-    if run_sync:
-        result = execute_fix_names_job(
-            lambda **_kwargs: None,
-            offset=offset,
-            limit=limit,
-            process_all=False,
-        )
-        return jsonify(result)
-
-    job, created = job_manager.enqueue_job(
-        'fix_names',
-        'app._execute_fix_names_job',
-        description='Fixing IGDB names…',
-    )
-    status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
-    if job:
-        response.headers['Location'] = url_for(
-            'updates.api_updates_job_detail', job_id=job['id']
-        )
-    return response, status_code
-
-
-@updates_blueprint.route('/api/updates/remove-duplicates', methods=['POST'])
-@handle_api_errors
-def api_updates_remove_duplicates():
-    job_manager = _ctx('job_manager')
-    execute_remove_duplicates_job = _ctx('remove_duplicates_job')
-
-    run_sync = request.args.get('sync') not in (None, '', '0', 'false', 'False') or current_app.config.get('TESTING')
-    if run_sync:
-        return jsonify(execute_remove_duplicates_job(lambda **_kwargs: None))
-
-    job, created = job_manager.enqueue_job(
-        'remove_duplicates',
-        'app._execute_remove_duplicates_job',
-        description='Removing duplicates…',
-    )
-    status_code = 202 if created else 200
-    response = jsonify({'status': 'accepted', 'job': job, 'created': created})
-    if job:
-        response.headers['Location'] = url_for(
-            'updates.api_updates_job_detail', job_id=job['id']
-        )
     return response, status_code
 
 
