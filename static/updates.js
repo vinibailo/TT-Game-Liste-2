@@ -106,8 +106,6 @@
         countLabel: document.querySelector('[data-count]'),
         statusLabel: document.querySelector('[data-refresh-status]'),
         sortButtons: Array.from(document.querySelectorAll('.sort-button[data-sort]')),
-        fixButton: document.querySelector('[data-fix-names]'),
-        dedupeButton: document.querySelector('[data-remove-duplicates]'),
         taskBanner: document.querySelector('[data-task-banner]'),
         taskList: document.querySelector('[data-task-list]'),
         cacheStatusMessage: document.querySelector('[data-cache-status-message]'),
@@ -1972,58 +1970,6 @@
         return payload;
     }
 
-    async function handleFixNames() {
-        if (state.fixingNames) {
-            return;
-        }
-        if (!config.fixNamesUrl) {
-            showToast('Name fixing endpoint is not configured.', 'warning');
-            return;
-        }
-        state.fixingNames = true;
-        setFixButtonLoading(true);
-        setFixProgressVisible(true);
-        updateFixProgress(0, 0);
-        try {
-            const job = await startJob(config.fixNamesUrl);
-            monitorJob(job);
-        } catch (error) {
-            console.error(error);
-            showToast(error.message, 'warning');
-            state.fixingNames = false;
-            setFixButtonLoading(false);
-            updateFixProgress(0, 0);
-            setFixProgressVisible(false);
-        } finally {
-            // Loading state will be reset when the job completes or fails.
-        }
-    }
-
-    async function handleRemoveDuplicates() {
-        if (state.deduping) {
-            return;
-        }
-        if (!config.removeDuplicatesUrl) {
-            showToast('Duplicate removal endpoint is not configured.', 'warning');
-            return;
-        }
-        state.deduping = true;
-        setDedupeButtonLoading(true);
-        setDedupeProgressVisible(true);
-        updateDedupeProgress(0, 0);
-        try {
-            const job = await startJob(config.removeDuplicatesUrl);
-            monitorJob(job);
-        } catch (error) {
-            console.error(error);
-            showToast(error.message, 'warning');
-            state.deduping = false;
-            setDedupeButtonLoading(false);
-            updateDedupeProgress(0, 0);
-            setDedupeProgressVisible(false);
-        }
-    }
-
     async function handleDeleteDuplicate(item, button) {
         if (!item || !item.processed_game_id) {
             return;
@@ -2870,12 +2816,6 @@
         }
         if (elements.compareButton) {
             elements.compareButton.addEventListener('click', handleCompare);
-        }
-        if (elements.fixButton) {
-            elements.fixButton.addEventListener('click', handleFixNames);
-        }
-        if (elements.dedupeButton) {
-            elements.dedupeButton.addEventListener('click', handleRemoveDuplicates);
         }
         if (modal.closeButton) {
             modal.closeButton.addEventListener('click', closeModal);
