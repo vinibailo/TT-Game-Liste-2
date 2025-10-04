@@ -49,6 +49,8 @@ def load_app(tmp_path: Path) -> object:
         module.app.config['TESTING'] = True
         module.app.testing = True
 
+    run_migrations = bool(getattr(module, "RUN_DB_MIGRATIONS", False))
+
     if hasattr(module, "routes_updates"):
         module.routes_updates._context['validate_igdb_credentials'] = lambda: True
         def _format_refresh_response(payload, *, offset, limit):
@@ -77,19 +79,39 @@ def load_app(tmp_path: Path) -> object:
             lambda **_kwargs: ('token', 'client')
         )
 
-    if hasattr(module, "_load_lookup_tables") and hasattr(module, "db"):
+    if hasattr(module, "_ensure_lookup_join_tables") and hasattr(module, "db"):
+        with module.db_lock:
+            module._ensure_lookup_join_tables(module.db)
+
+    if (
+        run_migrations
+        and hasattr(module, "_load_lookup_tables")
+        and hasattr(module, "db")
+    ):
         with module.db_lock:
             module._load_lookup_tables(module.db)
 
-    if hasattr(module, "_recreate_lookup_join_tables") and hasattr(module, "db"):
+    if (
+        run_migrations
+        and hasattr(module, "_recreate_lookup_join_tables")
+        and hasattr(module, "db")
+    ):
         with module.db_lock:
             module._recreate_lookup_join_tables(module.db)
 
-    if hasattr(module, "_backfill_lookup_relations") and hasattr(module, "db"):
+    if (
+        run_migrations
+        and hasattr(module, "_backfill_lookup_relations")
+        and hasattr(module, "db")
+    ):
         with module.db_lock:
             module._backfill_lookup_relations(module.db)
 
-    if hasattr(module, "_ensure_lookup_id_columns") and hasattr(module, "db"):
+    if (
+        run_migrations
+        and hasattr(module, "_ensure_lookup_id_columns")
+        and hasattr(module, "db")
+    ):
         with module.db_lock:
             module._ensure_lookup_id_columns(module.db)
 

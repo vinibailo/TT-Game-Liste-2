@@ -192,6 +192,25 @@ class StubJobManager:
         return list(self._history)
 
 
+def test_updates_endpoint_initializes_lookup_tables_without_migrations(tmp_path, monkeypatch):
+    monkeypatch.setenv('RUN_DB_MIGRATIONS', '0')
+    app_module = load_app(tmp_path)
+    client = app_module.app.test_client()
+    authenticate(client)
+
+    response = client.get('/api/updates')
+    assert response.status_code == 200
+
+    with app_module.db_lock:
+        for relation in app_module.LOOKUP_RELATIONS:
+            join_table = relation['join_table']
+            cursor = app_module.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (join_table,),
+            )
+            assert cursor.fetchone() is not None, f"{join_table} was not created"
+
+
 def test_updates_refresh_returns_progress(tmp_path):
     app_module = load_app(tmp_path)
     client = app_module.app.test_client()
