@@ -3980,6 +3980,7 @@ def configure_blueprints(flask_app: Flask) -> None:
         'exchange_twitch_credentials': lambda: exchange_twitch_credentials,
         'db_lock': db_lock,
         'get_db': get_db,
+        'now_utc_iso': now_utc_iso,
         '_get_cached_igdb_total': _get_cached_igdb_total,
         '_set_cached_igdb_total': _set_cached_igdb_total,
         'download_igdb_game_count': lambda: download_igdb_game_count,
