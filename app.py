@@ -656,6 +656,35 @@ def _recreate_lookup_join_tables(conn: sqlite3.Connection) -> None:
             logger.exception('Failed to recreate join table %s', join_table)
 
 
+def _ensure_lookup_join_tables(conn: sqlite3.Connection) -> None:
+    for relation in LOOKUP_RELATIONS:
+        join_table = relation['join_table']
+        join_column = relation['join_column']
+        lookup_table = relation['lookup_table']
+        try:
+            conn.execute(
+                f'''
+                    CREATE TABLE IF NOT EXISTS {join_table} (
+                        processed_game_id INTEGER NOT NULL,
+                        {join_column} INTEGER NOT NULL,
+                        PRIMARY KEY (processed_game_id, {join_column}),
+                        FOREIGN KEY(processed_game_id)
+                            REFERENCES processed_games("ID") ON DELETE CASCADE,
+                        FOREIGN KEY({join_column})
+                            REFERENCES {lookup_table}(id) ON DELETE CASCADE
+                    )
+                '''
+            )
+            conn.execute(
+                f'''
+                    CREATE INDEX IF NOT EXISTS {join_table}_processed_game_idx
+                    ON {join_table} (processed_game_id)
+                '''
+            )
+        except sqlite3.OperationalError:
+            logger.exception('Failed to ensure join table %s exists', join_table)
+
+
 def _persist_lookup_relations(
     conn: sqlite3.Connection,
     processed_game_id: int,
@@ -1163,6 +1192,8 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     )
                     '''
                 )
+
+            _ensure_lookup_join_tables(conn)
 
             if run_migrations:
                 _load_lookup_tables(conn)
