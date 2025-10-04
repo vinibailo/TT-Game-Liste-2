@@ -42,34 +42,21 @@ except ModuleNotFoundError:
 
     db_lock = Lock()
 
-    def _configure_sqlite_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
-        busy_timeout_ms = int(max(DB_CONNECT_TIMEOUT_SECONDS, 0) * 1000)
-        pragmas: tuple[tuple[str, str | int | float | None, bool], ...] = (
-            ("busy_timeout", busy_timeout_ms if busy_timeout_ms > 0 else None, False),
-            ("journal_mode", "WAL", True),
-            ("mmap_size", 268_435_456, False),
-            ("cache_size", -200_000, False),
+    try:
+        engine = db_utils.build_engine_from_dsn(
+            DB_DSN,
+            timeout=DB_CONNECT_TIMEOUT_SECONDS,
+            pool_size=1,
+            pool_recycle=1_800,
+            pool_pre_ping=True,
         )
-        for name, value, fetch_result in pragmas:
-            if value is None:
-                continue
-            try:
-                cursor = conn.execute(f"PRAGMA {name}={value}")
-                if fetch_result:
-                    cursor.fetchone()
-            except sqlite3.OperationalError:
-                continue
-        return conn
+    except ValueError as exc:  # pragma: no cover - defensive for unsupported DSNs
+        raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
 
-    def get_db() -> sqlite3.Connection:
-        try:
-            conn = db_utils.create_connection_from_dsn(
-                DB_DSN, timeout=DB_CONNECT_TIMEOUT_SECONDS
-            )
-        except ValueError as exc:  # pragma: no cover - defensive for unsupported DSNs
-            raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
-        conn.row_factory = sqlite3.Row
-        return _configure_sqlite_connection(conn)
+    db_handle = db_utils.DatabaseHandle(engine)
+
+    def get_db() -> db_utils.DatabaseHandle:
+        return db_handle
 
     def _is_nan(value: Any) -> bool:
         try:
@@ -280,7 +267,9 @@ def _normalize_text(value: Any) -> str:
     return text
 
 
-def _load_processed_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _load_processed_rows(
+    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+) -> list[sqlite3.Row]:
     """Load all processed game rows with their identifiers and names."""
 
     with db_lock:
@@ -293,7 +282,7 @@ def _load_processed_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def rename_processed_games_from_igdb(
     *,
-    conn: sqlite3.Connection | None = None,
+    conn: db_utils.DatabaseHandle | sqlite3.Connection | None = None,
     exchange_credentials: Callable[[], tuple[str, str]] | None = None,
     metadata_loader: Callable[[str, str, Iterable[str]], Mapping[str, Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:

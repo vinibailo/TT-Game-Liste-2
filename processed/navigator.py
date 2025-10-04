@@ -10,6 +10,7 @@ import pandas as pd
 import sqlite3
 
 from . import source_index_cache
+from db import utils as db_utils
 
 
 class GameNavigator:
@@ -19,7 +20,7 @@ class GameNavigator:
         self,
         *,
         db_lock: Lock,
-        get_db: Callable[[], sqlite3.Connection],
+        get_db: Callable[[], db_utils.DatabaseHandle],
         is_processed_game_done: Callable[[Any, Any], bool],
         logger: logging.Logger | None = None,
     ) -> None:

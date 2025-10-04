@@ -20,10 +20,10 @@ _igdb_client = IGDBClient()
 def _quote(name: str) -> str:
     """Return a safely quoted identifier for SQLite statements."""
 
-    return db_utils._quote_identifier(name)  # type: ignore[attr-defined]
+    return db_utils._quote_identifier(name)
 
 
-def _ensure_cache_state_table(conn: sqlite3.Connection) -> None:
+def _ensure_cache_state_table(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_STATE_TABLE)} (
@@ -35,7 +35,7 @@ def _ensure_cache_state_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def _ensure_games_table(conn: sqlite3.Connection) -> None:
+def _ensure_games_table(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_TABLE)} (
@@ -68,7 +68,7 @@ def _ensure_games_table(conn: sqlite3.Connection) -> None:
 def _ensure_postgres_cache_index(conn: Any) -> None:
     """Ensure the Postgres cache index exists when ``conn`` is a PG connection."""
 
-    if isinstance(conn, sqlite3.Connection):
+    if isinstance(conn, (sqlite3.Connection, db_utils.DatabaseHandle)):
         return
 
     cursor_factory = getattr(conn, "cursor", None)
@@ -102,7 +102,7 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_cached_total(conn: sqlite3.Connection) -> int | None:
+def get_cached_total(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> int | None:
     """Return the cached IGDB total game count, if present."""
 
     _ensure_cache_state_table(conn)
@@ -129,7 +129,10 @@ def get_cached_total(conn: sqlite3.Connection) -> int | None:
 
 
 def set_cached_total(
-    conn: sqlite3.Connection, total: int | None, *, synced_at: str | None = None
+    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    total: int | None,
+    *,
+    synced_at: str | None = None,
 ) -> None:
     """Persist the IGDB total game count in the cache state table."""
 
@@ -147,7 +150,7 @@ def set_cached_total(
     )
 
 
-def get_cache_status(conn: sqlite3.Connection) -> dict[str, Any]:
+def get_cache_status(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> dict[str, Any]:
     """Return aggregate information about the local IGDB cache."""
 
     _ensure_cache_state_table(conn)
@@ -269,7 +272,8 @@ def _row_lookup(row: Any, key: str, index: int) -> Any:
 
 
 def upsert_igdb_games(
-    conn: sqlite3.Connection, games: Iterable[Mapping[str, Any]]
+    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    games: Iterable[Mapping[str, Any]],
 ) -> tuple[int, int, int]:
     """Insert or update IGDB cache entries based on payloads."""
 
