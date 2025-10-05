@@ -31,7 +31,8 @@ from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
-from sqlalchemy import inspect, text
+from sqlalchemy import Column, Integer, MetaData, String, Table, inspect, select, text
+from sqlalchemy import types as sqltypes
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy import exc as sa_exc
 
@@ -1039,39 +1040,41 @@ def _backfill_lookup_relations(conn: ConnectionLike) -> None:
     _with_lookup_connection(conn, _execute, write=True)
 
 
-def _migrate_id_column(conn: Any) -> None:
+def _migrate_id_column(conn: Connection) -> None:
     try:
-        cur = conn.execute('PRAGMA table_info(processed_games)')
+        inspector = inspect(conn)
+        columns = inspector.get_columns('processed_games')
     except sa_exc.SQLAlchemyError:
         return
 
-    cols = cur.fetchall()
-    if not cols:
+    if not columns:
         return
 
-    id_col = next((c for c in cols if c[1] == 'ID'), None)
-    has_source_index = any(c[1] == 'Source Index' for c in cols)
-    id_type = str(id_col[2]).upper() if id_col and id_col[2] is not None else ''
-    id_pk = id_col[5] if id_col else 0
-    if id_col and id_type == 'INTEGER' and id_pk == 1:
+    id_column = next((col for col in columns if col['name'] == 'ID'), None)
+    if id_column is None:
+        return
+
+    pk_constraint = inspector.get_pk_constraint('processed_games')
+    pk_columns = set(pk_constraint.get('constrained_columns') or [])
+
+    if isinstance(id_column.get('type'), sqltypes.Integer) and 'ID' in pk_columns:
+        return
+
+    has_source_index = any(col['name'] == 'Source Index' for col in columns)
+
+    try:
+        processed_table = Table('processed_games', MetaData(), autoload_with=conn)
+    except sa_exc.SQLAlchemyError:
         return
 
     try:
-        cur = conn.execute('SELECT * FROM processed_games ORDER BY rowid')
+        result = conn.execute(select(processed_table).order_by(processed_table.c.ID))
     except sa_exc.SQLAlchemyError:
-        rows: list[Mapping[str, Any]] = []
-        column_names: list[str] = []
+        rows: Sequence[Mapping[str, Any]] = []
     else:
-        rows = cur.fetchall()
-        column_names = [desc[0] for desc in cur.description] if cur.description else []
+        rows = result.mappings().all()
 
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        record: dict[str, Any] = {}
-        for idx, column in enumerate(column_names):
-            if idx < len(row):
-                record[column] = row[idx]
-        records.append(record)
+    records = [dict(row) for row in rows]
 
     desired_columns = [
         'ID',
@@ -1110,18 +1113,18 @@ def _migrate_id_column(conn: Any) -> None:
                 return None
             candidate = int(float_value)
         else:
-            text = str(value).strip()
-            if not text:
+            text_value = str(value).strip()
+            if not text_value:
                 return None
             try:
-                candidate = int(text)
+                candidate = int(text_value)
             except ValueError:
                 return None
         return candidate
 
     used_ids: set[int] = set()
-    new_rows: list[tuple[Any, ...]] = []
     next_id = 1
+    new_rows: list[dict[str, Any]] = []
     for record in records:
         candidate = _coerce_old_id(record.get('ID'))
         if candidate is not None and candidate > 0 and candidate not in used_ids:
@@ -1133,85 +1136,121 @@ def _migrate_id_column(conn: Any) -> None:
             next_id += 1
         used_ids.add(new_id)
 
-        row_values: list[Any] = []
+        row_data: dict[str, Any] = {}
         for column in desired_columns:
             if column == 'ID':
-                row_values.append(new_id)
+                row_data[column] = new_id
             else:
-                row_values.append(record.get(column))
-        new_rows.append(tuple(row_values))
+                row_data[column] = record.get(column)
+        new_rows.append(row_data)
 
-    columns_sql = ', '.join(_quote_identifier(column) for column in desired_columns)
-    placeholders = ', '.join('?' for _ in desired_columns)
+    metadata = MetaData()
+    new_table = Table(
+        'processed_games',
+        metadata,
+        Column('ID', Integer, primary_key=True),
+        Column('Source Index', String, unique=True),
+        Column('Name', String),
+        Column('Summary', String),
+        Column('First Launch Date', String),
+        Column('Developers', String),
+        Column('developers_ids', String),
+        Column('Publishers', String),
+        Column('publishers_ids', String),
+        Column('Genres', String),
+        Column('genres_ids', String),
+        Column('Game Modes', String),
+        Column('game_modes_ids', String),
+        Column('Category', String),
+        Column('Platforms', String),
+        Column('platforms_ids', String),
+        Column('igdb_id', String),
+        Column('Cover Path', String),
+        Column('Width', Integer),
+        Column('Height', Integer),
+        Column('cache_rank', Integer),
+        Column('last_edited_at', String),
+    )
 
-    conn.execute('PRAGMA foreign_keys = OFF')
-    try:
-        conn.execute('ALTER TABLE processed_games RENAME TO processed_games_old')
-        conn.execute(
-            '''
-            CREATE TABLE processed_games (
-                "ID" INTEGER PRIMARY KEY,
-                "Source Index" TEXT UNIQUE,
-                "Name" TEXT,
-                "Summary" TEXT,
-                "First Launch Date" TEXT,
-                "Developers" TEXT,
-                "developers_ids" TEXT,
-                "Publishers" TEXT,
-                "publishers_ids" TEXT,
-                "Genres" TEXT,
-                "genres_ids" TEXT,
-                "Game Modes" TEXT,
-                "game_modes_ids" TEXT,
-                "Category" TEXT,
-                "Platforms" TEXT,
-                "platforms_ids" TEXT,
-                "igdb_id" TEXT,
-                "Cover Path" TEXT,
-                "Width" INTEGER,
-                "Height" INTEGER,
-                cache_rank INTEGER,
-                last_edited_at TEXT
-            )
-            '''
-        )
-        if new_rows:
-            conn.executemany(
-                f'INSERT INTO processed_games ({columns_sql}) VALUES ({placeholders})',
-                new_rows,
-            )
-        if has_source_index:
-            try:
-                conn.execute(
-                    '''
-                    UPDATE igdb_updates
-                    SET processed_game_id = (
-                        SELECT pg."ID"
-                        FROM processed_games AS pg
-                        JOIN processed_games_old AS old
-                            ON old."Source Index" = pg."Source Index"
-                        WHERE old."ID" = igdb_updates.processed_game_id
-                        LIMIT 1
-                    )
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM processed_games_old AS old
-                        WHERE old."ID" = igdb_updates.processed_game_id
-                    )
-                    '''
+    processed_games_table = _quote_identifier('processed_games')
+    processed_games_old_table = _quote_identifier('processed_games_old')
+    igdb_updates_table = _quote_identifier('igdb_updates')
+    processed_game_id = _quote_identifier('processed_game_id')
+    source_index = _quote_identifier('Source Index')
+    id_column_name = _quote_identifier('ID')
+
+    disable_fk_stmt = text('PRAGMA foreign_keys = OFF')
+    enable_fk_stmt = text('PRAGMA foreign_keys = ON')
+    if conn.dialect.name != 'sqlite':
+        disable_fk_stmt = text('SET FOREIGN_KEY_CHECKS = 0')
+        enable_fk_stmt = text('SET FOREIGN_KEY_CHECKS = 1')
+
+    existing_tables = set(inspector.get_table_names())
+
+    with conn.begin():
+        conn.execute(disable_fk_stmt)
+        try:
+            if 'processed_games_old' in existing_tables:
+                conn.execute(text(f'DROP TABLE {processed_games_old_table}'))
+
+            conn.execute(
+                text(
+                    f'ALTER TABLE {processed_games_table} RENAME TO {processed_games_old_table}'
                 )
-            except sa_exc.SQLAlchemyError:
-                pass
-        conn.execute('DROP TABLE processed_games_old')
-    finally:
-        conn.execute('PRAGMA foreign_keys = ON')
+            )
+            new_table.create(conn)
+            if new_rows:
+                conn.execute(new_table.insert(), new_rows)
+            if has_source_index:
+                try:
+                    conn.execute(
+                        text(
+                            f'''
+                            UPDATE {igdb_updates_table}
+                            SET {processed_game_id} = (
+                                SELECT pg.{id_column_name}
+                                FROM {processed_games_table} AS pg
+                                JOIN {processed_games_old_table} AS old
+                                    ON old.{source_index} = pg.{source_index}
+                                WHERE old.{id_column_name} = {igdb_updates_table}.{processed_game_id}
+                                LIMIT 1
+                            )
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM {processed_games_old_table} AS old
+                                WHERE old.{id_column_name} = {igdb_updates_table}.{processed_game_id}
+                            )
+                            '''
+                        )
+                    )
+                except sa_exc.SQLAlchemyError:
+                    pass
+            conn.execute(text(f'DROP TABLE {processed_games_old_table}'))
+        finally:
+            conn.execute(enable_fk_stmt)
 
 
 def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     conn = _db_handle_factory()
+    dialect_name = conn.engine.dialect.name
+    fk_enable_stmt = 'PRAGMA foreign_keys = ON'
+    if dialect_name != 'sqlite':
+        fk_enable_stmt = 'SET FOREIGN_KEY_CHECKS = 1'
+
+    def _table_columns(table_name: str) -> set[str]:
+        handle = _db_handle_factory()
+        try:
+            with handle.sa_connection() as sa_conn:
+                inspector = inspect(sa_conn)
+                return {col['name'] for col in inspector.get_columns(table_name)}
+        except sa_exc.SQLAlchemyError:
+            return set()
+        finally:
+            handle.close()
+
     try:
         with conn:
-            conn.execute('PRAGMA foreign_keys = ON')
+            conn.execute(fk_enable_stmt)
             conn.execute(
                 '''CREATE TABLE IF NOT EXISTS processed_games (
                     "ID" INTEGER PRIMARY KEY,
@@ -1246,54 +1285,57 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     skip_queue TEXT
                 )'''
             )
-            if run_migrations:
-                _migrate_id_column(conn)
-            if run_migrations:
-                try:
-                    conn.execute('ALTER TABLE processed_games ADD COLUMN "Category" TEXT')
-                except sa_exc.SQLAlchemyError:
-                    pass
-                try:
-                    conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
-                except sa_exc.SQLAlchemyError:
-                    pass
-                try:
-                    conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
-                except sa_exc.SQLAlchemyError:
-                    pass
-                try:
-                    conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
-                except sa_exc.SQLAlchemyError:
-                    pass
-                try:
-                    conn.execute('ALTER TABLE processed_games ADD COLUMN cache_rank INTEGER')
-                except sa_exc.SQLAlchemyError:
-                    pass
+
+        if run_migrations:
+            with conn.sa_connection() as sa_conn:
+                _migrate_id_column(sa_conn)
+
+        processed_columns: set[str] | None = None
+        if run_migrations:
+            db_utils.clear_processed_games_columns_cache()
+            processed_columns = db_utils.get_processed_games_columns(handle=conn)
+
+        with conn:
+            conn.execute(fk_enable_stmt)
+            if run_migrations and processed_columns is not None:
+                column_statements = [
+                    ('Category', 'ALTER TABLE processed_games ADD COLUMN "Category" TEXT'),
+                    ('Platforms', 'ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT'),
+                    ('igdb_id', 'ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT'),
+                    ('last_edited_at', 'ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT'),
+                    ('cache_rank', 'ALTER TABLE processed_games ADD COLUMN cache_rank INTEGER'),
+                ]
+                for column_name, statement in column_statements:
+                    if column_name not in processed_columns:
+                        conn.execute(statement)
+                        processed_columns.add(column_name)
                 db_utils.clear_processed_games_columns_cache()
-            try:
-                conn.execute(
-                    '''CREATE TABLE IF NOT EXISTS igdb_updates (
-                        processed_game_id INTEGER PRIMARY KEY,
-                        igdb_id TEXT,
-                        igdb_updated_at TEXT,
-                        igdb_payload TEXT,
-                        diff TEXT,
-                        local_last_edited_at TEXT,
-                        refreshed_at TEXT,
-                        has_diff INTEGER NOT NULL DEFAULT 0,
-                        FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
-                    )'''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
+            conn.execute(
+                '''CREATE TABLE IF NOT EXISTS igdb_updates (
+                    processed_game_id INTEGER PRIMARY KEY,
+                    igdb_id TEXT,
+                    igdb_updated_at TEXT,
+                    igdb_payload TEXT,
+                    diff TEXT,
+                    local_last_edited_at TEXT,
+                    refreshed_at TEXT,
+                    has_diff INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
+                )'''
+            )
 
-            try:
-                conn.execute(
-                    'ALTER TABLE igdb_updates ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
+        igdb_updates_columns = _table_columns('igdb_updates')
+        if 'has_diff' not in igdb_updates_columns:
+            with conn:
+                try:
+                    conn.execute(
+                        'ALTER TABLE igdb_updates ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
+                    )
+                except sa_exc.SQLAlchemyError:
+                    pass
 
+        with conn:
+            conn.execute(fk_enable_stmt)
             try:
                 conn.execute(
                     'CREATE INDEX IF NOT EXISTS igdb_updates_refreshed_at_idx '
@@ -1475,7 +1517,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     '''
                 )
                 logger.info(
-                    "Startup cleanup removed %d orphan igdb_update rows; database may still"
+                    "Startup cleanup removed %d orphan igdb_update rows; database may still",
                     " require manual attention.",
                     cleanup_cursor.rowcount,
                 )
@@ -1520,7 +1562,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                         )
                     except sa_exc.IntegrityError:
                         logger.warning(
-                            "Failed to reseed igdb_updates for processed_game_id=%s due to"
+                            "Failed to reseed igdb_updates for processed_game_id=%s due to",
                             " integrity error.",
                             game_id,
                         )
@@ -1532,7 +1574,6 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     pass
     finally:
         conn.close()
-
 
 
 @app.teardown_appcontext
