@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import numbers
-import sqlite3
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from db import utils as db_utils
 from igdb.client import IGDBClient
@@ -17,33 +20,80 @@ IGDB_CACHE_STATE_TABLE = "igdb_cache_state"
 _igdb_client = IGDBClient()
 
 
+CacheConnection = (
+    db_utils.DatabaseHandle
+    | db_utils.DatabaseEngine
+    | Connection
+    | Engine
+)
+
+
 def _quote(name: str) -> str:
-    """Return a safely quoted identifier for SQLite statements."""
+    """Return a safely quoted identifier for SQL statements."""
 
     return db_utils._quote_identifier(name)
 
 
-def _ensure_cache_state_table(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> None:
-    conn.execute(
+@contextmanager
+def _sa_connection(conn: CacheConnection) -> Iterator[Connection]:
+    """Yield a SQLAlchemy connection derived from ``conn``."""
+
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            yield sa_conn
+        return
+    if isinstance(conn, db_utils.DatabaseEngine):
+        with conn.sa_connection() as sa_conn:
+            yield sa_conn
+        return
+    if isinstance(conn, Engine):
+        with conn.connect() as sa_conn:
+            yield sa_conn
+        return
+    if isinstance(conn, Connection):
+        yield conn
+        return
+    raise TypeError(f"Unsupported connection type: {type(conn)!r}")
+
+
+def _dialect_name(conn: CacheConnection) -> str | None:
+    """Return the SQLAlchemy dialect name for ``conn`` if available."""
+
+    if isinstance(conn, db_utils.DatabaseHandle):
+        return conn.engine.dialect.name
+    if isinstance(conn, db_utils.DatabaseEngine):
+        return conn.engine.dialect.name
+    if isinstance(conn, (Engine, Connection)):
+        return conn.dialect.name
+    return None
+
+
+def _ensure_cache_state_table(conn: CacheConnection) -> None:
+    create_statement = text(
         f"""
         CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_STATE_TABLE)} (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            total_count INTEGER,
+            id BIGINT PRIMARY KEY CHECK (id = 1),
+            total_count BIGINT,
             last_synced_at TEXT
         )
         """
     )
 
+    with _sa_connection(conn) as sa_conn:
+        sa_conn.execute(create_statement)
+        if sa_conn.in_transaction():
+            sa_conn.commit()
 
-def _ensure_games_table(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> None:
-    conn.execute(
+
+def _ensure_games_table(conn: CacheConnection) -> None:
+    create_statement = text(
         f"""
         CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_TABLE)} (
-            igdb_id INTEGER PRIMARY KEY,
+            igdb_id BIGINT PRIMARY KEY,
             name TEXT,
             summary TEXT,
-            updated_at INTEGER,
-            first_release_date INTEGER,
+            updated_at BIGINT,
+            first_release_date BIGINT,
             category INTEGER,
             cover_image_id TEXT,
             rating_count INTEGER,
@@ -56,53 +106,51 @@ def _ensure_games_table(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> N
         )
         """
     )
-    conn.execute(
+    index_statement = text(
         f"""
         CREATE INDEX IF NOT EXISTS {_quote(f'{IGDB_CACHE_TABLE}_updated_at_id_idx')}
         ON {_quote(IGDB_CACHE_TABLE)} (updated_at, igdb_id)
         """
     )
+
+    with _sa_connection(conn) as sa_conn:
+        sa_conn.execute(create_statement)
+        sa_conn.execute(index_statement)
+        if sa_conn.in_transaction():
+            sa_conn.commit()
+
     _ensure_postgres_cache_index(conn)
 
 
-def _ensure_postgres_cache_index(conn: Any) -> None:
-    """Ensure the Postgres cache index exists when ``conn`` is a PG connection."""
+def _ensure_postgres_cache_index(conn: CacheConnection) -> None:
+    """Ensure the Postgres cache index exists when ``conn`` targets PostgreSQL."""
 
-    if isinstance(conn, (sqlite3.Connection, db_utils.DatabaseHandle)):
+    if _dialect_name(conn) != "postgresql":
         return
 
-    cursor_factory = getattr(conn, "cursor", None)
-    if cursor_factory is None:
-        return
+    index_statement = text(
+        """
+        CREATE INDEX IF NOT EXISTS igdb_games_updated_at_id_desc_idx
+        ON igdb_games (updated_at DESC, id)
+        """
+    )
+    analyze_statement = text("ANALYZE igdb_games")
 
-    try:
-        cursor = cursor_factory()
-    except Exception:  # pragma: no cover - defensive for exotic connections
-        return
-
-    try:
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS igdb_games_updated_at_id_desc_idx
-            ON igdb_games (updated_at DESC, id)
-            """
-        )
-        cursor.execute("ANALYZE igdb_games")
-    except Exception:
-        return
-    finally:
-        with suppress(Exception):
-            cursor.close()
-
-    with suppress(Exception):
-        conn.commit()
+    with _sa_connection(conn) as sa_conn:
+        try:
+            sa_conn.execute(index_statement)
+            sa_conn.execute(analyze_statement)
+        except SQLAlchemyError:
+            return
+        if sa_conn.in_transaction():
+            sa_conn.commit()
 
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_cached_total(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> int | None:
+def get_cached_total(conn: Any) -> int | None:
     """Return the cached IGDB total game count, if present."""
 
     _ensure_cache_state_table(conn)
@@ -129,7 +177,7 @@ def get_cached_total(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> int 
 
 
 def set_cached_total(
-    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    conn: Any,
     total: int | None,
     *,
     synced_at: str | None = None,
@@ -150,7 +198,7 @@ def set_cached_total(
     )
 
 
-def get_cache_status(conn: db_utils.DatabaseHandle | sqlite3.Connection) -> dict[str, Any]:
+def get_cache_status(conn: Any) -> dict[str, Any]:
     """Return aggregate information about the local IGDB cache."""
 
     _ensure_cache_state_table(conn)
@@ -272,7 +320,7 @@ def _row_lookup(row: Any, key: str, index: int) -> Any:
 
 
 def upsert_igdb_games(
-    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    conn: Any,
     games: Iterable[Mapping[str, Any]],
 ) -> tuple[int, int, int]:
     """Insert or update IGDB cache entries based on payloads."""
