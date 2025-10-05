@@ -4,13 +4,26 @@ from __future__ import annotations
 import json
 import logging
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
-import sqlite3
 
 from . import source_index_cache
 from db import utils as db_utils
+
+
+def _quote_identifier(identifier: str) -> str:
+    return db_utils._quote_identifier(identifier)
+
+
+def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
+    seen: set[str] = set()
+    for identifier in identifiers:
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
+    return sql
 
 
 class GameNavigator:
@@ -141,7 +154,10 @@ class GameNavigator:
             )
             state_row = cur.fetchone()
             cur = conn.execute(
-                'SELECT "Source Index", "ID", "Summary", "Cover Path" FROM processed_games'
+                _quote_sql(
+                    'SELECT "Source Index", "ID", "Summary", "Cover Path" FROM processed_games',
+                    ['Source Index', 'ID', 'Summary', 'Cover Path'],
+                )
             )
             rows = cur.fetchall()
         processed: set[int] = set()
@@ -206,7 +222,10 @@ class GameNavigator:
             )
             state_row = cur.fetchone()
             cur = conn.execute(
-                'SELECT "Summary", "Cover Path" FROM processed_games'
+                _quote_sql(
+                    'SELECT "Summary", "Cover Path" FROM processed_games',
+                    ['Summary', 'Cover Path'],
+                )
             )
             rows = cur.fetchall()
         processed_total = 0
