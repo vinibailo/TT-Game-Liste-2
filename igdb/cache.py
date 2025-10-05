@@ -76,12 +76,24 @@ def _dialect_name(conn: CacheConnection) -> str | None:
 
 
 def _ensure_cache_state_table(conn: CacheConnection) -> None:
-    create_statement = text(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_STATE_TABLE)} (
+    dialect = _dialect_name(conn)
+    if dialect in {"mysql", "mariadb"}:
+        definition = """
+            id BIGINT PRIMARY KEY,
+            total_count BIGINT,
+            last_synced_at VARCHAR(64)
+        """
+    else:
+        definition = """
             id BIGINT PRIMARY KEY CHECK (id = 1),
             total_count BIGINT,
             last_synced_at TEXT
+        """
+
+    create_statement = text(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_STATE_TABLE)} (
+            {definition}
         )
         """
     )
@@ -93,9 +105,32 @@ def _ensure_cache_state_table(conn: CacheConnection) -> None:
 
 
 def _ensure_games_table(conn: CacheConnection) -> None:
-    create_statement = text(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_TABLE)} (
+    dialect = _dialect_name(conn)
+    if dialect in {"mysql", "mariadb"}:
+        column_definition = """
+            igdb_id BIGINT PRIMARY KEY,
+            name VARCHAR(255),
+            summary LONGTEXT,
+            updated_at BIGINT,
+            first_release_date BIGINT,
+            category INT,
+            cover_image_id VARCHAR(255),
+            rating_count INT,
+            developers LONGTEXT,
+            publishers LONGTEXT,
+            genres LONGTEXT,
+            platforms LONGTEXT,
+            game_modes LONGTEXT,
+            cached_at VARCHAR(64)
+        """
+        index_statement = text(
+            f"""
+            CREATE INDEX {_quote(f'{IGDB_CACHE_TABLE}_updated_at_id_idx')}
+            ON {_quote(IGDB_CACHE_TABLE)} (updated_at, igdb_id)
+            """
+        )
+    else:
+        column_definition = """
             igdb_id BIGINT PRIMARY KEY,
             name TEXT,
             summary TEXT,
@@ -110,19 +145,29 @@ def _ensure_games_table(conn: CacheConnection) -> None:
             platforms TEXT,
             game_modes TEXT,
             cached_at TEXT
-        )
         """
-    )
-    index_statement = text(
+        index_statement = text(
+            f"""
+            CREATE INDEX IF NOT EXISTS {_quote(f'{IGDB_CACHE_TABLE}_updated_at_id_idx')}
+            ON {_quote(IGDB_CACHE_TABLE)} (updated_at, igdb_id)
+            """
+        )
+
+    create_statement = text(
         f"""
-        CREATE INDEX IF NOT EXISTS {_quote(f'{IGDB_CACHE_TABLE}_updated_at_id_idx')}
-        ON {_quote(IGDB_CACHE_TABLE)} (updated_at, igdb_id)
+        CREATE TABLE IF NOT EXISTS {_quote(IGDB_CACHE_TABLE)} (
+            {column_definition}
+        )
         """
     )
 
     with _sa_connection(conn) as (sa_conn, should_commit):
         sa_conn.execute(create_statement)
-        sa_conn.execute(index_statement)
+        if dialect in {"mysql", "mariadb"}:
+            with suppress(SQLAlchemyError):
+                sa_conn.execute(index_statement)
+        else:
+            sa_conn.execute(index_statement)
         if should_commit and sa_conn.in_transaction():
             sa_conn.commit()
 
@@ -156,14 +201,6 @@ def _ensure_postgres_cache_index(conn: CacheConnection) -> None:
 def _cache_state_upsert_statement(dialect: str | None):
     """Return an ``INSERT`` statement suited for the active SQL dialect."""
 
-    if dialect == "sqlite":
-        return text(
-            f"""
-            INSERT OR REPLACE INTO {_quote(IGDB_CACHE_STATE_TABLE)}
-                (id, total_count, last_synced_at)
-            VALUES (:id_value, :total_value, :synced_value)
-            """
-        )
     if dialect in {"mysql", "mariadb"}:
         return text(
             f"""
