@@ -85,7 +85,7 @@ def load_app(tmp_path: Path) -> object:
         )
 
     if hasattr(module, "_ensure_lookup_join_tables") and hasattr(module, "db"):
-        with module.db_lock, module.db.connection() as conn:
+        with module.db_lock, module.db.sa_connection() as conn:
             module._ensure_lookup_join_tables(conn)
 
     if (
@@ -101,7 +101,7 @@ def load_app(tmp_path: Path) -> object:
         and hasattr(module, "_recreate_lookup_join_tables")
         and hasattr(module, "db")
     ):
-        with module.db_lock, module.db.connection() as conn:
+        with module.db_lock, module.db.sa_connection() as conn:
             module._recreate_lookup_join_tables(conn)
 
     if (
