@@ -35,23 +35,30 @@ def _quote(name: str) -> str:
 
 
 @contextmanager
-def _sa_connection(conn: CacheConnection) -> Iterator[Connection]:
-    """Yield a SQLAlchemy connection derived from ``conn``."""
+def _sa_connection(conn: CacheConnection) -> Iterator[tuple[Connection, bool]]:
+    """Yield a SQLAlchemy connection derived from ``conn``.
+
+    The context manager also reports whether the helper is responsible for
+    committing the transaction. Connections that are created inside this helper
+    need an explicit commit to persist changes, while externally managed
+    connections (for example those obtained from ``engine.begin()``) should be
+    left untouched so surrounding code can manage the transaction lifecycle.
+    """
 
     if isinstance(conn, db_utils.DatabaseHandle):
         with conn.sa_connection() as sa_conn:
-            yield sa_conn
+            yield sa_conn, True
         return
     if isinstance(conn, db_utils.DatabaseEngine):
         with conn.sa_connection() as sa_conn:
-            yield sa_conn
+            yield sa_conn, True
         return
     if isinstance(conn, Engine):
         with conn.connect() as sa_conn:
-            yield sa_conn
+            yield sa_conn, True
         return
     if isinstance(conn, Connection):
-        yield conn
+        yield conn, False
         return
     raise TypeError(f"Unsupported connection type: {type(conn)!r}")
 
@@ -79,9 +86,9 @@ def _ensure_cache_state_table(conn: CacheConnection) -> None:
         """
     )
 
-    with _sa_connection(conn) as sa_conn:
+    with _sa_connection(conn) as (sa_conn, should_commit):
         sa_conn.execute(create_statement)
-        if sa_conn.in_transaction():
+        if should_commit and sa_conn.in_transaction():
             sa_conn.commit()
 
 
@@ -113,10 +120,10 @@ def _ensure_games_table(conn: CacheConnection) -> None:
         """
     )
 
-    with _sa_connection(conn) as sa_conn:
+    with _sa_connection(conn) as (sa_conn, should_commit):
         sa_conn.execute(create_statement)
         sa_conn.execute(index_statement)
-        if sa_conn.in_transaction():
+        if should_commit and sa_conn.in_transaction():
             sa_conn.commit()
 
     _ensure_postgres_cache_index(conn)
@@ -136,14 +143,48 @@ def _ensure_postgres_cache_index(conn: CacheConnection) -> None:
     )
     analyze_statement = text("ANALYZE igdb_games")
 
-    with _sa_connection(conn) as sa_conn:
+    with _sa_connection(conn) as (sa_conn, should_commit):
         try:
             sa_conn.execute(index_statement)
             sa_conn.execute(analyze_statement)
         except SQLAlchemyError:
             return
-        if sa_conn.in_transaction():
+        if should_commit and sa_conn.in_transaction():
             sa_conn.commit()
+
+
+def _cache_state_upsert_statement(dialect: str | None):
+    """Return an ``INSERT`` statement suited for the active SQL dialect."""
+
+    if dialect == "sqlite":
+        return text(
+            f"""
+            INSERT OR REPLACE INTO {_quote(IGDB_CACHE_STATE_TABLE)}
+                (id, total_count, last_synced_at)
+            VALUES (:id_value, :total_value, :synced_value)
+            """
+        )
+    if dialect in {"mysql", "mariadb"}:
+        return text(
+            f"""
+            INSERT INTO {_quote(IGDB_CACHE_STATE_TABLE)}
+                (id, total_count, last_synced_at)
+            VALUES (:id_value, :total_value, :synced_value)
+            ON DUPLICATE KEY UPDATE
+                total_count = VALUES(total_count),
+                last_synced_at = VALUES(last_synced_at)
+            """
+        )
+    return text(
+        f"""
+        INSERT INTO {_quote(IGDB_CACHE_STATE_TABLE)}
+            (id, total_count, last_synced_at)
+        VALUES (:id_value, :total_value, :synced_value)
+        ON CONFLICT(id) DO UPDATE SET
+            total_count = excluded.total_count,
+            last_synced_at = excluded.last_synced_at
+        """
+    )
 
 
 def _now_utc_iso() -> str:
@@ -186,16 +227,17 @@ def set_cached_total(
 
     _ensure_cache_state_table(conn)
     timestamp = synced_at or _now_utc_iso()
-    conn.execute(
-        f"""
-        INSERT INTO {_quote(IGDB_CACHE_STATE_TABLE)} (id, total_count, last_synced_at)
-        VALUES (1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            total_count=excluded.total_count,
-            last_synced_at=excluded.last_synced_at
-        """,
-        (total, timestamp),
-    )
+    statement = _cache_state_upsert_statement(_dialect_name(conn))
+    parameters = {
+        "id_value": 1,
+        "total_value": total,
+        "synced_value": timestamp,
+    }
+
+    with _sa_connection(conn) as (sa_conn, should_commit):
+        sa_conn.execute(statement, parameters)
+        if should_commit and sa_conn.in_transaction():
+            sa_conn.commit()
 
 
 def get_cache_status(conn: Any) -> dict[str, Any]:
