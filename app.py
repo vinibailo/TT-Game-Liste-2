@@ -6,7 +6,6 @@ import numbers
 import re
 import time
 import math
-import sqlite3
 from functools import partial
 from pathlib import Path
 from datetime import datetime, timezone
@@ -32,7 +31,9 @@ from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
-from sqlalchemy.engine import Connection
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy import exc as sa_exc
 
 # Placeholder imports to establish the upcoming modular structure.
 import config as app_config
@@ -120,6 +121,9 @@ _PLACEHOLDER_IMPORTS = (
 logger = logging.getLogger(__name__)
 
 igdb_api_client = IGDBClient()
+
+
+ConnectionLike = Connection | Engine | db_utils.DatabaseHandle
 
 
 def _determine_log_level(flask_app: Flask) -> int:
@@ -647,7 +651,7 @@ def get_db_session():
 
 
 def get_processed_games_columns(
-    conn: sqlite3.Connection | db_utils.DatabaseHandle | None = None,
+    conn: Connection | Engine | db_utils.DatabaseHandle | None = None,
 ) -> set[str]:
     return db_utils.get_processed_games_columns(
         conn, connection_factory=_db_engine_factory
@@ -780,63 +784,126 @@ def _lookup_name_for_id(
     return name or ''
 
 
-def _recreate_lookup_join_tables(conn: sqlite3.Connection) -> None:
-    for relation in LOOKUP_RELATIONS:
-        join_table = relation['join_table']
-        join_column = relation['join_column']
-        lookup_table = relation['lookup_table']
+def _execute_join_table_statements(
+    conn: ConnectionLike, statements: Sequence[Any]
+) -> None:
+    if isinstance(conn, db_utils.DatabaseHandle):
+        with conn.sa_connection() as sa_conn:
+            _execute_join_table_statements(sa_conn, statements)
+        return
+
+    if isinstance(conn, Engine):
+        with conn.begin() as sa_conn:
+            for statement in statements:
+                sa_conn.execute(statement)
+        return
+
+    if isinstance(conn, Connection):
+        transaction = None
+        if not conn.in_transaction():
+            transaction = conn.begin()
         try:
-            conn.execute(f'DROP TABLE IF EXISTS {join_table}')
-            conn.execute(
-                f'''
-                    CREATE TABLE {join_table} (
-                        processed_game_id INTEGER NOT NULL,
-                        {join_column} INTEGER NOT NULL,
-                        PRIMARY KEY (processed_game_id, {join_column}),
-                        FOREIGN KEY(processed_game_id)
-                            REFERENCES processed_games("ID") ON DELETE CASCADE,
-                        FOREIGN KEY({join_column})
-                            REFERENCES {lookup_table}(id) ON DELETE CASCADE
-                    )
-                '''
-            )
-            conn.execute(
-                f'''
-                    CREATE INDEX IF NOT EXISTS {join_table}_processed_game_idx
-                    ON {join_table} (processed_game_id)
-                '''
-            )
-        except sqlite3.OperationalError:
-            logger.exception('Failed to recreate join table %s', join_table)
+            for statement in statements:
+                conn.execute(statement)
+        except sa_exc.SQLAlchemyError:
+            if transaction is not None:
+                transaction.rollback()
+            raise
+        else:
+            if transaction is not None:
+                transaction.commit()
+        return
+
+    raise TypeError(f'Unsupported connection type: {type(conn)!r}')
 
 
-def _ensure_lookup_join_tables(conn: sqlite3.Connection) -> None:
+def _recreate_lookup_join_tables(conn: ConnectionLike) -> None:
+    processed_games_table = _quote_identifier('processed_games')
+    processed_game_id = _quote_identifier('ID')
+    processed_column = _quote_identifier('processed_game_id')
+    lookup_pk = _quote_identifier('id')
+
     for relation in LOOKUP_RELATIONS:
-        join_table = relation['join_table']
-        join_column = relation['join_column']
-        lookup_table = relation['lookup_table']
+        join_table_name = relation['join_table']
+        join_column_name = relation['join_column']
+        lookup_table_name = relation['lookup_table']
+
+        join_table = _quote_identifier(join_table_name)
+        join_column = _quote_identifier(join_column_name)
+        lookup_table = _quote_identifier(lookup_table_name)
+        index_name = _quote_identifier(f"{join_table_name}_processed_game_idx")
+
+        statements = (
+            text(f'DROP TABLE IF EXISTS {join_table}'),
+            text(
+                (
+                    f"CREATE TABLE {join_table} (\n"
+                    f"    {processed_column} INT NOT NULL,\n"
+                    f"    {join_column} INT NOT NULL,\n"
+                    f"    PRIMARY KEY ({processed_column}, {join_column}),\n"
+                    f"    FOREIGN KEY ({processed_column})\n"
+                    f"        REFERENCES {processed_games_table} ({processed_game_id}) ON DELETE CASCADE,\n"
+                    f"    FOREIGN KEY ({join_column})\n"
+                    f"        REFERENCES {lookup_table} ({lookup_pk}) ON DELETE CASCADE\n"
+                    f")"
+                )
+            ),
+            text(
+                (
+                    f"CREATE INDEX IF NOT EXISTS {index_name}\n"
+                    f"    ON {join_table} ({processed_column})"
+                )
+            ),
+        )
+
         try:
-            conn.execute(
-                f'''
-                    CREATE TABLE IF NOT EXISTS {join_table} (
-                        processed_game_id INTEGER NOT NULL,
-                        {join_column} INTEGER NOT NULL,
-                        PRIMARY KEY (processed_game_id, {join_column}),
-                        FOREIGN KEY(processed_game_id)
-                            REFERENCES processed_games("ID") ON DELETE CASCADE,
-                        FOREIGN KEY({join_column})
-                            REFERENCES {lookup_table}(id) ON DELETE CASCADE
-                    )
-                '''
-            )
-            conn.execute(
-                f'''
-                    CREATE INDEX IF NOT EXISTS {join_table}_processed_game_idx
-                    ON {join_table} (processed_game_id)
-                '''
-            )
-        except sqlite3.OperationalError:
-            logger.exception('Failed to ensure join table %s exists', join_table)
+            _execute_join_table_statements(conn, statements)
+        except sa_exc.SQLAlchemyError:
+            logger.exception('Failed to recreate join table %s', join_table_name)
+
+
+def _ensure_lookup_join_tables(conn: ConnectionLike) -> None:
+    processed_games_table = _quote_identifier('processed_games')
+    processed_game_id = _quote_identifier('ID')
+    processed_column = _quote_identifier('processed_game_id')
+    lookup_pk = _quote_identifier('id')
+
+    for relation in LOOKUP_RELATIONS:
+        join_table_name = relation['join_table']
+        join_column_name = relation['join_column']
+        lookup_table_name = relation['lookup_table']
+
+        join_table = _quote_identifier(join_table_name)
+        join_column = _quote_identifier(join_column_name)
+        lookup_table = _quote_identifier(lookup_table_name)
+        index_name = _quote_identifier(f"{join_table_name}_processed_game_idx")
+
+        statements = (
+            text(
+                (
+                    f"CREATE TABLE IF NOT EXISTS {join_table} (\n"
+                    f"    {processed_column} INT NOT NULL,\n"
+                    f"    {join_column} INT NOT NULL,\n"
+                    f"    PRIMARY KEY ({processed_column}, {join_column}),\n"
+                    f"    FOREIGN KEY ({processed_column})\n"
+                    f"        REFERENCES {processed_games_table} ({processed_game_id}) ON DELETE CASCADE,\n"
+                    f"    FOREIGN KEY ({join_column})\n"
+                    f"        REFERENCES {lookup_table} ({lookup_pk}) ON DELETE CASCADE\n"
+                    f")"
+                )
+            ),
+            text(
+                (
+                    f"CREATE INDEX IF NOT EXISTS {index_name}\n"
+                    f"    ON {join_table} ({processed_column})"
+                )
+            ),
+        )
+
+        try:
+            _execute_join_table_statements(conn, statements)
+        except sa_exc.SQLAlchemyError:
+            logger.exception('Failed to ensure join table %s exists', join_table_name)
 
 
 def _persist_lookup_relations(
@@ -1018,10 +1085,10 @@ def _backfill_lookup_relations(conn: Connection | db_utils.DatabaseHandle) -> No
     )
 
 
-def _migrate_id_column(conn: sqlite3.Connection) -> None:
+def _migrate_id_column(conn: Any) -> None:
     try:
         cur = conn.execute('PRAGMA table_info(processed_games)')
-    except sqlite3.OperationalError:
+    except sa_exc.SQLAlchemyError:
         return
 
     cols = cur.fetchall()
@@ -1037,8 +1104,8 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
 
     try:
         cur = conn.execute('SELECT * FROM processed_games ORDER BY rowid')
-    except sqlite3.OperationalError:
-        rows: list[sqlite3.Row] = []
+    except sa_exc.SQLAlchemyError:
+        rows: list[Mapping[str, Any]] = []
         column_names: list[str] = []
     else:
         rows = cur.fetchall()
@@ -1179,7 +1246,7 @@ def _migrate_id_column(conn: sqlite3.Connection) -> None:
                     )
                     '''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
         conn.execute('DROP TABLE processed_games_old')
     finally:
@@ -1230,23 +1297,23 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
             if run_migrations:
                 try:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN "Category" TEXT')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
                 try:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
                 try:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
                 try:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
                 try:
                     conn.execute('ALTER TABLE processed_games ADD COLUMN cache_rank INTEGER')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
                 db_utils.clear_processed_games_columns_cache()
             try:
@@ -1263,14 +1330,14 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                         FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
                     )'''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
                 conn.execute(
                     'ALTER TABLE igdb_updates ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1278,7 +1345,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     'CREATE INDEX IF NOT EXISTS igdb_updates_refreshed_at_idx '
                     'ON igdb_updates(refreshed_at)'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1286,7 +1353,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     'CREATE INDEX IF NOT EXISTS igdb_updates_has_diff_updated_idx '
                     'ON igdb_updates(has_diff, igdb_updated_at)'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1294,7 +1361,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     'CREATE INDEX IF NOT EXISTS igdb_updates_order_idx '
                     'ON igdb_updates(refreshed_at, local_last_edited_at, igdb_updated_at, processed_game_id)'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1306,7 +1373,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                        END
                        WHERE has_diff NOT IN (0, 1) OR has_diff IS NULL'''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1329,7 +1396,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                             entry_rank INTEGER NOT NULL DEFAULT 0
                         )'''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1337,7 +1404,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     f'''CREATE INDEX IF NOT EXISTS {UPDATES_LIST_TABLE}_sort_idx '''
                     f'''ON {UPDATES_LIST_TABLE}(sort_numeric DESC, processed_game_id DESC, entry_rank ASC)'''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1361,7 +1428,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     )
                     '''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1369,7 +1436,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     f'''CREATE INDEX IF NOT EXISTS {IGDB_CACHE_TABLE}_updated_at_id_idx '''
                     f'''ON {IGDB_CACHE_TABLE}(updated_at, igdb_id)'''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1377,7 +1444,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     'CREATE INDEX IF NOT EXISTS processed_games_igdb_id_idx '
                     'ON processed_games("igdb_id")'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1388,7 +1455,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     WHERE "igdb_id" IS NOT NULL AND "igdb_id" != ''
                     '''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1396,7 +1463,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     'CREATE INDEX IF NOT EXISTS processed_games_last_edited_idx '
                     'ON processed_games(last_edited_at, "ID")'
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             try:
@@ -1409,7 +1476,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                     )
                     '''
                 )
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 pass
 
             for table_config in LOOKUP_TABLES:
@@ -1497,7 +1564,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                                 last_edit,
                             ),
                         )
-                    except sqlite3.IntegrityError:
+                    except sa_exc.IntegrityError:
                         logger.warning(
                             "Failed to reseed igdb_updates for processed_game_id=%s due to"
                             " integrity error.",
@@ -1507,7 +1574,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
             if run_migrations:
                 try:
                     conn.execute('ANALYZE')
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     pass
     finally:
         conn.close()
@@ -1664,7 +1731,7 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
             conn = get_db()
             try:
                 cur = conn.execute('SELECT COUNT(*) FROM processed_games')
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 return pd.DataFrame(columns=columns), False
             row = cur.fetchone()
             total = row[0] if row else 0
@@ -1703,7 +1770,7 @@ def load_games(*, prefer_cache: bool = False) -> pd.DataFrame:
                         ORDER BY igdb_id'''
                 )
                 rows = cur.fetchall()
-            except sqlite3.OperationalError:
+            except sa_exc.SQLAlchemyError:
                 return pd.DataFrame(columns=columns), False
 
         if not rows:
@@ -2063,7 +2130,7 @@ def seed_processed_games_from_source() -> None:
                     cache_row = conn.execute(
                         'SELECT MAX(cache_rank) AS max_rank FROM processed_games'
                     ).fetchone()
-                except sqlite3.OperationalError:
+                except sa_exc.SQLAlchemyError:
                     cache_row = None
                 max_cache_rank = cache_row['max_rank'] if cache_row else None
                 try:
@@ -2278,7 +2345,7 @@ def _deserialize_cache_list(raw: Any) -> list[str]:
 
 
 def fetch_igdb_metadata(
-    igdb_ids: Iterable[str], conn: sqlite3.Connection | None = None
+    igdb_ids: Iterable[str], conn: Any | None = None
 ) -> dict[str, dict[str, Any]]:
     numeric_ids: list[int] = []
     id_map: dict[int, str] = {}
@@ -2318,7 +2385,7 @@ def fetch_igdb_metadata(
         )
         try:
             cur = conn.execute(query, tuple(chunk))
-        except sqlite3.OperationalError as exc:
+        except sa_exc.SQLAlchemyError as exc:
             logger.warning('Failed to query IGDB cache: %s', exc)
             return {}
         for row in cur.fetchall():
@@ -2468,17 +2535,17 @@ def _build_cache_row_from_payload(
 
 
 def _upsert_igdb_cache_entries(
-    conn: sqlite3.Connection, payloads: Iterable[Mapping[str, Any]]
+    conn: Any, payloads: Iterable[Mapping[str, Any]]
 ) -> tuple[int, int, int]:
     return igdb_cache.upsert_igdb_games(conn, payloads)
 
 
-def _get_cached_igdb_total(conn: sqlite3.Connection) -> int | None:
+def _get_cached_igdb_total(conn: Any) -> int | None:
     return igdb_cache.get_cached_total(conn)
 
 
 def _set_cached_igdb_total(
-    conn: sqlite3.Connection, total: int | None, synced_at: str | None = None
+    conn: Any, total: int | None, synced_at: str | None = None
 ) -> None:
     igdb_cache.set_cached_total(conn, total, synced_at=synced_at)
 
@@ -2505,7 +2572,7 @@ def _dedupe_normalized_names(values: Iterable[str]) -> list[str]:
 
 
 def _resolve_lookup_ids(
-    conn: sqlite3.Connection, table_name: str, names: Iterable[str]
+    conn: Any, table_name: str, names: Iterable[str]
 ) -> list[int]:
     ids: list[int] = []
     seen: set[int] = set()
@@ -2561,7 +2628,7 @@ def _igdb_to_processed_row(
     igdb_id: str | None,
     metadata: Mapping[str, Any] | None,
     processed_columns: Collection[str],
-    conn: sqlite3.Connection,
+    conn: Any,
     cache_rank: int | None,
 ) -> dict[str, Any]:
     processed: dict[str, Any] = {'Source Index': src_index}
@@ -3197,13 +3264,13 @@ def _collect_processed_games_with_igdb() -> list[dict[str, Any]]:
 
 
 def _compute_metadata_updates(
-    canonical: sqlite3.Row, duplicates: Iterable[sqlite3.Row]
+    canonical: Mapping[str, Any], duplicates: Iterable[Mapping[str, Any]]
 ) -> dict[str, Any]:
     return processed_duplicates.compute_metadata_updates(canonical, duplicates)
 
 
 def _scan_duplicate_candidates(
-    rows: Iterable[sqlite3.Row],
+    rows: Iterable[Mapping[str, Any]],
     *,
     progress_callback: Callable[[int, int, int, int], None] | None = None,
 ) -> tuple[list[DuplicateGroupResolution], int, int, int]:
@@ -3215,7 +3282,7 @@ def _scan_duplicate_candidates(
 
 
 def _apply_metadata_updates(
-    conn: sqlite3.Connection, processed_game_id: int, updates: Mapping[str, Any]
+    conn: Any, processed_game_id: int, updates: Mapping[str, Any]
 ) -> None:
     if not updates:
         return
@@ -3234,7 +3301,7 @@ def _apply_metadata_updates(
 
 
 def _refresh_lookup_columns_for_games(
-    conn: sqlite3.Connection, processed_game_ids: Iterable[int]
+    conn: Any, processed_game_ids: Iterable[int]
 ) -> None:
     unique_ids = sorted(
         {
@@ -3316,7 +3383,7 @@ def _normalize_sort_numeric(value: Any) -> float:
     return numeric
 
 
-def _collect_updates_list_entries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _collect_updates_list_entries(conn: Any) -> list[dict[str, Any]]:
     processed_columns = get_processed_games_columns(conn)
     cover_url_select = (
         'p."Large Cover Image (URL)" AS cover_url'
@@ -3447,7 +3514,7 @@ def _collect_updates_list_entries(conn: sqlite3.Connection) -> list[dict[str, An
     return entries
 
 
-def _populate_updates_list_locked(conn: sqlite3.Connection) -> int:
+def _populate_updates_list_locked(conn: Any) -> int:
     entries = _collect_updates_list_entries(conn)
     with conn:
         conn.execute(f'DELETE FROM {UPDATES_LIST_TABLE}')
