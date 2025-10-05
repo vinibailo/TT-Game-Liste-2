@@ -9,7 +9,9 @@ from contextlib import nullcontext
 from functools import partial
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
+from sqlalchemy import text
 from sqlalchemy.engine import Connection as SAConnection
+from sqlalchemy.sql.elements import TextClause
 
 from config import IGDB_USER_AGENT
 from db import utils as db_utils
@@ -37,29 +39,26 @@ def _quote_identifier(identifier: str) -> str:
     return db_utils._quote_identifier(identifier)
 
 
-def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
-    """Return ``sql`` with double-quoted identifiers safely quoted."""
-
-    seen: set[str] = set()
-    for identifier in identifiers:
-        if not identifier or identifier in seen:
-            continue
-        seen.add(identifier)
-        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
-    return sql
-
-
 def _fetch_row_dict(
     conn: db_utils.DatabaseHandle | SAConnection | Any,
-    sql: str,
-    params: Iterable[Any] | None = None,
+    sql: str | TextClause,
+    params: Iterable[Any] | Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    parameters = tuple(params or ())
+    if isinstance(params, Mapping):
+        parameters: Mapping[str, Any] | tuple[Any, ...] = params
+    else:
+        parameters = tuple(params or ())
 
     if isinstance(conn, db_utils.DatabaseHandle):
-        cursor = conn.execute(sql, parameters)
+        statement = sql.text if isinstance(sql, TextClause) else sql
+        if isinstance(parameters, Mapping):
+            raise TypeError("DatabaseHandle execution requires positional parameters")
+        cursor = conn.execute(statement, parameters)
     elif isinstance(conn, SAConnection):
-        result = conn.exec_driver_sql(sql, parameters)
+        if isinstance(sql, TextClause):
+            result = conn.execute(sql, parameters if isinstance(parameters, Mapping) else {})
+        else:
+            result = conn.exec_driver_sql(sql, parameters)
         mapping = result.mappings().first()
         return dict(mapping) if mapping is not None else None
     else:
@@ -147,7 +146,7 @@ def _encode_lookup_id_list(values: Iterable[int]) -> str:
 
 
 def _resolve_lookup_ids(
-    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    conn: SAConnection,
     table_name: str,
     names: Iterable[str],
 ) -> list[int]:
@@ -211,127 +210,139 @@ def apply_processed_game_patch(
     }
 
     with db_lock:
-        conn = get_db()
-        processed_row = _fetch_row_dict(
-            conn,
-            _quote_sql('SELECT * FROM processed_games WHERE "ID"=?', ['ID']),
-            (processed_game_id,),
-        )
-        if not processed_row:
-            raise LookupError("Processed game not found.")
+        handle = get_db()
+        with handle.sa_connection() as sa_conn:
+            with sa_conn.begin():
+                processed_table = _quote_identifier("processed_games")
+                id_column = _quote_identifier("ID")
+                processed_row = _fetch_row_dict(
+                    sa_conn,
+                    text(
+                        f"SELECT * FROM {processed_table} "
+                        f"WHERE {id_column} = :processed_id"
+                    ),
+                    {"processed_id": processed_game_id},
+                )
+                if not processed_row:
+                    raise LookupError("Processed game not found.")
 
-        cache_row: dict[str, Any] | None = None
-        cache_required = any(
-            action.startswith("from_cache") for action in normalized_actions.values()
-        )
-        if cache_required:
-            igdb_id = _coerce_igdb_id(processed_row.get("igdb_id"))
-            if igdb_id is None:
-                raise ValueError("Processed game is missing an IGDB identifier.")
-            cache_row = _fetch_row_dict(
-                conn,
-                f"SELECT * FROM {_quote_identifier(IGDB_CACHE_TABLE)} WHERE igdb_id=?",
-                (igdb_id,),
-            )
-            if cache_row is None:
-                raise ValueError("IGDB cache entry not found for processed game.")
+                cache_row: dict[str, Any] | None = None
+                cache_required = any(
+                    action.startswith("from_cache") for action in normalized_actions.values()
+                )
+                if cache_required:
+                    igdb_id = _coerce_igdb_id(processed_row.get("igdb_id"))
+                    if igdb_id is None:
+                        raise ValueError("Processed game is missing an IGDB identifier.")
+                    cache_row = _fetch_row_dict(
+                        sa_conn,
+                        text(
+                            f"SELECT * FROM {_quote_identifier(IGDB_CACHE_TABLE)} "
+                            f"WHERE {_quote_identifier('igdb_id')} = :igdb_id"
+                        ),
+                        {"igdb_id": igdb_id},
+                    )
+                    if cache_row is None:
+                        raise ValueError("IGDB cache entry not found for processed game.")
 
-        processed_columns = db_utils.get_processed_games_columns(handle=conn)
+                processed_columns = db_utils.get_processed_games_columns(sa_conn)
 
-        updates: dict[str, Any] = {}
-        lookup_names: dict[str, list[str]] = {}
+                updates: dict[str, Any] = {}
+                lookup_names: dict[str, list[str]] = {}
 
-        for field_name, action in normalized_actions.items():
-            if action == "keep_current":
-                continue
-            if not action.startswith("from_cache"):
-                raise ValueError(f"Unsupported action '{action}' for field '{field_name}'.")
-            if cache_row is None:
-                raise ValueError("IGDB cache entry required to fulfil selection.")
+                for field_name, action in normalized_actions.items():
+                    if action == "keep_current":
+                        continue
+                    if not action.startswith("from_cache"):
+                        raise ValueError(
+                            f"Unsupported action '{action}' for field '{field_name}'."
+                        )
+                    if cache_row is None:
+                        raise ValueError("IGDB cache entry required to fulfil selection.")
 
-            cache_key = field_name
-            value: Any = None
+                    cache_key = field_name
+                    value: Any = None
 
-            if field_name == "Name":
-                cache_key = "name"
-                value = cache_row.get(cache_key)
-                value = value.strip() if isinstance(value, str) else value
-            elif field_name == "Summary":
-                cache_key = "summary"
-                value = cache_row.get(cache_key)
-                value = value.strip() if isinstance(value, str) else value
-            elif field_name == "First Launch Date":
-                cache_key = "first_release_date"
-                value = _format_first_release_date(cache_row.get(cache_key))
-            elif field_name == "Category":
-                cache_key = "category"
-                value = IGDBClient.translate_category(cache_row.get(cache_key))
-            elif field_name in lookup_specs:
-                spec = lookup_specs[field_name]
-                cache_key = spec["cache"]
-                raw_names = _parse_cache_list(cache_row.get(cache_key))
-                if field_name == "Genres" and action == "from_cache_mapped":
-                    mapped = map_igdb_genres(raw_names)
-                elif field_name == "Game Modes" and action == "from_cache_mapped":
-                    mapped = map_igdb_modes(raw_names)
-                else:
-                    mapped = raw_names
-                normalized_names = _normalize_name_list(mapped)
-                lookup_names[field_name] = normalized_names
-                value = ", ".join(normalized_names)
-            else:
-                raise ValueError(f"Unsupported field '{field_name}'.")
+                    if field_name == "Name":
+                        cache_key = "name"
+                        value = cache_row.get(cache_key)
+                        value = value.strip() if isinstance(value, str) else value
+                    elif field_name == "Summary":
+                        cache_key = "summary"
+                        value = cache_row.get(cache_key)
+                        value = value.strip() if isinstance(value, str) else value
+                    elif field_name == "First Launch Date":
+                        cache_key = "first_release_date"
+                        value = _format_first_release_date(cache_row.get(cache_key))
+                    elif field_name == "Category":
+                        cache_key = "category"
+                        value = IGDBClient.translate_category(cache_row.get(cache_key))
+                    elif field_name in lookup_specs:
+                        spec = lookup_specs[field_name]
+                        cache_key = spec["cache"]
+                        raw_names = _parse_cache_list(cache_row.get(cache_key))
+                        if field_name == "Genres" and action == "from_cache_mapped":
+                            mapped = map_igdb_genres(raw_names)
+                        elif field_name == "Game Modes" and action == "from_cache_mapped":
+                            mapped = map_igdb_modes(raw_names)
+                        else:
+                            mapped = raw_names
+                        normalized_names = _normalize_name_list(mapped)
+                        lookup_names[field_name] = normalized_names
+                        value = ", ".join(normalized_names)
+                    else:
+                        raise ValueError(f"Unsupported field '{field_name}'.")
 
-            column_exists = field_name in processed_columns
-            if not column_exists and field_name in lookup_specs:
-                column_exists = lookup_specs[field_name]["ids"] in processed_columns
-            if not column_exists:
-                continue
+                    column_exists = field_name in processed_columns
+                    if not column_exists and field_name in lookup_specs:
+                        column_exists = lookup_specs[field_name]["ids"] in processed_columns
+                    if not column_exists:
+                        continue
 
-            if isinstance(value, str):
-                updates[field_name] = value
-            elif value is None:
-                updates[field_name] = ""
-            else:
-                updates[field_name] = str(value)
+                    if isinstance(value, str):
+                        updates[field_name] = value
+                    elif value is None:
+                        updates[field_name] = ""
+                    else:
+                        updates[field_name] = str(value)
 
-        if not updates:
-            raise ValueError("No cache fields could be applied to the processed game.")
+                if not updates:
+                    raise ValueError("No cache fields could be applied to the processed game.")
 
-        for field_name, names in lookup_names.items():
-            spec = lookup_specs[field_name]
-            ids_column = spec.get("ids")
-            table_name = spec.get("table")
-            if not ids_column or ids_column not in processed_columns:
-                continue
-            if not table_name:
-                continue
-            ids = _resolve_lookup_ids(conn, table_name, names)
-            updates[ids_column] = _encode_lookup_id_list(ids)
+                for field_name, names in lookup_names.items():
+                    spec = lookup_specs[field_name]
+                    ids_column = spec.get("ids")
+                    table_name = spec.get("table")
+                    if not ids_column or ids_column not in processed_columns:
+                        continue
+                    if not table_name:
+                        continue
+                    ids = _resolve_lookup_ids(sa_conn, table_name, names)
+                    updates[ids_column] = _encode_lookup_id_list(ids)
 
-        timestamp: str | None = None
-        if "last_edited_at" in processed_columns:
-            timestamp = now_utc_iso()
-            updates["last_edited_at"] = timestamp
+                timestamp: str | None = None
+                if "last_edited_at" in processed_columns:
+                    timestamp = now_utc_iso()
+                    updates["last_edited_at"] = timestamp
 
-        set_fragments: list[str] = []
-        params: list[Any] = []
-        for column, value in updates.items():
-            if column not in processed_columns:
-                continue
-            set_fragments.append(f"{_quote_identifier(column)} = ?")
-            params.append(value)
+                set_fragments: list[str] = []
+                params: dict[str, Any] = {}
+                for index, (column, value) in enumerate(updates.items()):
+                    if column not in processed_columns:
+                        continue
+                    param_name = f"value_{index}"
+                    set_fragments.append(f"{_quote_identifier(column)} = :{param_name}")
+                    params[param_name] = value
 
-        if not set_fragments:
-            raise ValueError("No valid processed columns were updated.")
+                if not set_fragments:
+                    raise ValueError("No valid processed columns were updated.")
 
-        params.append(processed_game_id)
-        update_sql = _quote_sql(
-            f"UPDATE processed_games SET {', '.join(set_fragments)} WHERE \"ID\" = ?",
-            ['ID'],
-        )
-        conn.execute(update_sql, params)
-        conn.commit()
+                params["processed_id"] = processed_game_id
+                update_statement = text(
+                    f"UPDATE {processed_table} SET {', '.join(set_fragments)} "
+                    f"WHERE {id_column} = :processed_id"
+                )
+                sa_conn.execute(update_statement, params)
 
     updated_fields = [column for column in updates if column in processed_columns]
     return {
