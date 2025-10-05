@@ -31,7 +31,21 @@ from openai import OpenAI
 from urllib.parse import urlparse, urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
-from sqlalchemy import Column, Integer, MetaData, String, Table, inspect, select, text
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    func,
+    inspect,
+    select,
+    text,
+)
 from sqlalchemy import types as sqltypes
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy import exc as sa_exc
@@ -150,7 +164,18 @@ def _with_lookup_connection(
             return func(sa_conn)
 
     if isinstance(conn, Connection):
-        return func(conn)
+        if not write or conn.in_transaction():
+            return func(conn)
+
+        transaction = conn.begin()
+        try:
+            result = func(conn)
+        except Exception:
+            transaction.rollback()
+            raise
+        else:
+            transaction.commit()
+            return result
 
     raise TypeError(f'Unsupported connection type: {type(conn)!r}')
 
@@ -484,7 +509,7 @@ def _load_lookup_tables(conn: ConnectionLike) -> None:
         lookups_service.load_lookup_tables(
             sa_conn,
             tables=LOOKUP_TABLES,
-            data_dir=LOOKUP_DATA_DIR,
+            data_dir=get_lookup_data_dir(),
             normalize_lookup_name=_normalize_lookup_name,
             log=logger,
         )
@@ -1230,352 +1255,416 @@ def _migrate_id_column(conn: Connection) -> None:
             conn.execute(enable_fk_stmt)
 
 
+
 def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
-    conn = _db_handle_factory()
-    dialect_name = conn.engine.dialect.name
-    fk_enable_stmt = 'PRAGMA foreign_keys = ON'
-    if dialect_name != 'sqlite':
-        fk_enable_stmt = 'SET FOREIGN_KEY_CHECKS = 1'
+    engine_wrapper = _db_engine_factory()
+    engine = engine_wrapper.engine
+    dialect_name = engine.dialect.name
+
+    metadata = MetaData()
+
+    processed_games = Table(
+        'processed_games',
+        metadata,
+        Column('ID', Integer, primary_key=True, autoincrement=True),
+        Column('Source Index', String(255), unique=True),
+        Column('Name', Text),
+        Column('Summary', Text),
+        Column('First Launch Date', String(255)),
+        Column('Developers', Text),
+        Column('developers_ids', Text),
+        Column('Publishers', Text),
+        Column('publishers_ids', Text),
+        Column('Genres', Text),
+        Column('genres_ids', Text),
+        Column('Game Modes', Text),
+        Column('game_modes_ids', Text),
+        Column('Category', Text),
+        Column('Platforms', Text),
+        Column('platforms_ids', Text),
+        Column('igdb_id', String(255)),
+        Column('Cover Path', Text),
+        Column('Width', Integer),
+        Column('Height', Integer),
+        Column('cache_rank', Integer),
+        Column('last_edited_at', String(255)),
+        mysql_engine='InnoDB',
+    )
+
+    navigator_state = Table(
+        'navigator_state',
+        metadata,
+        Column('id', Integer, primary_key=True),
+        Column('current_index', Integer),
+        Column('seq_index', Integer),
+        Column('skip_queue', Text),
+        CheckConstraint('id = 1', name='ck_navigator_state_singleton'),
+        mysql_engine='InnoDB',
+    )
+
+    igdb_updates = Table(
+        'igdb_updates',
+        metadata,
+        Column(
+            'processed_game_id',
+            Integer,
+            ForeignKey('processed_games.ID', ondelete='CASCADE'),
+            primary_key=True,
+        ),
+        Column('igdb_id', String(255)),
+        Column('igdb_updated_at', String(255)),
+        Column('igdb_payload', Text),
+        Column('diff', Text),
+        Column('local_last_edited_at', String(255)),
+        Column('refreshed_at', String(255)),
+        Column('has_diff', Integer, nullable=False, server_default=text('0')),
+        mysql_engine='InnoDB',
+    )
+
+    updates_list = Table(
+        UPDATES_LIST_TABLE,
+        metadata,
+        Column(
+            'processed_game_id',
+            Integer,
+            ForeignKey('processed_games.ID', ondelete='CASCADE'),
+            primary_key=True,
+        ),
+        Column('igdb_id', String(255)),
+        Column('igdb_updated_at', String(255)),
+        Column('local_last_edited_at', String(255)),
+        Column('refreshed_at', String(255)),
+        Column('name', String(255)),
+        Column('has_diff', Integer, nullable=False, server_default=text('0')),
+        Column('cover', Text),
+        Column('cover_available', Integer, nullable=False, server_default=text('0')),
+        Column('update_type', String(32), nullable=False),
+        Column('detail_available', Integer, nullable=False, server_default=text('0')),
+        Column('cursor_value', String(255)),
+        Column('sort_numeric', sqltypes.Float),
+        Column('entry_type', String(8), nullable=False, server_default=text("'m'")),
+        Column('entry_rank', Integer, nullable=False, server_default=text('0')),
+        mysql_engine='InnoDB',
+    )
+
+    igdb_cache = Table(
+        IGDB_CACHE_TABLE,
+        metadata,
+        Column('igdb_id', Integer, primary_key=True),
+        Column('name', String(255)),
+        Column('summary', Text),
+        Column('updated_at', Integer),
+        Column('first_release_date', Integer),
+        Column('category', Integer),
+        Column('cover_image_id', String(255)),
+        Column('rating_count', Integer),
+        Column('developers', Text),
+        Column('publishers', Text),
+        Column('genres', Text),
+        Column('platforms', Text),
+        Column('game_modes', Text),
+        Column('cached_at', String(255)),
+        mysql_engine='InnoDB',
+    )
+
+    igdb_cache_state = Table(
+        IGDB_CACHE_STATE_TABLE,
+        metadata,
+        Column('id', Integer, primary_key=True),
+        Column('total_count', Integer),
+        Column('last_synced_at', String(255)),
+        CheckConstraint('id = 1', name='ck_igdb_cache_state_singleton'),
+        mysql_engine='InnoDB',
+    )
+
+    for table_config in LOOKUP_TABLES:
+        Table(
+            table_config['table'],
+            metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            Column(
+                'name',
+                String(255, collation='NOCASE'),
+                nullable=False,
+                unique=True,
+            ),
+            mysql_engine='InnoDB',
+            mysql_charset='utf8mb4',
+            mysql_collate='utf8mb4_unicode_ci',
+        )
+
+    Index('processed_games_igdb_id_idx', processed_games.c['igdb_id'])
+    Index(
+        'processed_games_last_edited_idx',
+        processed_games.c['last_edited_at'],
+        processed_games.c['ID'],
+    )
+    Index(
+        'processed_games_igdb_cache_idx',
+        func.nullif(processed_games.c['igdb_id'], ''),
+        processed_games.c['cache_rank'],
+        unique=True,
+    )
+    Index('igdb_updates_refreshed_at_idx', igdb_updates.c.refreshed_at)
+    Index(
+        'igdb_updates_has_diff_updated_idx',
+        igdb_updates.c.has_diff,
+        igdb_updates.c.igdb_updated_at,
+    )
+    Index(
+        'igdb_updates_order_idx',
+        igdb_updates.c.refreshed_at,
+        igdb_updates.c.local_last_edited_at,
+        igdb_updates.c.igdb_updated_at,
+        igdb_updates.c.processed_game_id,
+    )
+    Index(
+        f'{UPDATES_LIST_TABLE}_sort_idx',
+        updates_list.c.sort_numeric.desc(),
+        updates_list.c.processed_game_id.desc(),
+        updates_list.c.entry_rank.asc(),
+    )
+    Index(
+        f'{IGDB_CACHE_TABLE}_updated_at_id_idx',
+        igdb_cache.c.updated_at,
+        igdb_cache.c.igdb_id,
+    )
+
+    def _enable_foreign_keys(sa_conn: Connection) -> None:
+        if dialect_name == 'sqlite':
+            sa_conn.exec_driver_sql('PRAGMA foreign_keys = ON')
+        elif dialect_name in {'mysql', 'mariadb'}:
+            sa_conn.execute(text('SET SESSION foreign_key_checks = 1'))
 
     def _table_columns(table_name: str) -> set[str]:
-        handle = _db_handle_factory()
         try:
-            with handle.sa_connection() as sa_conn:
+            with engine.connect() as sa_conn:
                 inspector = inspect(sa_conn)
                 return {col['name'] for col in inspector.get_columns(table_name)}
         except sa_exc.SQLAlchemyError:
             return set()
-        finally:
-            handle.close()
 
-    try:
-        with conn:
-            conn.execute(fk_enable_stmt)
-            conn.execute(
-                '''CREATE TABLE IF NOT EXISTS processed_games (
-                    "ID" INTEGER PRIMARY KEY,
-                    "Source Index" TEXT UNIQUE,
-                    "Name" TEXT,
-                    "Summary" TEXT,
-                    "First Launch Date" TEXT,
-                    "Developers" TEXT,
-                    "developers_ids" TEXT,
-                    "Publishers" TEXT,
-                    "publishers_ids" TEXT,
-                    "Genres" TEXT,
-                    "genres_ids" TEXT,
-                    "Game Modes" TEXT,
-                    "game_modes_ids" TEXT,
-                    "Category" TEXT,
-                    "Platforms" TEXT,
-                    "platforms_ids" TEXT,
-                    "igdb_id" TEXT,
-                    "Cover Path" TEXT,
-                    "Width" INTEGER,
-                    "Height" INTEGER,
-                    cache_rank INTEGER,
-                    last_edited_at TEXT
-                )'''
-            )
-            conn.execute(
-                '''CREATE TABLE IF NOT EXISTS navigator_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    current_index INTEGER,
-                    seq_index INTEGER,
-                    skip_queue TEXT
-                )'''
-            )
+    with engine.begin() as sa_conn:
+        _enable_foreign_keys(sa_conn)
+        metadata.create_all(sa_conn, checkfirst=True)
 
-        if run_migrations:
-            with conn.sa_connection() as sa_conn:
-                _migrate_id_column(sa_conn)
+    if run_migrations:
+        with engine.connect() as sa_conn:
+            _migrate_id_column(sa_conn)
 
-        processed_columns: set[str] | None = None
-        if run_migrations:
+    processed_columns: set[str] | None = None
+    if run_migrations:
+        db_utils.clear_processed_games_columns_cache()
+        with engine.connect() as sa_conn:
+            processed_columns = db_utils.get_processed_games_columns(conn=sa_conn)
+
+    processed_games_table = _quote_identifier('processed_games')
+    processed_games_id = _quote_identifier('ID')
+    processed_games_igdb_id = _quote_identifier('igdb_id')
+    processed_games_last_edited = _quote_identifier('last_edited_at')
+    updates_table = _quote_identifier('igdb_updates')
+    updates_processed_game_id = _quote_identifier('processed_game_id')
+    updates_local_last_edited = _quote_identifier('local_last_edited_at')
+
+    if run_migrations and processed_columns is not None:
+        alter_statements: dict[str, text] = {
+            'Category': text(
+                f'ALTER TABLE {processed_games_table} '
+                f'ADD COLUMN {_quote_identifier("Category")} TEXT'
+            ),
+            'Platforms': text(
+                f'ALTER TABLE {processed_games_table} '
+                f'ADD COLUMN {_quote_identifier("Platforms")} TEXT'
+            ),
+            'igdb_id': text(
+                f'ALTER TABLE {processed_games_table} '
+                f'ADD COLUMN {processed_games_igdb_id} TEXT'
+            ),
+            'last_edited_at': text(
+                f'ALTER TABLE {processed_games_table} '
+                f'ADD COLUMN {processed_games_last_edited} TEXT'
+            ),
+            'cache_rank': text(
+                f'ALTER TABLE {processed_games_table} '
+                f'ADD COLUMN {_quote_identifier("cache_rank")} INTEGER'
+            ),
+        }
+        pending_statements = [
+            alter_statements[name]
+            for name in alter_statements
+            if name not in processed_columns
+        ]
+        if pending_statements:
+            with engine.begin() as sa_conn:
+                _enable_foreign_keys(sa_conn)
+                for statement in pending_statements:
+                    sa_conn.execute(statement)
             db_utils.clear_processed_games_columns_cache()
-            processed_columns = db_utils.get_processed_games_columns(handle=conn)
 
-        with conn:
-            conn.execute(fk_enable_stmt)
-            if run_migrations and processed_columns is not None:
-                column_statements = [
-                    ('Category', 'ALTER TABLE processed_games ADD COLUMN "Category" TEXT'),
-                    ('Platforms', 'ALTER TABLE processed_games ADD COLUMN "Platforms" TEXT'),
-                    ('igdb_id', 'ALTER TABLE processed_games ADD COLUMN "igdb_id" TEXT'),
-                    ('last_edited_at', 'ALTER TABLE processed_games ADD COLUMN last_edited_at TEXT'),
-                    ('cache_rank', 'ALTER TABLE processed_games ADD COLUMN cache_rank INTEGER'),
-                ]
-                for column_name, statement in column_statements:
-                    if column_name not in processed_columns:
-                        conn.execute(statement)
-                        processed_columns.add(column_name)
-                db_utils.clear_processed_games_columns_cache()
-            conn.execute(
-                '''CREATE TABLE IF NOT EXISTS igdb_updates (
-                    processed_game_id INTEGER PRIMARY KEY,
-                    igdb_id TEXT,
-                    igdb_updated_at TEXT,
-                    igdb_payload TEXT,
-                    diff TEXT,
-                    local_last_edited_at TEXT,
-                    refreshed_at TEXT,
-                    has_diff INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(processed_game_id) REFERENCES processed_games("ID")
-                )'''
+    igdb_updates_columns = _table_columns('igdb_updates')
+    if 'has_diff' not in igdb_updates_columns:
+        try:
+            with engine.begin() as sa_conn:
+                sa_conn.execute(
+                    text(
+                        'ALTER TABLE igdb_updates '
+                        'ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
+                    )
+                )
+        except sa_exc.SQLAlchemyError:
+            pass
+
+    select_games_stmt = text(
+        (
+            f'SELECT {processed_games_id} AS game_id, '
+            f'{processed_games_igdb_id} AS igdb_id, '
+            f'{processed_games_last_edited} AS last_edited_at '
+            f'FROM {processed_games_table}'
+        )
+    )
+    update_last_edited_stmt = text(
+        (
+            f'UPDATE {processed_games_table} '
+            f'SET {processed_games_last_edited} = :last_edited_at '
+            f'WHERE {processed_games_id} = :game_id'
+        )
+    )
+    delete_orphans_stmt = text(
+        (
+            f'DELETE FROM {updates_table} '
+            f'WHERE {updates_processed_game_id} IS NULL '
+            'OR NOT EXISTS ('
+            f'SELECT 1 FROM {processed_games_table} AS pg '
+            f'WHERE pg.{processed_games_id} = {updates_table}.{updates_processed_game_id})'
+        )
+    )
+    guard_stmt = text(
+        (
+            f'SELECT 1 FROM {processed_games_table} '
+            f'WHERE {processed_games_id} = :game_id'
+        )
+    )
+
+    if dialect_name == 'sqlite':
+        insert_updates_sql = (
+            f'INSERT OR IGNORE INTO {updates_table} '
+            f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
+            'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
+        )
+    elif dialect_name in {'mysql', 'mariadb'}:
+        insert_updates_sql = (
+            f'INSERT IGNORE INTO {updates_table} '
+            f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
+            'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
+        )
+    else:
+        insert_updates_sql = (
+            f'INSERT INTO {updates_table} '
+            f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
+            'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
+        )
+    insert_updates_stmt = text(insert_updates_sql)
+
+    update_has_diff_stmt = text(
+        (
+            'UPDATE igdb_updates '
+            'SET has_diff = CASE '
+            "WHEN diff IS NULL OR diff = '' OR diff = '{}' THEN 0 "
+            'ELSE 1 '
+            'END '
+            'WHERE has_diff NOT IN (0, 1) OR has_diff IS NULL'
+        )
+    )
+
+    analyze_stmt = None
+    if run_migrations:
+        if dialect_name == 'sqlite':
+            analyze_stmt = text('ANALYZE')
+        elif dialect_name in {'mysql', 'mariadb'}:
+            analyze_stmt = text(f'ANALYZE TABLE {processed_games_table}')
+
+    with engine.begin() as sa_conn:
+        _enable_foreign_keys(sa_conn)
+        try:
+            sa_conn.execute(update_has_diff_stmt)
+        except sa_exc.SQLAlchemyError:
+            pass
+
+        _ensure_lookup_join_tables(sa_conn)
+
+        if run_migrations:
+            _load_lookup_tables(sa_conn)
+            _recreate_lookup_join_tables(sa_conn)
+            _backfill_lookup_relations(sa_conn)
+            _ensure_lookup_id_columns(sa_conn)
+
+            games = [
+                dict(row) for row in sa_conn.execute(select_games_stmt).mappings().all()
+            ]
+            for row in games:
+                if row.get('last_edited_at'):
+                    continue
+                refreshed = now_utc_iso()
+                sa_conn.execute(
+                    update_last_edited_stmt,
+                    {'last_edited_at': refreshed, 'game_id': row.get('game_id')},
+                )
+                row['last_edited_at'] = refreshed
+
+            cleanup_cursor = sa_conn.execute(delete_orphans_stmt)
+            logger.info(
+                "Startup cleanup removed %d orphan igdb_update rows; database may still "
+                "require manual attention.",
+                cleanup_cursor.rowcount,
             )
 
-        igdb_updates_columns = _table_columns('igdb_updates')
-        if 'has_diff' not in igdb_updates_columns:
-            with conn:
+            for row in games:
+                igdb_id_value = row.get('igdb_id')
+                if not igdb_id_value:
+                    continue
+
+                raw_game_id = row.get('game_id')
                 try:
-                    conn.execute(
-                        'ALTER TABLE igdb_updates ADD COLUMN has_diff INTEGER NOT NULL DEFAULT 0'
+                    if isinstance(raw_game_id, numbers.Integral):
+                        game_id = int(raw_game_id)
+                    elif isinstance(raw_game_id, numbers.Real):
+                        float_value = float(raw_game_id)
+                        if not float_value.is_integer():
+                            continue
+                        game_id = int(float_value)
+                    else:
+                        text_value = str(raw_game_id).strip()
+                        if not text_value:
+                            continue
+                        game_id = int(text_value)
+                except (TypeError, ValueError):
+                    continue
+
+                guard_cursor = sa_conn.execute(guard_stmt, {'game_id': game_id})
+                if guard_cursor.first() is None:
+                    continue
+
+                try:
+                    sa_conn.execute(
+                        insert_updates_stmt,
+                        {
+                            'processed_game_id': game_id,
+                            'igdb_id': str(igdb_id_value),
+                            'last_edited_at': row.get('last_edited_at'),
+                        },
                     )
+                except sa_exc.IntegrityError:
+                    logger.warning(
+                        "Failed to reseed igdb_updates for processed_game_id=%s due to",
+                        " integrity error.",
+                        game_id,
+                    )
+
+            if analyze_stmt is not None:
+                try:
+                    sa_conn.execute(analyze_stmt)
                 except sa_exc.SQLAlchemyError:
                     pass
-
-        with conn:
-            conn.execute(fk_enable_stmt)
-            try:
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS igdb_updates_refreshed_at_idx '
-                    'ON igdb_updates(refreshed_at)'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS igdb_updates_has_diff_updated_idx '
-                    'ON igdb_updates(has_diff, igdb_updated_at)'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS igdb_updates_order_idx '
-                    'ON igdb_updates(refreshed_at, local_last_edited_at, igdb_updated_at, processed_game_id)'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    '''UPDATE igdb_updates
-                       SET has_diff = CASE
-                           WHEN diff IS NULL OR diff = '' OR diff = '{}' THEN 0
-                           ELSE 1
-                       END
-                       WHERE has_diff NOT IN (0, 1) OR has_diff IS NULL'''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    f'''CREATE TABLE IF NOT EXISTS {UPDATES_LIST_TABLE} (
-                            processed_game_id INTEGER PRIMARY KEY,
-                            igdb_id TEXT,
-                            igdb_updated_at TEXT,
-                            local_last_edited_at TEXT,
-                            refreshed_at TEXT,
-                            name TEXT,
-                            has_diff INTEGER NOT NULL DEFAULT 0,
-                            cover TEXT,
-                            cover_available INTEGER NOT NULL DEFAULT 0,
-                            update_type TEXT NOT NULL,
-                            detail_available INTEGER NOT NULL DEFAULT 0,
-                            cursor_value TEXT,
-                            sort_numeric REAL,
-                            entry_type TEXT NOT NULL DEFAULT 'm',
-                            entry_rank INTEGER NOT NULL DEFAULT 0
-                        )'''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    f'''CREATE INDEX IF NOT EXISTS {UPDATES_LIST_TABLE}_sort_idx '''
-                    f'''ON {UPDATES_LIST_TABLE}(sort_numeric DESC, processed_game_id DESC, entry_rank ASC)'''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    f'''
-                    CREATE TABLE IF NOT EXISTS {IGDB_CACHE_TABLE} (
-                        igdb_id INTEGER PRIMARY KEY,
-                        name TEXT,
-                        summary TEXT,
-                        updated_at INTEGER,
-                        first_release_date INTEGER,
-                        category INTEGER,
-                        cover_image_id TEXT,
-                        rating_count INTEGER,
-                        developers TEXT,
-                        publishers TEXT,
-                        genres TEXT,
-                        platforms TEXT,
-                        game_modes TEXT,
-                        cached_at TEXT
-                    )
-                    '''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    f'''CREATE INDEX IF NOT EXISTS {IGDB_CACHE_TABLE}_updated_at_id_idx '''
-                    f'''ON {IGDB_CACHE_TABLE}(updated_at, igdb_id)'''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS processed_games_igdb_id_idx '
-                    'ON processed_games("igdb_id")'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    '''
-                    CREATE UNIQUE INDEX IF NOT EXISTS processed_games_igdb_cache_idx
-                    ON processed_games("igdb_id", cache_rank)
-                    WHERE "igdb_id" IS NOT NULL AND "igdb_id" != ''
-                    '''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS processed_games_last_edited_idx '
-                    'ON processed_games(last_edited_at, "ID")'
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            try:
-                conn.execute(
-                    f'''
-                    CREATE TABLE IF NOT EXISTS {IGDB_CACHE_STATE_TABLE} (
-                        id INTEGER PRIMARY KEY CHECK (id = 1),
-                        total_count INTEGER,
-                        last_synced_at TEXT
-                    )
-                    '''
-                )
-            except sa_exc.SQLAlchemyError:
-                pass
-
-            for table_config in LOOKUP_TABLES:
-                conn.execute(
-                    f'''
-                    CREATE TABLE IF NOT EXISTS {table_config['table']} (
-                        id INTEGER PRIMARY KEY,
-                        name TEXT NOT NULL COLLATE NOCASE UNIQUE
-                    )
-                    '''
-                )
-
-            _ensure_lookup_join_tables(conn)
-
-            if run_migrations:
-                _load_lookup_tables(conn)
-                _recreate_lookup_join_tables(conn)
-                _backfill_lookup_relations(conn)
-                _ensure_lookup_id_columns(conn)
-
-                cur = conn.execute('SELECT "ID", last_edited_at FROM processed_games')
-                rows = cur.fetchall()
-                for game_id, last_edit in rows:
-                    if not last_edit:
-                        conn.execute(
-                            'UPDATE processed_games SET last_edited_at=? WHERE "ID"=?',
-                            (
-                                datetime.now(timezone.utc).isoformat(),
-                                game_id,
-                            ),
-                        )
-
-                cleanup_cursor = conn.execute(
-                    '''
-                    DELETE FROM igdb_updates
-                    WHERE processed_game_id IS NULL
-                       OR NOT EXISTS (
-                            SELECT 1
-                            FROM processed_games
-                            WHERE processed_games."ID" = igdb_updates.processed_game_id
-                        )
-                    '''
-                )
-                logger.info(
-                    "Startup cleanup removed %d orphan igdb_update rows; database may still",
-                    " require manual attention.",
-                    cleanup_cursor.rowcount,
-                )
-
-                cur = conn.execute(
-                    'SELECT "ID", "igdb_id", last_edited_at FROM processed_games'
-                )
-                for raw_game_id, igdb_id_value, last_edit in cur.fetchall():
-                    if not igdb_id_value:
-                        continue
-                    try:
-                        if isinstance(raw_game_id, numbers.Integral):
-                            game_id = int(raw_game_id)
-                        elif isinstance(raw_game_id, numbers.Real):
-                            float_value = float(raw_game_id)
-                            if not float_value.is_integer():
-                                continue
-                            game_id = int(float_value)
-                        else:
-                            text = str(raw_game_id).strip()
-                            if not text:
-                                continue
-                            game_id = int(text)
-                    except (TypeError, ValueError):
-                        continue
-                    guard_cursor = conn.execute(
-                        'SELECT 1 FROM processed_games WHERE "ID"=?', (game_id,)
-                    )
-                    if guard_cursor.fetchone() is None:
-                        continue
-
-                    try:
-                        conn.execute(
-                            '''INSERT OR IGNORE INTO igdb_updates (
-                                processed_game_id, igdb_id, local_last_edited_at
-                            ) VALUES (?, ?, ?)''',
-                            (
-                                game_id,
-                                str(igdb_id_value),
-                                last_edit,
-                            ),
-                        )
-                    except sa_exc.IntegrityError:
-                        logger.warning(
-                            "Failed to reseed igdb_updates for processed_game_id=%s due to",
-                            " integrity error.",
-                            game_id,
-                        )
-                        continue
-            if run_migrations:
-                try:
-                    conn.execute('ANALYZE')
-                except sa_exc.SQLAlchemyError:
-                    pass
-    finally:
-        conn.close()
-
-
 @app.teardown_appcontext
 def close_db(exc):
     db = g.pop('db', None)
