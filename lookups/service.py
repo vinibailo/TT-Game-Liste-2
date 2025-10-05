@@ -1164,7 +1164,10 @@ def ensure_lookup_id_columns(
     except LookupNotFoundError:
         return
 
-    inspector = inspect(_resolve_engine(conn))
+    engine = _resolve_engine(conn)
+    cache_key = (id(engine), processed_table.name)
+
+    inspector = inspect(engine)
     existing_columns = {col["name"] for col in inspector.get_columns(processed_table.name)}
     added = False
 
@@ -1185,7 +1188,9 @@ def ensure_lookup_id_columns(
         added = True
 
     if added:
-        inspector = inspect(_resolve_engine(conn))
+        _TABLE_CACHE.pop(cache_key, None)
+        processed_table = _table_from_connection(conn, processed_table.name)
+        inspector = inspect(engine)
         existing_columns = {col["name"] for col in inspector.get_columns(processed_table.name)}
 
     expected_columns = {
@@ -1193,6 +1198,12 @@ def ensure_lookup_id_columns(
         for relation in relations
         if relation.get("id_column")
     }
+
+    table_column_keys = set(processed_table.c.keys())
+    if expected_columns - table_column_keys:
+        _TABLE_CACHE.pop(cache_key, None)
+        processed_table = _table_from_connection(conn, processed_table.name)
+        table_column_keys = set(processed_table.c.keys())
 
     if expected_columns & existing_columns:
         _backfill_lookup_id_columns(
