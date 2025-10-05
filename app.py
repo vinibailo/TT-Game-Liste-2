@@ -41,6 +41,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    bindparam,
     func,
     inspect,
     select,
@@ -49,6 +50,11 @@ from sqlalchemy import (
 from sqlalchemy import types as sqltypes
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy import exc as sa_exc
+
+try:  # pragma: no cover - optional dialect import
+    from sqlalchemy.dialects.mysql import insert as mysql_insert
+except ImportError:  # pragma: no cover - optional dialect import
+    mysql_insert = None  # type: ignore[assignment]
 
 # Placeholder imports to establish the upcoming modular structure.
 import config as app_config
@@ -1546,24 +1552,50 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     )
 
     if dialect_name == 'sqlite':
-        insert_updates_sql = (
+        insert_updates_stmt = text(
             f'INSERT OR IGNORE INTO {updates_table} '
             f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
             'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
         )
     elif dialect_name in {'mysql', 'mariadb'}:
-        insert_updates_sql = (
-            f'INSERT IGNORE INTO {updates_table} '
-            f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
-            'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
-        )
+        if mysql_insert is not None:
+            insert_updates_stmt = mysql_insert(igdb_updates).values(
+                processed_game_id=bindparam('processed_game_id'),
+                igdb_id=bindparam('igdb_id'),
+                local_last_edited_at=bindparam('last_edited_at'),
+            )
+            try:  # pragma: no cover - SQLAlchemy versions without upsert helper
+                insert_updates_stmt = insert_updates_stmt.on_duplicate_key_update(
+                    processed_game_id=igdb_updates.c.processed_game_id,
+                    igdb_id=igdb_updates.c.igdb_id,
+                    local_last_edited_at=igdb_updates.c.local_last_edited_at,
+                )
+            except AttributeError:  # pragma: no cover - very old SQLAlchemy
+                insert_updates_stmt = text(
+                    f'INSERT INTO {updates_table} '
+                    f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
+                    'VALUES (:processed_game_id, :igdb_id, :last_edited_at) '
+                    f'ON DUPLICATE KEY UPDATE '
+                    f'{updates_processed_game_id} = {updates_table}.{updates_processed_game_id}, '
+                    f'{processed_games_igdb_id} = {updates_table}.{processed_games_igdb_id}, '
+                    f'{updates_local_last_edited} = {updates_table}.{updates_local_last_edited}'
+                )
+        else:  # pragma: no cover - mysql dialect helper unavailable
+            insert_updates_stmt = text(
+                f'INSERT INTO {updates_table} '
+                f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
+                'VALUES (:processed_game_id, :igdb_id, :last_edited_at) '
+                f'ON DUPLICATE KEY UPDATE '
+                f'{updates_processed_game_id} = {updates_table}.{updates_processed_game_id}, '
+                f'{processed_games_igdb_id} = {updates_table}.{processed_games_igdb_id}, '
+                f'{updates_local_last_edited} = {updates_table}.{updates_local_last_edited}'
+            )
     else:
-        insert_updates_sql = (
+        insert_updates_stmt = text(
             f'INSERT INTO {updates_table} '
             f'({updates_processed_game_id}, {processed_games_igdb_id}, {updates_local_last_edited}) '
             'VALUES (:processed_game_id, :igdb_id, :last_edited_at)'
         )
-    insert_updates_stmt = text(insert_updates_sql)
 
     update_has_diff_stmt = text(
         (
@@ -1578,10 +1610,8 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
 
     analyze_stmt = None
     if run_migrations:
-        if dialect_name == 'sqlite':
-            analyze_stmt = text('ANALYZE')
-        elif dialect_name in {'mysql', 'mariadb'}:
-            analyze_stmt = text(f'ANALYZE TABLE {processed_games_table}')
+        if dialect_name in {'sqlite', 'mysql', 'mariadb'}:
+            analyze_stmt = text(f'ANALYZE TABLE {updates_table}')
 
     with engine.begin() as sa_conn:
         _enable_foreign_keys(sa_conn)
@@ -1660,11 +1690,12 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
                         game_id,
                     )
 
-            if analyze_stmt is not None:
-                try:
-                    sa_conn.execute(analyze_stmt)
-                except sa_exc.SQLAlchemyError:
-                    pass
+    if analyze_stmt is not None:
+        try:
+            with engine.begin() as sa_conn:
+                sa_conn.execute(analyze_stmt)
+        except sa_exc.SQLAlchemyError:
+            pass
 @app.teardown_appcontext
 def close_db(exc):
     db = g.pop('db', None)
