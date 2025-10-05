@@ -539,7 +539,7 @@ def get_db_session(
 
 
 def get_processed_games_columns(
-    conn: Any | None = None,
+    conn: Connection | DatabaseHandle | None = None,
     *,
     handle: DatabaseHandle | None = None,
     connection_factory: Callable[[], DatabaseHandle | DatabaseEngine] | None = None,
@@ -550,20 +550,19 @@ def get_processed_games_columns(
     if _processed_games_columns_cache is not None:
         return _processed_games_columns_cache
 
-    if conn is not None and sqlite3 is not None and isinstance(conn, sqlite3.Connection):
-        rows = conn.execute('PRAGMA table_info(processed_games)').fetchall()
-        _processed_games_columns_cache = {row['name'] for row in rows}
+    if isinstance(conn, DatabaseHandle):
+        handle = conn
+        conn = None
+
+    if isinstance(conn, Connection):
+        inspector = inspect(conn)
+        _processed_games_columns_cache = {
+            col['name'] for col in inspector.get_columns('processed_games')
+        }
         return _processed_games_columns_cache
 
     if handle is None:
         handle = get_db(connection_factory)
-
-    if sqlite3 is not None:
-        with handle.connection() as dbapi_conn:
-            if isinstance(dbapi_conn, sqlite3.Connection):
-                rows = dbapi_conn.execute('PRAGMA table_info(processed_games)').fetchall()
-                _processed_games_columns_cache = {row['name'] for row in rows}
-                return _processed_games_columns_cache
 
     with handle.sa_connection() as sa_conn:
         inspector = inspect(sa_conn)
