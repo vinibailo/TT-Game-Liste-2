@@ -23,6 +23,8 @@ from flask import (
 )
 from werkzeug.routing import BaseConverter
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from updates.service import apply_processed_game_patch, refresh_igdb_cache
 from igdb.cache import IGDB_CACHE_TABLE, get_cache_status as cache_get_status
 
@@ -67,6 +69,64 @@ def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
         seen.add(identifier)
         sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
     return sql
+
+
+def _dialect_name(conn: Any) -> str | None:
+    """Return the SQLAlchemy dialect name for ``conn`` when available."""
+
+    engine = None
+    for attr in ("engine",):
+        try:
+            engine = getattr(conn, attr)
+        except Exception:  # pragma: no cover - defensive accessor
+            engine = None
+        if engine is not None:
+            break
+
+    if engine is not None:
+        dialect = getattr(engine, "dialect", None)
+        name = getattr(dialect, "name", None)
+        if isinstance(name, str):
+            return name
+
+    dialect = getattr(conn, "dialect", None)
+    name = getattr(dialect, "name", None)
+    if isinstance(name, str):
+        return name
+
+    return None
+
+
+def _numeric_string_predicate(column: str, dialect_name: str | None) -> str | None:
+    """Return a predicate matching numeric identifiers for ``dialect_name``."""
+
+    if not dialect_name:
+        return None
+
+    normalized = dialect_name.lower()
+    trimmed = f"TRIM({column})"
+
+    if normalized in {"mysql", "mariadb"}:
+        return f"{trimmed} REGEXP '^[0-9]+$'"
+    if normalized == "postgresql":
+        return f"{trimmed} ~ '^[0-9]+$'"
+
+    return None
+
+
+def _numeric_comparison_column(column: str, dialect_name: str | None) -> str:
+    """Return an expression comparing numeric identifiers by dialect."""
+
+    if not dialect_name:
+        return column
+
+    normalized = dialect_name.lower()
+    if normalized in {"mysql", "mariadb"}:
+        return f"CAST({column} AS UNSIGNED)"
+    if normalized == "postgresql":
+        return f"CAST({column} AS BIGINT)"
+
+    return column
 
 
 def _iter_exception_chain(error: BaseException) -> Iterable[BaseException]:
@@ -142,9 +202,18 @@ def _fetch_processed_cache_ids() -> list[int]:
 
     with db_lock:
         conn = get_db()
-        processed_sql = _quote_sql(
-            'SELECT DISTINCT "igdb_id" FROM processed_games WHERE "igdb_id" IS NOT NULL',
-            ['igdb_id'],
+        dialect_name = _dialect_name(conn)
+        igdb_column = _quote_identifier('igdb_id')
+        processed_table = _quote_identifier('processed_games')
+        processed_predicates = [f"{igdb_column} IS NOT NULL"]
+        numeric_predicate = _numeric_string_predicate(igdb_column, dialect_name)
+        if numeric_predicate:
+            processed_predicates.append(numeric_predicate)
+
+        where_clause = ' AND '.join(processed_predicates)
+        processed_sql = (
+            f"SELECT DISTINCT {igdb_column} FROM {processed_table}"
+            f" WHERE {where_clause}"
         )
         processed_rows = conn.execute(processed_sql).fetchall()
 
@@ -174,8 +243,13 @@ def _fetch_processed_cache_ids() -> list[int]:
             return []
 
         cache_ids: set[int] = set()
-        igdb_column = _quote_identifier('igdb_id')
         cache_table = _quote_identifier(IGDB_CACHE_TABLE)
+        cache_predicates = [f"{igdb_column} IS NOT NULL"]
+        cache_numeric_predicate = _numeric_string_predicate(igdb_column, dialect_name)
+        if cache_numeric_predicate:
+            cache_predicates.append(cache_numeric_predicate)
+        cache_where = ' AND '.join(cache_predicates)
+        comparison_column = _numeric_comparison_column(igdb_column, dialect_name)
         chunk_size = 500
         for start in range(0, len(numeric_ids), chunk_size):
             chunk = numeric_ids[start : start + chunk_size]
@@ -184,7 +258,7 @@ def _fetch_processed_cache_ids() -> list[int]:
             placeholders = ', '.join('?' for _ in chunk)
             cache_sql = (
                 f"SELECT DISTINCT {igdb_column} FROM {cache_table} "
-                f"WHERE {igdb_column} IN ({placeholders})"
+                f"WHERE {cache_where} AND {comparison_column} IN ({placeholders})"
             )
             rows = conn.execute(cache_sql, tuple(chunk)).fetchall()
             for row in rows:
@@ -212,6 +286,9 @@ def _safe_set_cached_total(conn: Any, total: int | None) -> None:
     setter = _ctx('_set_cached_igdb_total')
     try:
         setter(conn, total)
+    except SQLAlchemyError as exc:
+        if not _is_lock_error(exc):
+            raise
     except Exception as exc:
         if not _is_lock_error(exc):
             raise
