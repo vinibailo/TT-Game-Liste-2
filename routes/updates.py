@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import time
 from collections.abc import Iterable
 from typing import Any, Mapping
 
 from datetime import datetime
 
+from db import utils as db_utils
 from flask import (
     Blueprint,
     Response,
@@ -53,6 +53,40 @@ def _register_hex_converter(setup_state: Any) -> None:
     setup_state.app.url_map.converters["hexjob"] = HexJobIdConverter
 
 _context: dict[str, Any] = {}
+
+
+def _quote_identifier(identifier: str) -> str:
+    return db_utils._quote_identifier(identifier)
+
+
+def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
+    seen: set[str] = set()
+    for identifier in identifiers:
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
+    return sql
+
+
+def _iter_exception_chain(error: BaseException) -> Iterable[BaseException]:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while isinstance(current, BaseException) and id(current) not in seen:
+        yield current
+        seen.add(id(current))
+        next_error = getattr(current, 'orig', None)
+        current = next_error if isinstance(next_error, BaseException) else None
+
+
+def _is_lock_error(error: BaseException) -> bool:
+    for candidate in _iter_exception_chain(error):
+        message = str(candidate).strip().lower()
+        if not message:
+            continue
+        if 'lock' in message:
+            return True
+    return False
 
 
 def configure(context: Mapping[str, Any]) -> None:
@@ -108,35 +142,68 @@ def _fetch_processed_cache_ids() -> list[int]:
 
     with db_lock:
         conn = get_db()
-        query = (
-            f'''SELECT DISTINCT cache.igdb_id AS igdb_id
-                FROM {IGDB_CACHE_TABLE} AS cache
-                INNER JOIN processed_games AS pg
-                    ON pg."igdb_id" IS NOT NULL
-                   AND TRIM(pg."igdb_id") != ''
-                   AND pg."igdb_id" GLOB '[0-9]*'
-                   AND CAST(pg."igdb_id" AS INTEGER) = cache.igdb_id'''
+        processed_sql = _quote_sql(
+            'SELECT DISTINCT "igdb_id" FROM processed_games WHERE "igdb_id" IS NOT NULL',
+            ['igdb_id'],
         )
-        rows = conn.execute(query).fetchall()
+        processed_rows = conn.execute(processed_sql).fetchall()
 
-    cache_ids: list[int] = []
-    for row in rows:
-        value: Any
-        try:
-            value = row['igdb_id']  # type: ignore[index]
-        except Exception:
+        numeric_ids: list[int] = []
+        seen_ids: set[int] = set()
+        for row in processed_rows:
+            value: Any
             try:
-                value = row[0]  # type: ignore[index]
+                value = row['igdb_id']  # type: ignore[index]
             except Exception:
-                value = None
-        try:
-            if value is None:
+                try:
+                    value = row[0]  # type: ignore[index]
+                except Exception:
+                    value = None
+            try:
+                if value is None:
+                    continue
+                candidate = int(str(value).strip())
+            except (TypeError, ValueError):
                 continue
-            cache_ids.append(int(value))
-        except (TypeError, ValueError):
-            continue
+            if candidate in seen_ids:
+                continue
+            seen_ids.add(candidate)
+            numeric_ids.append(candidate)
 
-    return cache_ids
+        if not numeric_ids:
+            return []
+
+        cache_ids: set[int] = set()
+        igdb_column = _quote_identifier('igdb_id')
+        cache_table = _quote_identifier(IGDB_CACHE_TABLE)
+        chunk_size = 500
+        for start in range(0, len(numeric_ids), chunk_size):
+            chunk = numeric_ids[start : start + chunk_size]
+            if not chunk:
+                continue
+            placeholders = ', '.join('?' for _ in chunk)
+            cache_sql = (
+                f"SELECT DISTINCT {igdb_column} FROM {cache_table} "
+                f"WHERE {igdb_column} IN ({placeholders})"
+            )
+            rows = conn.execute(cache_sql, tuple(chunk)).fetchall()
+            for row in rows:
+                value: Any
+                try:
+                    value = row['igdb_id']  # type: ignore[index]
+                except Exception:
+                    try:
+                        value = row[0]  # type: ignore[index]
+                    except Exception:
+                        value = None
+                try:
+                    if value is None:
+                        continue
+                    cache_ids.add(int(str(value).strip()))
+                except (TypeError, ValueError):
+                    continue
+
+    return sorted(cache_ids)
 
 
 def _safe_set_cached_total(conn: Any, total: int | None) -> None:
@@ -145,9 +212,8 @@ def _safe_set_cached_total(conn: Any, total: int | None) -> None:
     setter = _ctx('_set_cached_igdb_total')
     try:
         setter(conn, total)
-    except sqlite3.OperationalError as exc:
-        message = str(exc).lower()
-        if 'locked' not in message:
+    except Exception as exc:
+        if not _is_lock_error(exc):
             raise
 
 
@@ -639,25 +705,43 @@ def api_updates_remove_duplicate(processed_game_id: int):
 
     with db_lock:
         conn = get_db()
+        pg_id = _quote_identifier('ID')
         relation_count_sql = ', '.join(
-            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = pg."ID") AS {relation["join_table"]}_count'
+            f'(SELECT COUNT(*) FROM {relation["join_table"]} WHERE processed_game_id = pg.{pg_id}) '
+            f'AS {relation["join_table"]}_count'
             for relation in lookup_relations
         )
+        base_query = f'''
+            SELECT
+                pg."ID",
+                pg."Source Index",
+                pg."Name",
+                pg."igdb_id",
+                pg."Summary",
+                pg."Cover Path",
+                pg."First Launch Date",
+                pg."Category",
+                pg."Width",
+                pg."Height",
+                pg.last_edited_at,
+                {relation_count_sql}
+           FROM processed_games AS pg'''
         cur = conn.execute(
-            f'''SELECT
-                    pg."ID",
-                    pg."Source Index",
-                    pg."Name",
-                    pg."igdb_id",
-                    pg."Summary",
-                    pg."Cover Path",
-                    pg."First Launch Date",
-                    pg."Category",
-                    pg."Width",
-                    pg."Height",
-                    pg.last_edited_at,
-                    {relation_count_sql}
-               FROM processed_games AS pg'''
+            _quote_sql(
+                base_query,
+                [
+                    'ID',
+                    'Source Index',
+                    'Name',
+                    'igdb_id',
+                    'Summary',
+                    'Cover Path',
+                    'First Launch Date',
+                    'Category',
+                    'Width',
+                    'Height',
+                ],
+            )
         )
         rows = cur.fetchall()
 
@@ -933,26 +1017,29 @@ def api_updates_detail(processed_game_id: int):
     with db_lock:
         conn = get_db()
         processed_columns = get_processed_games_columns(conn)
+        cover_url_column = _quote_identifier('Large Cover Image (URL)')
         cover_url_select = (
-            'p."Large Cover Image (URL)" AS cover_url'
+            f'p.{cover_url_column} AS cover_url'
             if 'Large Cover Image (URL)' in processed_columns
             else 'NULL AS cover_url'
         )
+        query = f'''
+            SELECT
+                u.processed_game_id,
+                u.igdb_id,
+                u.igdb_updated_at,
+                u.igdb_payload,
+                u.diff,
+                u.local_last_edited_at,
+                u.refreshed_at,
+                p."Name" AS game_name,
+                p."Cover Path" AS cover_path,
+                {cover_url_select}
+            FROM igdb_updates u
+            LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
+            WHERE u.processed_game_id=?'''
         cur = conn.execute(
-            f'''SELECT
-                   u.processed_game_id,
-                   u.igdb_id,
-                   u.igdb_updated_at,
-                   u.igdb_payload,
-                   u.diff,
-                   u.local_last_edited_at,
-                   u.refreshed_at,
-                   p."Name" AS game_name,
-                   p."Cover Path" AS cover_path,
-                   {cover_url_select}
-               FROM igdb_updates u
-               LEFT JOIN processed_games p ON p."ID" = u.processed_game_id
-               WHERE u.processed_game_id=?''',
+            _quote_sql(query, ['Name', 'Cover Path', 'ID']),
             (processed_game_id,),
         )
         row = cur.fetchone()
@@ -998,17 +1085,20 @@ def api_updates_cover(processed_game_id: int):
     with db_lock:
         conn = get_db()
         processed_columns = get_processed_games_columns(conn)
+        cover_url_column = _quote_identifier('Large Cover Image (URL)')
         cover_url_select = (
-            'p."Large Cover Image (URL)" AS cover_url'
+            f'p.{cover_url_column} AS cover_url'
             if 'Large Cover Image (URL)' in processed_columns
             else 'NULL AS cover_url'
         )
+        query = f'''
+            SELECT
+                p."Cover Path" AS cover_path,
+                {cover_url_select}
+            FROM processed_games p
+            WHERE p."ID"=?'''
         cur = conn.execute(
-            f'''SELECT
-                   p."Cover Path" AS cover_path,
-                   {cover_url_select}
-               FROM processed_games p
-               WHERE p."ID"=?''',
+            _quote_sql(query, ['Cover Path', 'ID']),
             (processed_game_id,),
         )
         row = cur.fetchone()

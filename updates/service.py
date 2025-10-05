@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import numbers
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from functools import partial
 from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
+
+from sqlalchemy.engine import Connection as SAConnection
 
 from config import IGDB_USER_AGENT
 from db import utils as db_utils
@@ -36,16 +37,50 @@ def _quote_identifier(identifier: str) -> str:
     return db_utils._quote_identifier(identifier)
 
 
+def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
+    """Return ``sql`` with double-quoted identifiers safely quoted."""
+
+    seen: set[str] = set()
+    for identifier in identifiers:
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
+    return sql
+
+
 def _fetch_row_dict(
-    conn: db_utils.DatabaseHandle | sqlite3.Connection,
+    conn: db_utils.DatabaseHandle | SAConnection | Any,
     sql: str,
     params: Iterable[Any] | None = None,
 ) -> dict[str, Any] | None:
-    cursor = conn.execute(sql, tuple(params or ()))
+    parameters = tuple(params or ())
+
+    if isinstance(conn, db_utils.DatabaseHandle):
+        cursor = conn.execute(sql, parameters)
+    elif isinstance(conn, SAConnection):
+        result = conn.exec_driver_sql(sql, parameters)
+        mapping = result.mappings().first()
+        return dict(mapping) if mapping is not None else None
+    else:
+        execute = getattr(conn, "execute", None)
+        if callable(execute):
+            cursor = execute(sql, parameters)
+        else:
+            cursor = None
+
+    if cursor is None:
+        return None
+
+    if hasattr(cursor, "mappings"):
+        mapping = cursor.mappings().first()
+        return dict(mapping) if mapping is not None else None
+
+    description = getattr(cursor, "description", None) or []
     row = cursor.fetchone()
     if row is None:
         return None
-    columns = [description[0] for description in cursor.description]
+    columns = [col[0] for col in description]
     return {
         columns[index] if index < len(columns) else str(index): value
         for index, value in enumerate(row)
@@ -178,7 +213,9 @@ def apply_processed_game_patch(
     with db_lock:
         conn = get_db()
         processed_row = _fetch_row_dict(
-            conn, 'SELECT * FROM processed_games WHERE "ID"=?', (processed_game_id,)
+            conn,
+            _quote_sql('SELECT * FROM processed_games WHERE "ID"=?', ['ID']),
+            (processed_game_id,),
         )
         if not processed_row:
             raise LookupError("Processed game not found.")
@@ -199,8 +236,7 @@ def apply_processed_game_patch(
             if cache_row is None:
                 raise ValueError("IGDB cache entry not found for processed game.")
 
-        pragma_cursor = conn.execute('PRAGMA table_info("processed_games")')
-        processed_columns = {row[1] for row in pragma_cursor.fetchall() if len(row) > 1}
+        processed_columns = db_utils.get_processed_games_columns(handle=conn)
 
         updates: dict[str, Any] = {}
         lookup_names: dict[str, list[str]] = {}
@@ -290,10 +326,11 @@ def apply_processed_game_patch(
             raise ValueError("No valid processed columns were updated.")
 
         params.append(processed_game_id)
-        conn.execute(
+        update_sql = _quote_sql(
             f"UPDATE processed_games SET {', '.join(set_fragments)} WHERE \"ID\" = ?",
-            params,
+            ['ID'],
         )
+        conn.execute(update_sql, params)
         conn.commit()
 
     updated_fields = [column for column in updates if column in processed_columns]

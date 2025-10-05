@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 import io
 import os
-import sqlite3
 import uuid
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from flask import Blueprint, jsonify, request
 
+from sqlalchemy import exc as sa_exc
+
+from db import utils as db_utils
 from routes.api_utils import (
     APIError,
     BadRequestError,
@@ -23,6 +25,34 @@ from routes.api_utils import (
 games_blueprint = Blueprint("games", __name__)
 
 _context: dict[str, Any] = {}
+
+
+def _quote_identifier(identifier: str) -> str:
+    return db_utils._quote_identifier(identifier)
+
+
+def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
+    seen: set[str] = set()
+    for identifier in identifiers:
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
+    return sql
+
+
+def _is_integrity_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while isinstance(current, BaseException) and id(current) not in seen:
+        if isinstance(current, sa_exc.IntegrityError):
+            return True
+        if current.__class__.__name__ == 'IntegrityError':
+            return True
+        seen.add(id(current))
+        next_error = getattr(current, 'orig', None)
+        current = next_error if isinstance(next_error, BaseException) else None
+    return False
 
 
 def configure(context: Mapping[str, Any]) -> None:
@@ -231,7 +261,10 @@ def api_save():
             with db_lock:
                 conn = get_db()
                 cur = conn.execute(
-                    'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                    _quote_sql(
+                        'SELECT "ID" FROM processed_games WHERE "Source Index"=?',
+                        ['ID', 'Source Index'],
+                    ),
                     (expected_source_index,),
                 )
                 row = cur.fetchone()
@@ -257,8 +290,19 @@ def api_save():
         with db_lock:
             conn = get_db()
             cur = conn.execute(
-                'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
-                'FROM processed_games WHERE "Source Index"=?',
+                _quote_sql(
+                    'SELECT "ID", "igdb_id", "Summary", "Cover Path", "Width", "Height" '
+                    'FROM processed_games WHERE "Source Index"=?',
+                    [
+                        'ID',
+                        'igdb_id',
+                        'Summary',
+                        'Cover Path',
+                        'Width',
+                        'Height',
+                        'Source Index',
+                    ],
+                ),
                 (source_index,),
             )
             existing = cur.fetchone()
@@ -388,16 +432,39 @@ def api_save():
 
                 if existing:
                     conn.execute(
-                        '''UPDATE processed_games SET
-                            "Name"=?, "Summary"=?, "First Launch Date"=?,
-                            "Developers"=?, "developers_ids"=?,
-                            "Publishers"=?, "publishers_ids"=?,
-                            "Genres"=?, "genres_ids"=?,
-                            "Game Modes"=?, "game_modes_ids"=?,
-                            "Category"=?, "Platforms"=?, "platforms_ids"=?,
-                            "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
-                            last_edited_at=?
-                           WHERE "ID"=?''',
+                        _quote_sql(
+                            '''UPDATE processed_games SET
+                                "Name"=?, "Summary"=?, "First Launch Date"=?,
+                                "Developers"=?, "developers_ids"=?,
+                                "Publishers"=?, "publishers_ids"=?,
+                                "Genres"=?, "genres_ids"=?,
+                                "Game Modes"=?, "game_modes_ids"=?,
+                                "Category"=?, "Platforms"=?, "platforms_ids"=?,
+                                "igdb_id"=?, "Cover Path"=?, "Width"=?, "Height"=?,
+                                last_edited_at=?
+                               WHERE "ID"=?''',
+                            [
+                                'Name',
+                                'Summary',
+                                'First Launch Date',
+                                'Developers',
+                                'developers_ids',
+                                'Publishers',
+                                'publishers_ids',
+                                'Genres',
+                                'genres_ids',
+                                'Game Modes',
+                                'game_modes_ids',
+                                'Category',
+                                'Platforms',
+                                'platforms_ids',
+                                'igdb_id',
+                                'Cover Path',
+                                'Width',
+                                'Height',
+                                'ID',
+                            ],
+                        ),
                         (
                             row['Name'],
                             row['Summary'],
@@ -423,14 +490,38 @@ def api_save():
                     )
                 else:
                     conn.execute(
-                        '''INSERT INTO processed_games (
-                            "ID", "Source Index", "Name", "Summary",
-                            "First Launch Date", "Developers", "developers_ids",
-                            "Publishers", "publishers_ids",
-                            "Genres", "genres_ids", "Game Modes", "game_modes_ids",
-                            "Category", "Platforms", "platforms_ids",
-                            "igdb_id", "Cover Path", "Width", "Height", last_edited_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                        _quote_sql(
+                            '''INSERT INTO processed_games (
+                                "ID", "Source Index", "Name", "Summary",
+                                "First Launch Date", "Developers", "developers_ids",
+                                "Publishers", "publishers_ids",
+                                "Genres", "genres_ids", "Game Modes", "game_modes_ids",
+                                "Category", "Platforms", "platforms_ids",
+                                "igdb_id", "Cover Path", "Width", "Height", last_edited_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                            [
+                                'ID',
+                                'Source Index',
+                                'Name',
+                                'Summary',
+                                'First Launch Date',
+                                'Developers',
+                                'developers_ids',
+                                'Publishers',
+                                'publishers_ids',
+                                'Genres',
+                                'genres_ids',
+                                'Game Modes',
+                                'game_modes_ids',
+                                'Category',
+                                'Platforms',
+                                'platforms_ids',
+                                'igdb_id',
+                                'Cover Path',
+                                'Width',
+                                'Height',
+                            ],
+                        ),
                         (
                             seq_id,
                             row['Source Index'],
@@ -458,7 +549,9 @@ def api_save():
 
                 persist_lookup_relations(conn, seq_id, normalized_lookups)
                 conn.commit()
-            except sqlite3.IntegrityError as exc:
+            except Exception as exc:
+                if not _is_integrity_error(exc):
+                    raise
                 conn.rollback()
                 raise ConflictError('conflict') from exc
 
@@ -554,7 +647,10 @@ def api_game_by_id():
     with db_lock:
         conn = get_db()
         cur = conn.execute(
-            'SELECT "Source Index" FROM processed_games WHERE "ID"=?',
+            _quote_sql(
+                'SELECT "Source Index" FROM processed_games WHERE "ID"=?',
+                ['Source Index', 'ID'],
+            ),
             (game_id,),
         )
         row = cur.fetchone()
