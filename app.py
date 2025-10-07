@@ -2236,6 +2236,17 @@ def seed_processed_games_from_source() -> None:
 
     with db_lock:
         handle = get_db()
+
+        engine = getattr(handle, 'engine', None)
+        dialect_name = getattr(getattr(engine, 'dialect', None), 'name', 'sqlite')
+
+        mysql_processed_table: Table | None = None
+        if dialect_name in {'mysql', 'mariadb'} and mysql_insert is not None and engine is not None:
+            try:
+                mysql_processed_table = Table('processed_games', MetaData(), autoload_with=engine)
+            except sa_exc.SQLAlchemyError:
+                mysql_processed_table = None
+
         with handle as conn:
             processed_columns = get_processed_games_columns(conn)
             has_cache_rank = 'cache_rank' in processed_columns
@@ -2357,10 +2368,54 @@ def seed_processed_games_from_source() -> None:
                         db_utils._quote_identifier(column) for column in columns
                     )
                     placeholders = ', '.join('?' for _ in columns)
-                    conn.execute(
-                        f'INSERT OR IGNORE INTO processed_games ({column_sql}) VALUES ({placeholders})',
-                        [processed_row[column] for column in columns],
-                    )
+                    values = [processed_row[column] for column in columns]
+
+                    if dialect_name == 'sqlite':
+                        conn.execute(
+                            f'INSERT OR IGNORE INTO processed_games ({column_sql}) VALUES ({placeholders})',
+                            values,
+                        )
+                    elif dialect_name in {'mysql', 'mariadb'}:
+                        executed = False
+                        if mysql_processed_table is not None:
+                            try:
+                                insert_stmt = mysql_insert(mysql_processed_table).values(
+                                    {
+                                        mysql_processed_table.c[column]: processed_row[column]
+                                        for column in columns
+                                    }
+                                )
+                                insert_stmt = insert_stmt.on_duplicate_key_update(
+                                    {
+                                        mysql_processed_table.c[column]: mysql_processed_table.c[column]
+                                        for column in columns
+                                    }
+                                )
+                            except (AttributeError, KeyError):
+                                insert_stmt = None
+                            else:
+                                with handle.sa_connection() as sa_conn:
+                                    with sa_conn.begin():
+                                        sa_conn.execute(insert_stmt)
+                                executed = True
+
+                        if not executed:
+                            update_clause = ', '.join(
+                                f'{db_utils._quote_identifier(column)} = '
+                                f'{db_utils._quote_identifier(column)}'
+                                for column in columns
+                            )
+                            conn.execute(
+                                f'INSERT INTO processed_games ({column_sql}) '
+                                f'VALUES ({placeholders}) '
+                                f'ON DUPLICATE KEY UPDATE {update_clause}',
+                                values,
+                            )
+                    else:
+                        conn.execute(
+                            f'INSERT INTO processed_games ({column_sql}) VALUES ({placeholders})',
+                            values,
+                        )
                     existing[src_index] = (src_index, igdb_name, False)
                     continue
 
