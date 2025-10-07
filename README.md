@@ -10,7 +10,7 @@ TT-Game-Liste-2 is a password-protected web application for curating game metada
 - **1080×1080 cover builder:** Lets the user upload an image, crop it with Cropper.js, and automatically resizes anything smaller than 1080 pixels so the saved JPEG meets platform requirements. A preview updates live while the editor adjusts the crop.【F:templates/index.html†L109-L147】【F:static/main.js†L149-L231】
 - **Portuguese summary generation (optional):** When an `OPENAI_API_KEY` is present, the “Gerar Resumo” button asks OpenAI’s Chat Completions API to draft a spoiler-free Brazilian Portuguese synopsis for the current game.【F:app.py†L212-L247】【F:static/main.js†L119-L148】
 - **Session resilience:** Draft metadata and image selections are cached in the browser’s `localStorage`, allowing a user to recover unsaved work if they accidentally reload the page.【F:static/main.js†L60-L113】
-- **Persistent outputs:** Approved entries land in `processed_games.db`, generated covers are stored as numbered JPEGs inside `processed_covers/`, and source uploads are archived in `uploaded_sources/` until a record is saved or skipped.【F:app.py†L74-L197】【F:app.py†L257-L338】
+- **Persistent outputs:** Approved entries land in the `processed_games` table inside your MariaDB schema, generated covers are stored as numbered JPEGs inside `processed_covers/`, and source uploads are archived in `uploaded_sources/` until a record is saved or skipped. When `DB_LEGACY_SQLITE=1` is set the server reverts to the historical `processed_games.db` file instead.【F:app.py†L74-L197】【F:app.py†L257-L338】【F:config.py†L126-L133】
 - **Maintenance tooling:** The `scripts/resync_db.py` helper replays the IGDB fetch to realign the processed database with the source order if files fall out of sync, and `migrate_cover_paths.py` renames exported covers that still use zero-padded filenames.【F:scripts/resync_db.py†L1-L75】【F:migrate_cover_paths.py†L1-L10】
 
 ## How the workflow operates
@@ -19,7 +19,7 @@ TT-Game-Liste-2 is a password-protected web application for curating game metada
 2. **Game loading:** On startup the server exchanges the configured Twitch credentials for an access token, downloads the IGDB catalogue page by page, and keeps duplicate entries so editors can process the raw feed exactly as supplied. Each row’s index becomes the “Source Index” that drives navigation.【F:app.py†L1515-L1654】
 3. **Cover discovery:** When a game already has a local or remote cover URL, the app tries to display it so editors can start from a reasonable crop. Fallback logic downloads remote images on the fly and converts them to inline JPEGs.【F:app.py†L104-L144】
 4. **Editing session:** For the active game the UI surfaces editable fields plus a live cropper. Any missing mandatory metadata triggers a warning toast so editors know what to fill in before saving.【F:templates/index.html†L37-L147】【F:static/main.js†L232-L305】
-5. **Saving:** On save the client crops the image to 1080×1080, posts the metadata and base64 cover to `/api/save`, and the server writes the record to SQLite while exporting the JPEG. The processed sequence counter increments so IDs remain contiguous.【F:static/main.js†L306-L353】【F:app.py†L248-L338】
+5. **Saving:** On save the client crops the image to 1080×1080, posts the metadata and base64 cover to `/api/save`, and the server persists the record through SQLAlchemy (MariaDB by default, SQLite only when `DB_LEGACY_SQLITE=1`) while exporting the JPEG. The processed sequence counter increments so IDs remain contiguous.【F:static/main.js†L306-L353】【F:app.py†L248-L338】【F:config.py†L126-L133】
 6. **Navigation:** Editors can move forward (`Next`), backward (`Previous`), skip troublesome entries, or jump to a specific index via API endpoints. A skip queue automatically revisits skipped games after 30 processed entries so nothing is lost.【F:app.py†L150-L357】【F:static/main.js†L245-L353】
 7. **Completion:** When every IGDB row is processed the API responds with a completion message, signalling that the batch is finished.【F:app.py†L318-L338】
 
@@ -57,19 +57,44 @@ These steps assume a fresh Ubuntu/Debian-like host. Adjust package manager comma
     - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` – MariaDB connection settings used to reach the processed-games database. The application emits a SQLAlchemy DSN such as `mysql+pymysql://user:pass@host:3306/dbname` and expects the [`PyMySQL`](https://pypi.org/project/PyMySQL/) driver (installed via `requirements.txt`). Keep `DB_PASSWORD` (and any other credentials) in a secure secret store; never commit real passwords or copy them into shared `.env` files.
     - `DB_SSL_CA` – optional path to a CA bundle when the MariaDB server requires SSL validation.
     - `DB_CONNECT_TIMEOUT` / `DB_READ_TIMEOUT` – optional overrides for connection and read timeouts when tuning long-running queries. Their values are forwarded to the SQLAlchemy DSN.
-    - `DB_LEGACY_SQLITE` – set to `1` to continue using the historical `processed_games.db` SQLite file. This flag is intended only for transition periods or environments that cannot run MariaDB.
+    - `DB_LEGACY_SQLITE` – set to `1` to continue using the historical `processed_games.db` SQLite file. This flag is intended only for transition periods or environments that cannot run MariaDB; new deployments should leave it unset.
     - `DB_SQLITE_PATH` – optional override for the SQLite file location when `DB_LEGACY_SQLITE=1` (defaults to `processed_games.db` in the current working directory).
-7. **Initialize or repair existing data (optional).** If you have a legacy `processed_games.db`, run `python scripts/resync_db.py` to align it with the freshly fetched IGDB source order. To normalise old cover filenames execute `python migrate_cover_paths.py`.
-8. **Start the application.**
+7. **Provision MariaDB.** Ensure a MariaDB 10.6+ server is reachable using the credentials above. For local development you can launch a disposable instance via Docker Compose:
+   ```yaml
+   services:
+     mariadb:
+       image: mariadb:11
+       environment:
+         MARIADB_DATABASE: ttgameliste
+         MARIADB_USER: ttgameliste
+         MARIADB_PASSWORD: example-password
+         MARIADB_ROOT_PASSWORD: example-root
+       ports:
+         - "3306:3306"
+       volumes:
+         - mariadb-data:/var/lib/mysql
+   volumes:
+     mariadb-data:
+   ```
+   After the container is healthy, create a SQLAlchemy DSN such as `mysql+pymysql://ttgameliste:example-password@127.0.0.1:3306/ttgameliste` and export it through the environment variables listed in step 6.
+8. **Initialize or repair existing data (optional).** If you have a legacy `processed_games.db`, run `python scripts/resync_db.py` to align it with the freshly fetched IGDB source order. To normalise old cover filenames execute `python migrate_cover_paths.py`. These scripts only apply when `DB_LEGACY_SQLITE=1`.
+9. **Start the application.**
    ```bash
    python app.py
    ```
    By default Flask listens on `http://127.0.0.1:5000`. Reverse-proxy or bind to 0.0.0.0 if you need remote access.
-9. **Log in and begin editing.** Visit `/login`, enter the password you configured, and start processing games. Progress is persisted to `processed_games.db` and can be resumed later.【F:app.py†L248-L338】
+10. **Log in and begin editing.** Visit `/login`, enter the password you configured, and start processing games. Progress is persisted to MariaDB (or the legacy SQLite file when explicitly enabled) and can be resumed later.【F:app.py†L248-L338】【F:config.py†L126-L133】
+
+## MariaDB configuration and testing
+
+- **Schema management:** The application auto-creates and migrates the required tables (`processed_games`, `updates`, and related lookup tables) when it connects to an empty MariaDB schema. No manual DDL is necessary.【F:app.py†L1203-L1411】
+- **Connection testing:** Before running the web server, validate credentials with `python -c "from app import db; db.connect().close()"` or use `mysql`/`mariadb` CLI clients to confirm the DSN resolves. Connection failures will surface on startup if MariaDB is unreachable.
+- **Local automation:** When using Docker Compose (see step 7 above), run `docker compose up -d mariadb` before `python app.py`. CI systems that need to exercise MariaDB-specific logic (for example, `pytest tests/test_updates_mariadb.py`) should provision the service and export the same environment variables used in production.
+- **Legacy compatibility:** SQLite tooling such as `scripts/resync_db.py` or the `processed_games.db` backup workflow continue to function only when `DB_LEGACY_SQLITE=1`. New MariaDB deployments should instead rely on native database backups such as `mariadb-dump`.
 
 ## Operational notes
 
-- Keep periodic backups of `processed_games.db` and the `processed_covers/` directory—they contain the authoritative edited content.【F:app.py†L248-L338】
+- Keep periodic backups of your MariaDB schema (for example with `mariadb-dump`) and the `processed_covers/` directory—they contain the authoritative edited content. When running in legacy mode also copy the `processed_games.db` file.【F:app.py†L248-L338】【F:config.py†L126-L133】
 - If the navigation counters ever drift from the IGDB source order, rerun `python scripts/resync_db.py` to resequence IDs and restore alignment.【F:scripts/resync_db.py†L1-L75】
 - Enable HTTPS and set a strong `APP_PASSWORD`/`APP_SECRET_KEY` when deploying on the public internet. Store those secrets alongside your database credentials in your orchestration layer instead of the repository or sample `.env` files.
 - When the AI summary feature is disabled (no OpenAI key), the “Gerar Resumo” button will raise a friendly warning instead of generating text.【F:app.py†L212-L247】【F:static/main.js†L119-L148】
