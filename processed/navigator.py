@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from threading import Lock
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.sql import column, table
@@ -13,20 +13,6 @@ import pandas as pd
 
 from . import source_index_cache
 from db import utils as db_utils
-
-
-def _quote_identifier(identifier: str) -> str:
-    return db_utils._quote_identifier(identifier)
-
-
-def _quote_sql(sql: str, identifiers: Iterable[str]) -> str:
-    seen: set[str] = set()
-    for identifier in identifiers:
-        if not identifier or identifier in seen:
-            continue
-        seen.add(identifier)
-        sql = sql.replace(f'"{identifier}"', _quote_identifier(identifier))
-    return sql
 
 
 class GameNavigator:
@@ -184,10 +170,8 @@ class GameNavigator:
                     processed_games.c["Cover Path"],
                 )
 
-                state_result = sa_conn.execute(state_stmt).fetchone()
-                state_row = state_result._mapping if state_result is not None else None
-                games_result = sa_conn.execute(games_stmt)
-                rows = [row._mapping for row in games_result]
+                state_row = sa_conn.execute(state_stmt).mappings().fetchone()
+                rows = sa_conn.execute(games_stmt).mappings().all()
         processed: set[int] = set()
         max_seq = 0
         for row in rows:
@@ -244,26 +228,49 @@ class GameNavigator:
 
     def _load(self) -> None:
         with self._db_lock:
-            conn = self._get_db()
-            cur = conn.execute(
-                'SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1'
-            )
-            state_row = cur.fetchone()
-            cur = conn.execute(
-                _quote_sql(
-                    'SELECT "Summary", "Cover Path" FROM processed_games',
-                    ['Summary', 'Cover Path'],
+            db_handle = self._get_db()
+            with db_handle.sa_connection() as sa_conn:
+                navigator_state = table(
+                    "navigator_state",
+                    column("id"),
+                    column("current_index"),
+                    column("seq_index"),
+                    column("skip_queue"),
                 )
-            )
-            rows = cur.fetchall()
+                processed_games = table(
+                    "processed_games",
+                    column("Summary"),
+                    column("Cover Path"),
+                )
+
+                state_stmt = (
+                    select(
+                        navigator_state.c.current_index,
+                        navigator_state.c.seq_index,
+                        navigator_state.c.skip_queue,
+                    )
+                    .where(navigator_state.c.id == 1)
+                    .limit(1)
+                )
+                games_stmt = select(
+                    processed_games.c["Summary"],
+                    processed_games.c["Cover Path"],
+                )
+
+                state_row = sa_conn.execute(state_stmt).mappings().fetchone()
+                rows = sa_conn.execute(games_stmt).mappings().all()
         processed_total = 0
         for row in rows:
             try:
-                summary_value = row['Summary']
+                summary_value = (
+                    row.get("Summary") if hasattr(row, "get") else row["Summary"]
+                )
             except (KeyError, IndexError, TypeError):
                 summary_value = None
             try:
-                cover_value = row['Cover Path']
+                cover_value = (
+                    row.get("Cover Path") if hasattr(row, "get") else row["Cover Path"]
+                )
             except (KeyError, IndexError, TypeError):
                 cover_value = None
             if self._is_processed_game_done(summary_value, cover_value):
@@ -271,9 +278,24 @@ class GameNavigator:
         self.processed_total = max(processed_total, 0)
         if state_row is not None:
             try:
-                self.current_index = int(state_row['current_index'])
-                self.seq_index = int(state_row['seq_index'])
-                self.skip_queue = json.loads(state_row['skip_queue'] or '[]')
+                current_value = (
+                    state_row.get("current_index")
+                    if hasattr(state_row, "get")
+                    else state_row["current_index"]
+                )
+                seq_value = (
+                    state_row.get("seq_index")
+                    if hasattr(state_row, "get")
+                    else state_row["seq_index"]
+                )
+                skip_value = (
+                    state_row.get("skip_queue")
+                    if hasattr(state_row, "get")
+                    else state_row["skip_queue"]
+                )
+                self.current_index = int(current_value)
+                self.seq_index = int(seq_value)
+                self.skip_queue = json.loads(skip_value or '[]')
                 self._logger.debug(
                     "Loaded progress: current_index=%s seq_index=%s skip_queue=%s",
                     self.current_index,
