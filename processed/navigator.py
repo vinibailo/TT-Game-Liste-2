@@ -7,6 +7,7 @@ from threading import Lock
 from typing import Any, Callable
 
 from sqlalchemy import select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.sql import column, table
 
 import pandas as pd
@@ -310,16 +311,37 @@ class GameNavigator:
     def _save(self) -> None:
         try:
             with self._db_lock:
-                conn = self._get_db()
-                conn.execute(
-                    'REPLACE INTO navigator_state (id, current_index, seq_index, skip_queue) VALUES (1, ?, ?, ?)',
-                    (
-                        self.current_index,
-                        self.seq_index,
-                        json.dumps(self.skip_queue),
-                    ),
+                db_handle = self._get_db()
+                navigator_state = table(
+                    "navigator_state",
+                    column("id"),
+                    column("current_index"),
+                    column("seq_index"),
+                    column("skip_queue"),
                 )
-                conn.commit()
+                values = {
+                    "id": 1,
+                    "current_index": self.current_index,
+                    "seq_index": self.seq_index,
+                    "skip_queue": json.dumps(self.skip_queue),
+                }
+                engine = getattr(db_handle, "engine", None)
+                dialect_name = getattr(getattr(engine, "dialect", None), "name", "")
+                if dialect_name in {"mariadb", "mysql"}:
+                    stmt = mysql_insert(navigator_state).values(**values)
+                    stmt = stmt.on_duplicate_key_update(
+                        current_index=stmt.inserted.current_index,
+                        seq_index=stmt.inserted.seq_index,
+                        skip_queue=stmt.inserted.skip_queue,
+                    )
+                elif dialect_name == "sqlite":
+                    stmt = navigator_state.insert().values(**values).prefix_with("OR REPLACE")
+                else:
+                    stmt = navigator_state.insert().values(**values)
+
+                with db_handle.sa_connection() as sa_conn:
+                    with sa_conn.begin():
+                        sa_conn.execute(stmt)
         except Exception as exc:  # pragma: no cover - defensive logging
             self._logger.warning("Failed to save navigator state: %s", exc)
 
