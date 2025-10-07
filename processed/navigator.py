@@ -6,6 +6,9 @@ import logging
 from threading import Lock
 from typing import Any, Callable, Iterable
 
+from sqlalchemy import select
+from sqlalchemy.sql import column, table
+
 import pandas as pd
 
 from . import source_index_cache
@@ -148,18 +151,43 @@ class GameNavigator:
 
     def _load_initial(self) -> None:
         with self._db_lock:
-            conn = self._get_db()
-            cur = conn.execute(
-                'SELECT current_index, seq_index, skip_queue FROM navigator_state WHERE id=1'
-            )
-            state_row = cur.fetchone()
-            cur = conn.execute(
-                _quote_sql(
-                    'SELECT "Source Index", "ID", "Summary", "Cover Path" FROM processed_games',
-                    ['Source Index', 'ID', 'Summary', 'Cover Path'],
+            db_handle = self._get_db()
+            with db_handle.sa_connection() as sa_conn:
+                navigator_state = table(
+                    "navigator_state",
+                    column("id"),
+                    column("current_index"),
+                    column("seq_index"),
+                    column("skip_queue"),
                 )
-            )
-            rows = cur.fetchall()
+                processed_games = table(
+                    "processed_games",
+                    column("Source Index"),
+                    column("ID"),
+                    column("Summary"),
+                    column("Cover Path"),
+                )
+
+                state_stmt = (
+                    select(
+                        navigator_state.c.current_index,
+                        navigator_state.c.seq_index,
+                        navigator_state.c.skip_queue,
+                    )
+                    .where(navigator_state.c.id == 1)
+                    .limit(1)
+                )
+                games_stmt = select(
+                    processed_games.c["Source Index"],
+                    processed_games.c["ID"],
+                    processed_games.c["Summary"],
+                    processed_games.c["Cover Path"],
+                )
+
+                state_result = sa_conn.execute(state_stmt).fetchone()
+                state_row = state_result._mapping if state_result is not None else None
+                games_result = sa_conn.execute(games_stmt)
+                rows = [row._mapping for row in games_result]
         processed: set[int] = set()
         max_seq = 0
         for row in rows:
