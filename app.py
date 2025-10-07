@@ -144,6 +144,20 @@ logger = logging.getLogger(__name__)
 igdb_api_client = IGDBClient()
 
 
+_IGDB_UPDATES_TABLE = Table(
+    'igdb_updates',
+    MetaData(),
+    Column('processed_game_id', Integer, primary_key=True),
+    Column('igdb_id', String),
+    Column('igdb_updated_at', Integer),
+    Column('igdb_payload', Text),
+    Column('diff', Text),
+    Column('local_last_edited_at', Text),
+    Column('refreshed_at', Text),
+    Column('has_diff', Integer),
+)
+
+
 ConnectionLike = Connection | Engine | db_utils.DatabaseHandle
 
 T = TypeVar('T')
@@ -4038,31 +4052,100 @@ def _run_refresh_diff_phase(
                 igdb_updated_at = _normalize_timestamp(payload.get('updated_at'))
                 diff = build_igdb_diff(row, payload)
                 has_diff_value = 1 if diff else 0
-                conn.execute(
-                    '''INSERT INTO igdb_updates (
-                            processed_game_id, igdb_id, igdb_updated_at,
-                            igdb_payload, diff, local_last_edited_at,
-                            refreshed_at, has_diff
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(processed_game_id) DO UPDATE SET
-                            igdb_id=excluded.igdb_id,
-                            igdb_updated_at=excluded.igdb_updated_at,
-                            igdb_payload=excluded.igdb_payload,
-                            diff=excluded.diff,
-                            local_last_edited_at=excluded.local_last_edited_at,
-                            refreshed_at=excluded.refreshed_at,
-                            has_diff=excluded.has_diff''',
-                    (
-                        int(row['ID']),
-                        str(igdb_id_value),
-                        igdb_updated_at,
-                        json.dumps(payload),
-                        json.dumps(diff),
-                        row.get('last_edited_at') or refreshed_at,
-                        refreshed_at,
-                        has_diff_value,
-                    ),
+                engine = getattr(conn, 'engine', None)
+                dialect_name = ''
+                if engine is not None:
+                    dialect_name = str(getattr(getattr(engine, 'dialect', None), 'name', '')).lower()
+
+                updates_table = _quote_identifier('igdb_updates')
+                processed_game_id_column = _quote_identifier('processed_game_id')
+                igdb_id_column = _quote_identifier('igdb_id')
+                igdb_updated_at_column = _quote_identifier('igdb_updated_at')
+                igdb_payload_column = _quote_identifier('igdb_payload')
+                diff_column = _quote_identifier('diff')
+                local_last_edited_column = _quote_identifier('local_last_edited_at')
+                refreshed_at_column = _quote_identifier('refreshed_at')
+                has_diff_column = _quote_identifier('has_diff')
+
+                parameters = (
+                    int(row['ID']),
+                    str(igdb_id_value),
+                    igdb_updated_at,
+                    json.dumps(payload),
+                    json.dumps(diff),
+                    row.get('last_edited_at') or refreshed_at,
+                    refreshed_at,
+                    has_diff_value,
                 )
+
+                if dialect_name in {'mysql', 'mariadb'}:
+                    executed = False
+                    if mysql_insert is not None and engine is not None:
+                        try:
+                            insert_stmt = mysql_insert(_IGDB_UPDATES_TABLE).values(
+                                processed_game_id=parameters[0],
+                                igdb_id=parameters[1],
+                                igdb_updated_at=parameters[2],
+                                igdb_payload=parameters[3],
+                                diff=parameters[4],
+                                local_last_edited_at=parameters[5],
+                                refreshed_at=parameters[6],
+                                has_diff=parameters[7],
+                            )
+                            upsert_stmt = insert_stmt.on_duplicate_key_update(
+                                igdb_id=insert_stmt.inserted.igdb_id,
+                                igdb_updated_at=insert_stmt.inserted.igdb_updated_at,
+                                igdb_payload=insert_stmt.inserted.igdb_payload,
+                                diff=insert_stmt.inserted.diff,
+                                local_last_edited_at=insert_stmt.inserted.local_last_edited_at,
+                                refreshed_at=insert_stmt.inserted.refreshed_at,
+                                has_diff=insert_stmt.inserted.has_diff,
+                            )
+                            compiled = upsert_stmt.compile(
+                                dialect=engine.dialect,
+                                compile_kwargs={'render_postcompile': True},
+                            )
+                            conn.execute(str(compiled), compiled.params)
+                            executed = True
+                        except Exception:  # pragma: no cover - fallback to textual SQL
+                            logger.debug(
+                                'Falling back to textual MySQL upsert for igdb_updates.',
+                                exc_info=True,
+                            )
+                            executed = False
+                    if not executed:
+                        mysql_sql = (
+                            f"INSERT INTO {updates_table} ("
+                            f"{processed_game_id_column}, {igdb_id_column}, {igdb_updated_at_column}, "
+                            f"{igdb_payload_column}, {diff_column}, {local_last_edited_column}, "
+                            f"{refreshed_at_column}, {has_diff_column}) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                            f"ON DUPLICATE KEY UPDATE {igdb_id_column}=VALUES({igdb_id_column}), "
+                            f"{igdb_updated_at_column}=VALUES({igdb_updated_at_column}), "
+                            f"{igdb_payload_column}=VALUES({igdb_payload_column}), "
+                            f"{diff_column}=VALUES({diff_column}), "
+                            f"{local_last_edited_column}=VALUES({local_last_edited_column}), "
+                            f"{refreshed_at_column}=VALUES({refreshed_at_column}), "
+                            f"{has_diff_column}=VALUES({has_diff_column})"
+                        )
+                        conn.execute(mysql_sql, parameters)
+                else:
+                    sqlite_sql = (
+                        f"INSERT INTO {updates_table} ("
+                        f"{processed_game_id_column}, {igdb_id_column}, {igdb_updated_at_column}, "
+                        f"{igdb_payload_column}, {diff_column}, {local_last_edited_column}, "
+                        f"{refreshed_at_column}, {has_diff_column}) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                        f"ON CONFLICT({processed_game_id_column}) DO UPDATE SET "
+                        f"{igdb_id_column}=excluded.{igdb_id_column}, "
+                        f"{igdb_updated_at_column}=excluded.{igdb_updated_at_column}, "
+                        f"{igdb_payload_column}=excluded.{igdb_payload_column}, "
+                        f"{diff_column}=excluded.{diff_column}, "
+                        f"{local_last_edited_column}=excluded.{local_last_edited_column}, "
+                        f"{refreshed_at_column}=excluded.{refreshed_at_column}, "
+                        f"{has_diff_column}=excluded.{has_diff_column}"
+                    )
+                    conn.execute(sqlite_sql, parameters)
                 updated_count += 1
                 processed += 1
                 if not diff:
