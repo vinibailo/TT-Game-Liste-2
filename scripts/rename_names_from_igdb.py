@@ -6,7 +6,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from collections.abc import Iterable, Mapping
+from contextlib import contextmanager
 from typing import Any, Callable
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from config import (
     DB_CONNECT_TIMEOUT_SECONDS,
@@ -25,7 +29,7 @@ try:
         db_lock,
         exchange_twitch_credentials,
         fetch_igdb_metadata,
-        get_db,
+        get_db_sa_connection,
     )
 except ModuleNotFoundError:
     import json
@@ -54,9 +58,13 @@ except ModuleNotFoundError:
         raise RuntimeError(f"Unsupported database DSN: {DB_DSN}") from exc
 
     db_handle = db_utils.DatabaseHandle(engine)
+    db_utils.set_fallback_connection(db_handle)
 
     def get_db() -> db_utils.DatabaseHandle:
         return db_handle
+
+    def get_db_sa_connection():
+        return db_handle.sa_connection()
 
     def _is_nan(value: Any) -> bool:
         try:
@@ -267,34 +275,65 @@ def _normalize_text(value: Any) -> str:
     return text
 
 
-def _load_processed_rows(
-    conn: db_utils.DatabaseHandle | Any,
-) -> list[Mapping[str, Any]]:
+def _load_processed_rows(conn: Connection) -> list[dict[str, Any]]:
     """Load all processed game rows with their identifiers and names."""
 
-    with db_lock:
-        cursor = conn.execute(
-            'SELECT "ID", "Source Index", "igdb_id", "Name" FROM processed_games '
-            'ORDER BY "ID"'
-        )
-        rows = cursor.fetchall()
-        description = getattr(cursor, "description", None)
-        columns = [col[0] for col in description] if description else []
+    processed_games_table = db_utils._quote_identifier("processed_games")
+    id_column = db_utils._quote_identifier("ID")
+    source_index_column = db_utils._quote_identifier("Source Index")
+    igdb_id_column = db_utils._quote_identifier("igdb_id")
+    name_column = db_utils._quote_identifier("Name")
 
-        normalized: list[Mapping[str, Any]] = []
-        for row in rows:
-            if isinstance(row, Mapping):
-                normalized.append(dict(row))
-            elif columns:
-                normalized.append({col: row[idx] for idx, col in enumerate(columns)})
-            else:
-                normalized.append({})
-        return normalized
+    select_sql = text(
+        f"SELECT {id_column} AS db_id, "
+        f"{source_index_column} AS source_index_value, "
+        f"{igdb_id_column} AS igdb_id_value, "
+        f"{name_column} AS name_value "
+        f"FROM {processed_games_table} "
+        f"ORDER BY {id_column}"
+    )
+
+    with db_lock:
+        rows = conn.execute(select_sql).mappings().all()
+
+    return [
+        {
+            "ID": row.get("db_id"),
+            "Source Index": row.get("source_index_value"),
+            "igdb_id": row.get("igdb_id_value"),
+            "Name": row.get("name_value"),
+        }
+        for row in rows
+    ]
+
+
+@contextmanager
+def _yield_sa_connection(
+    conn: Connection | db_utils.DatabaseHandle | None,
+):
+    """Yield a SQLAlchemy connection from ``conn`` or the configured factory."""
+
+    if conn is None:
+        with get_db_sa_connection() as sa_conn:
+            yield sa_conn
+        return
+
+    if isinstance(conn, Connection):
+        yield conn
+        return
+
+    if isinstance(conn, db_utils.DatabaseHandle) or hasattr(conn, "sa_connection"):
+        context = conn.sa_connection()  # type: ignore[assignment]
+        with context as sa_conn:  # type: ignore[assignment]
+            yield sa_conn
+        return
+
+    raise TypeError(f"Unsupported connection type: {type(conn)!r}")
 
 
 def rename_processed_games_from_igdb(
     *,
-    conn: db_utils.DatabaseHandle | Any | None = None,
+    conn: Connection | db_utils.DatabaseHandle | None = None,
     exchange_credentials: Callable[[], tuple[str, str]] | None = None,
     metadata_loader: Callable[[str, str, Iterable[str]], Mapping[str, Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
@@ -305,13 +344,8 @@ def rename_processed_games_from_igdb(
     if metadata_loader is None:
         metadata_loader = fetch_igdb_metadata
 
-    owns_connection = False
-    if conn is None:
-        conn = get_db()
-        owns_connection = True
-
-    try:
-        rows = _load_processed_rows(conn)
+    with _yield_sa_connection(conn) as sa_conn:
+        rows = _load_processed_rows(sa_conn)
         total_rows = len(rows)
         rows_with_igdb_id: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -338,6 +372,8 @@ def rename_processed_games_from_igdb(
                 missing_id_count += 1
 
         if not rows_with_igdb_id:
+            if sa_conn.in_transaction():
+                sa_conn.rollback()
             return {
                 "total_rows": total_rows,
                 "rows_with_igdb_id": 0,
@@ -385,12 +421,27 @@ def rename_processed_games_from_igdb(
             )
 
         if renamed_rows:
-            updates = [(row["new_name"], row["id"]) for row in renamed_rows]
-            with db_lock:
-                with conn:
-                    conn.executemany(
-                        'UPDATE processed_games SET "Name"=? WHERE "ID"=?', updates
-                    )
+            updates = [
+                {"new_name": row["new_name"], "db_id": row["id"]}
+                for row in renamed_rows
+            ]
+            if updates:
+                if sa_conn.in_transaction():
+                    sa_conn.rollback()
+                processed_games_table = db_utils._quote_identifier("processed_games")
+                name_column = db_utils._quote_identifier("Name")
+                id_column = db_utils._quote_identifier("ID")
+                update_sql = text(
+                    f"UPDATE {processed_games_table} "
+                    f"SET {name_column} = :new_name "
+                    f"WHERE {id_column} = :db_id"
+                )
+                with db_lock:
+                    with sa_conn.begin():
+                        sa_conn.execute(update_sql, updates)
+
+        elif sa_conn.in_transaction():
+            sa_conn.rollback()
 
         return {
             "total_rows": total_rows,
@@ -402,9 +453,6 @@ def rename_processed_games_from_igdb(
             "unchanged": unchanged_count,
             "updated": len(renamed_rows),
         }
-    finally:
-        if owns_connection and conn is not None:
-            conn.close()
 
 
 def _format_row_label(row: Mapping[str, Any]) -> str:
