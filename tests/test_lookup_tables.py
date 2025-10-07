@@ -1,12 +1,13 @@
 import os
 import json
-import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import Column, Integer, MetaData, String, Table, Text
 
-from tests.app_helpers import load_app
+from db import utils as db_utils
+from tests.app_helpers import get_test_db_engine, load_app
 
 
 def write_lookup_workbooks(directory: Path) -> None:
@@ -28,52 +29,52 @@ def write_lookup_workbooks(directory: Path) -> None:
     )
 
 
-def initialize_legacy_db(db_path: Path) -> None:
-    conn = sqlite3.connect(db_path)
-    try:
-        with conn:
-            conn.execute(
-                '''
-                CREATE TABLE processed_games (
-                    "ID" INTEGER PRIMARY KEY,
-                    "Source Index" TEXT UNIQUE,
-                    "Name" TEXT,
-                    "Developers" TEXT,
-                    "Publishers" TEXT,
-                    "Genres" TEXT,
-                    "Game Modes" TEXT,
-                    "Platforms" TEXT
-                )
-                '''
-            )
-            conn.execute(
-                '''
-                INSERT INTO processed_games (
-                    "ID", "Source Index", "Name", "Developers", "Publishers",
-                    "Genres", "Game Modes", "Platforms"
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    1,
-                    "0",
-                    "Sample Game",
-                    "foo studio",
-                    "bar publishing",
-                    "action",
-                    "single-player",
-                    "pc",
-                ),
-            )
-    finally:
-        conn.close()
+def initialize_legacy_db(tmp_path: Path) -> None:
+    engine_wrapper = get_test_db_engine(tmp_path)
+    engine = engine_wrapper.engine
+    metadata = MetaData()
+    processed_games = Table(
+        'processed_games',
+        metadata,
+        Column('ID', Integer, primary_key=True),
+        Column('Source Index', String(255), unique=True),
+        Column('Name', Text),
+        Column('Summary', Text),
+        Column('Developers', Text),
+        Column('Publishers', Text),
+        Column('Genres', Text),
+        Column('Game Modes', Text),
+        Column('Platforms', Text),
+        Column('Cover Path', Text),
+        mysql_engine='InnoDB',
+    )
+
+    metadata.drop_all(engine, tables=[processed_games])
+    metadata.create_all(engine, tables=[processed_games])
+
+    with engine.begin() as conn:
+        conn.execute(
+            processed_games.insert(),
+            {
+                'ID': 1,
+                'Source Index': '0',
+                'Name': 'Sample Game',
+                'Developers': 'foo studio',
+                'Publishers': 'bar publishing',
+                'Genres': 'action',
+                'Game Modes': 'single-player',
+                'Platforms': 'pc',
+            },
+        )
+
+    engine_wrapper.dispose()
 
 
 def test_lookup_tables_backfilled(tmp_path):
     lookup_dir = tmp_path / "lookup"
     write_lookup_workbooks(lookup_dir)
 
-    db_path = tmp_path / "processed_games.db"
-    initialize_legacy_db(db_path)
+    initialize_legacy_db(tmp_path)
 
     os.environ['LOOKUP_DATA_DIR'] = str(lookup_dir)
     try:
@@ -97,10 +98,8 @@ def test_lookup_tables_backfilled(tmp_path):
         platform_rows = app.db.execute('SELECT name FROM platforms').fetchall()
         assert {row['name'] for row in platform_rows} == {"PC"}
 
-        columns = {
-            row['name'] if isinstance(row, Mapping) else row[1]
-            for row in app.db.execute('PRAGMA table_info(processed_games)')
-        }
+        db_utils.clear_processed_games_columns_cache()
+        columns = db_utils.get_processed_games_columns(handle=app.db)
         assert 'developers_ids' in columns
         assert 'publishers_ids' in columns
         assert 'genres_ids' in columns

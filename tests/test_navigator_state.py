@@ -1,6 +1,5 @@
 import json
 import math
-import sqlite3
 
 from tests.app_helpers import load_app
 
@@ -204,15 +203,15 @@ def test_completion_percentage(tmp_path):
 
 
 def test_out_of_order_ids_are_normalized(tmp_path):
-    db_path = tmp_path / 'processed_games.db'
-    conn = sqlite3.connect(db_path)
-    with conn:
-        conn.execute('CREATE TABLE processed_games ("ID" TEXT PRIMARY KEY, "Source Index" TEXT UNIQUE)')
-        conn.executemany(
-            'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
-            [('5', '0'), ('1', '1'), ('3', '2')],
-        )
     app = load_app(tmp_path)
+
+    with app.db_lock:
+        with app.db:
+            app.db.execute('DELETE FROM processed_games')
+            app.db.executemany(
+                'INSERT INTO processed_games ("ID", "Source Index") VALUES (?, ?)',
+                [('5', '0'), ('1', '1'), ('3', '2')],
+            )
     app.normalize_processed_games()
     with app.db_lock:
         cur = app.db.execute(
