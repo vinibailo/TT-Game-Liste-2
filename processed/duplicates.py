@@ -21,6 +21,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from igdb.client import coerce_igdb_id
 
+from db.utils import _quote_identifier
+
 
 __all__ = [
     "DuplicateGroupResolution",
@@ -288,6 +290,32 @@ def scan_duplicate_candidates(
     return resolutions, duplicate_groups, skipped_groups, total_groups
 
 
+def _determine_param_placeholder(conn: Any) -> str:
+    """Return the appropriate placeholder token for parameterized queries."""
+
+    paramstyle: str | None = None
+
+    engine = getattr(conn, "engine", None)
+    if engine is not None:
+        dialect = getattr(engine, "dialect", None)
+        if dialect is not None:
+            paramstyle = getattr(dialect, "paramstyle", None)
+
+    if paramstyle is None:
+        dialect = getattr(conn, "dialect", None)
+        if dialect is not None:
+            paramstyle = getattr(dialect, "paramstyle", None)
+
+    if paramstyle is None:
+        module = getattr(getattr(conn, "__class__", None), "__module__", "")
+        if module.startswith("pymysql"):
+            paramstyle = "format"
+
+    if paramstyle in {"format", "pyformat"}:
+        return "%s"
+    return "?"
+
+
 def merge_duplicate_resolutions(
     resolutions: Iterable[DuplicateGroupResolution],
     *,
@@ -314,6 +342,9 @@ def merge_duplicate_resolutions(
     with db_lock:
         conn = get_db()
         with conn:
+            placeholder = _determine_param_placeholder(conn)
+            processed_column = _quote_identifier("processed_game_id")
+            relation_statements: dict[tuple[str, str], tuple[str, str]] = {}
             for resolution in resolution_list:
                 canonical_id = coerce_int(_row_get(resolution.canonical, "ID"))
                 if canonical_id is None:
@@ -327,19 +358,25 @@ def merge_duplicate_resolutions(
                     for relation in lookup_relations:
                         join_table = relation["join_table"]
                         join_column = relation["join_column"]
-                        conn.execute(
-                            f"""
-                                INSERT OR IGNORE INTO {join_table} (processed_game_id, {join_column})
-                                SELECT ?, {join_column}
-                                FROM {join_table}
-                                WHERE processed_game_id = ?
-                            """,
-                            (canonical_id, duplicate_id),
-                        )
-                        conn.execute(
-                            f"DELETE FROM {join_table} WHERE processed_game_id = ?",
-                            (duplicate_id,),
-                        )
+                        key = (join_table, join_column)
+                        if key not in relation_statements:
+                            join_table_sql = _quote_identifier(join_table)
+                            join_column_sql = _quote_identifier(join_column)
+                            insert_sql = (
+                                f"INSERT IGNORE INTO {join_table_sql} "
+                                f"({processed_column}, {join_column_sql}) "
+                                f"SELECT {placeholder}, {join_column_sql} "
+                                f"FROM {join_table_sql} "
+                                f"WHERE {processed_column} = {placeholder}"
+                            )
+                            delete_sql = (
+                                f"DELETE FROM {join_table_sql} "
+                                f"WHERE {processed_column} = {placeholder}"
+                            )
+                            relation_statements[key] = (insert_sql, delete_sql)
+                        insert_sql, delete_sql = relation_statements[key]
+                        conn.execute(insert_sql, (canonical_id, duplicate_id))
+                        conn.execute(delete_sql, (duplicate_id,))
                 if not duplicate_ids:
                     continue
                 ids_to_delete.update(duplicate_ids)
@@ -379,11 +416,19 @@ def remove_processed_games(
     if not unique_ids:
         return 0, len(games_df)
 
-    placeholders = ",".join("?" for _ in unique_ids)
     with db_lock:
         conn = get_db()
+        placeholder = _determine_param_placeholder(conn)
+        placeholders = ", ".join(placeholder for _ in unique_ids)
+        id_column = _quote_identifier("ID")
+        source_index_column = _quote_identifier("Source Index")
+        processed_games_table = _quote_identifier("processed_games")
         cur = conn.execute(
-            f'SELECT "ID", "Source Index" FROM processed_games WHERE "ID" IN ({placeholders})',
+            (
+                f"SELECT {id_column}, {source_index_column} "
+                f"FROM {processed_games_table} "
+                f"WHERE {id_column} IN ({placeholders})"
+            ),
             tuple(unique_ids),
         )
         rows = cur.fetchall()
@@ -397,12 +442,26 @@ def remove_processed_games(
     with db_lock:
         conn = get_db()
         with conn:
+            processed_games_table = _quote_identifier("processed_games")
+            updates_table = _quote_identifier("igdb_updates")
+            id_column = _quote_identifier("ID")
+            source_index_column = _quote_identifier("Source Index")
+            processed_game_id_column = _quote_identifier("processed_game_id")
+            placeholder = _determine_param_placeholder(conn)
+            delete_updates_sql = (
+                f"DELETE FROM {updates_table} "
+                f"WHERE {processed_game_id_column} = {placeholder}"
+            )
+            delete_processed_sql = (
+                f"DELETE FROM {processed_games_table} "
+                f"WHERE {id_column} = {placeholder}"
+            )
             conn.executemany(
-                "DELETE FROM igdb_updates WHERE processed_game_id=?",
+                delete_updates_sql,
                 delete_params,
             )
             conn.executemany(
-                'DELETE FROM processed_games WHERE "ID"=?',
+                delete_processed_sql,
                 delete_params,
             )
 
@@ -460,7 +519,20 @@ def remove_processed_games(
         with db_lock:
             conn = get_db()
             with conn:
-                cur = conn.execute('SELECT "ID", "Source Index" FROM processed_games')
+                processed_games_table = _quote_identifier("processed_games")
+                id_column = _quote_identifier("ID")
+                source_index_column = _quote_identifier("Source Index")
+                placeholder = _determine_param_placeholder(conn)
+                select_sql = (
+                    f"SELECT {id_column}, {source_index_column} "
+                    f"FROM {processed_games_table}"
+                )
+                update_sql = (
+                    f"UPDATE {processed_games_table} "
+                    f"SET {source_index_column} = {placeholder} "
+                    f"WHERE {id_column} = {placeholder}"
+                )
+                cur = conn.execute(select_sql)
                 stored_rows = cur.fetchall()
                 for entry in stored_rows:
                     canonical = navigator_canonical(entry["Source Index"])
@@ -480,10 +552,7 @@ def remove_processed_games(
                         new_value = str(new_numeric).zfill(len(stripped))
                     else:
                         new_value = str(new_numeric)
-                    conn.execute(
-                        'UPDATE processed_games SET "Source Index"=? WHERE "ID"=?',
-                        (new_value, entry["ID"]),
-                    )
+                    conn.execute(update_sql, (new_value, entry["ID"]))
 
     normalize_processed_games()
 
