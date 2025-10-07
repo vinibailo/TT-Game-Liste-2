@@ -2,15 +2,51 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import os
 import uuid
 from pathlib import Path
+from types import ModuleType
 
 import pandas as pd
 from flask import request
 
+from db import utils as db_utils
+
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
+
+
+def using_legacy_sqlite() -> bool:
+    """Return ``True`` when the tests are configured to use SQLite."""
+
+    value = os.environ.get("DB_LEGACY_SQLITE")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _reload_config() -> ModuleType:
+    """Reload the application configuration module to refresh DB settings."""
+
+    config_module = importlib.import_module("config")
+    return importlib.reload(config_module)
+
+
+def configure_database(tmp_path: Path | None = None) -> ModuleType:
+    """Ensure configuration reflects the current database test environment."""
+
+    if tmp_path is not None and using_legacy_sqlite():
+        sqlite_path = tmp_path / "processed_games.db"
+        os.environ["DB_SQLITE_PATH"] = os.fspath(sqlite_path)
+    return _reload_config()
+
+
+def get_test_db_engine(tmp_path: Path | None = None) -> db_utils.DatabaseEngine:
+    """Return a :class:`DatabaseEngine` configured for the active test database."""
+
+    config_module = configure_database(tmp_path)
+    return db_utils.build_engine_from_dsn(config_module.DB_DSN)
 
 
 def load_app(tmp_path: Path) -> object:
@@ -25,12 +61,12 @@ def load_app(tmp_path: Path) -> object:
 
     env_vars = {
         key: os.environ.get(key)
-        for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET", "DB_LEGACY_SQLITE")
+        for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET")
     }
     for key in env_vars:
         os.environ.pop(key, None)
 
-    os.environ["DB_LEGACY_SQLITE"] = "1"
+    configure_database(tmp_path)
 
     try:
         spec.loader.exec_module(module)

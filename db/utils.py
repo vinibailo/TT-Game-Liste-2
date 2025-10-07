@@ -316,29 +316,51 @@ def _configure_sqlite_connection(conn: Any, *, busy_timeout: float | None = None
 def _configure_mariadb_connection(conn: Any, *, lock_timeout: float | None = None) -> Any:
     """Apply session-level settings for MariaDB connections."""
 
-    if lock_timeout is None:
-        return conn
-
-    timeout_value = max(int(lock_timeout), 1)
-
     try:
         cursor = conn.cursor()
     except AttributeError:  # pragma: no cover - DBAPI without cursor helper
         return conn
 
     try:
+        if lock_timeout is not None:
+            timeout_value = max(int(lock_timeout), 1)
+            try:
+                cursor.execute("SET SESSION innodb_lock_wait_timeout = %s", (timeout_value,))
+            except Exception:  # pragma: no cover - unavailable variable
+                pass
+            try:
+                cursor.execute("SET SESSION lock_wait_timeout = %s", (timeout_value,))
+            except Exception:  # pragma: no cover - unavailable variable
+                pass
+            try:
+                cursor.execute("SET SESSION wait_timeout = %s", (timeout_value,))
+            except Exception:  # pragma: no cover - unavailable variable
+                pass
+
         try:
-            cursor.execute("SET SESSION innodb_lock_wait_timeout = %s", (timeout_value,))
-        except Exception:  # pragma: no cover - unavailable variable
-            pass
-        try:
-            cursor.execute("SET SESSION lock_wait_timeout = %s", (timeout_value,))
-        except Exception:  # pragma: no cover - unavailable variable
-            pass
-        try:
-            cursor.execute("SET SESSION wait_timeout = %s", (timeout_value,))
-        except Exception:  # pragma: no cover - unavailable variable
-            pass
+            cursor.execute("SELECT @@sql_mode")
+            row = cursor.fetchone()
+        except Exception:  # pragma: no cover - best effort only
+            row = None
+
+        current_mode = ""
+        if row:
+            if isinstance(row, Mapping):
+                current_mode = str(next(iter(row.values())) or "")
+            elif isinstance(row, (tuple, list)):
+                current_mode = str(row[0] or "")
+            else:  # pragma: no cover - unexpected DB-API return type
+                current_mode = str(row or "")
+
+        modes = {item.strip() for item in current_mode.split(',') if item.strip()}
+        if "ANSI_QUOTES" not in modes:
+            new_mode_items = [item for item in current_mode.split(',') if item.strip() and item.strip() != 'ANSI_QUOTES']
+            new_mode_items.append('ANSI_QUOTES')
+            new_mode = ','.join(new_mode_items)
+            try:
+                cursor.execute("SET SESSION sql_mode = %s", (new_mode,))
+            except Exception:  # pragma: no cover - best effort only
+                pass
     finally:
         try:
             cursor.close()
