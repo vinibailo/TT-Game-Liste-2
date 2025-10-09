@@ -1314,7 +1314,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     navigator_state = Table(
         'navigator_state',
         metadata,
-        Column('id', Integer, primary_key=True),
+        Column('id', Integer, primary_key=True, autoincrement=False),
         Column('current_index', Integer),
         Column('seq_index', Integer),
         Column('skip_queue', Text),
@@ -1390,7 +1390,7 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     igdb_cache_state = Table(
         IGDB_CACHE_STATE_TABLE,
         metadata,
-        Column('id', Integer, primary_key=True),
+        Column('id', Integer, primary_key=True, autoincrement=False),
         Column('total_count', Integer),
         Column('last_synced_at', String(255)),
         CheckConstraint('id = 1', name='ck_igdb_cache_state_singleton'),
