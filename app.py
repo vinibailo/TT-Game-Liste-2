@@ -1398,16 +1398,28 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
     )
 
     for table_config in LOOKUP_TABLES:
-        Table(
-            table_config['table'],
-            metadata,
-            Column('id', Integer, primary_key=True, autoincrement=True),
-            Column(
+        # Use dialect-specific collation
+        if dialect_name == 'sqlite':
+            name_column = Column(
                 'name',
                 String(255, collation='NOCASE'),
                 nullable=False,
                 unique=True,
-            ),
+            )
+        else:
+            # For MariaDB/MySQL, use case-insensitive collation
+            name_column = Column(
+                'name',
+                String(255),
+                nullable=False,
+                unique=True,
+            )
+        
+        Table(
+            table_config['table'],
+            metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            name_column,
             mysql_engine='InnoDB',
             mysql_charset='utf8mb4',
             mysql_collate='utf8mb4_unicode_ci',
