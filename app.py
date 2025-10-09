@@ -1431,12 +1431,22 @@ def _init_db(*, run_migrations: bool = RUN_DB_MIGRATIONS) -> None:
         processed_games.c['last_edited_at'],
         processed_games.c['ID'],
     )
-    Index(
-        'processed_games_igdb_cache_idx',
-        func.nullif(processed_games.c['igdb_id'], ''),
-        processed_games.c['cache_rank'],
-        unique=True,
-    )
+    # Create dialect-specific index for IGDB cache
+    if dialect_name == 'sqlite':
+        Index(
+            'processed_games_igdb_cache_idx',
+            func.nullif(processed_games.c['igdb_id'], ''),
+            processed_games.c['cache_rank'],
+            unique=True,
+        )
+    else:
+        # For MariaDB, create a simpler index without functional expression
+        Index(
+            'processed_games_igdb_cache_idx',
+            processed_games.c['igdb_id'],
+            processed_games.c['cache_rank'],
+            unique=True,
+        )
     Index('igdb_updates_refreshed_at_idx', igdb_updates.c.refreshed_at)
     Index(
         'igdb_updates_has_diff_updated_idx',
