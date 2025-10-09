@@ -288,10 +288,17 @@ def test_api_igdb_cache_refresh_skips_when_offset_complete(tmp_path) -> None:
     assert count_calls == [('token', 'client')]
 
     with app_module.db_lock:
-        has_games_table = app_module.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            (app_module.IGDB_CACHE_TABLE,),
-        ).fetchone()[0]
+        # Use dialect-specific system table query
+        if hasattr(app_module.db, 'engine') and app_module.db.engine.dialect.name in {'mysql', 'mariadb'}:
+            has_games_table = app_module.db.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+                (app_module.IGDB_CACHE_TABLE,),
+            ).fetchone()[0]
+        else:
+            has_games_table = app_module.db.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (app_module.IGDB_CACHE_TABLE,),
+            ).fetchone()[0]
         if has_games_table:
             cache_entries = app_module.db.execute(
                 f'SELECT COUNT(*) FROM {app_module.IGDB_CACHE_TABLE}'

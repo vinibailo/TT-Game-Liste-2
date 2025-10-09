@@ -114,28 +114,53 @@ def insert_igdb_cache_entry(app_module, igdb_id: int | str, **overrides):
 
     with app_module.db_lock:
         with app_module.db:
-            app_module.db.execute(
-                f'''
-                INSERT INTO {app_module.IGDB_CACHE_TABLE} (
-                    igdb_id, name, summary, updated_at, first_release_date,
-                    category, cover_image_id, rating_count, developers,
-                    publishers, genres, platforms, game_modes, cached_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(igdb_id) DO UPDATE SET
-                    name=excluded.name,
-                    summary=excluded.summary,
-                    updated_at=excluded.updated_at,
-                    first_release_date=excluded.first_release_date,
-                    category=excluded.category,
-                    cover_image_id=excluded.cover_image_id,
-                    rating_count=excluded.rating_count,
-                    developers=excluded.developers,
-                    publishers=excluded.publishers,
-                    genres=excluded.genres,
-                    platforms=excluded.platforms,
-                    game_modes=excluded.game_modes,
-                    cached_at=excluded.cached_at
-                ''',
+            # Use dialect-specific UPSERT syntax
+            if hasattr(app_module.db, 'engine') and app_module.db.engine.dialect.name in {'mysql', 'mariadb'}:
+                upsert_sql = f'''
+                    INSERT INTO {app_module.IGDB_CACHE_TABLE} (
+                        igdb_id, name, summary, updated_at, first_release_date,
+                        category, cover_image_id, rating_count, developers,
+                        publishers, genres, platforms, game_modes, cached_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                        name=VALUES(name),
+                        summary=VALUES(summary),
+                        updated_at=VALUES(updated_at),
+                        first_release_date=VALUES(first_release_date),
+                        category=VALUES(category),
+                        cover_image_id=VALUES(cover_image_id),
+                        rating_count=VALUES(rating_count),
+                        developers=VALUES(developers),
+                        publishers=VALUES(publishers),
+                        genres=VALUES(genres),
+                        platforms=VALUES(platforms),
+                        game_modes=VALUES(game_modes),
+                        cached_at=VALUES(cached_at)
+                '''
+            else:
+                upsert_sql = f'''
+                    INSERT INTO {app_module.IGDB_CACHE_TABLE} (
+                        igdb_id, name, summary, updated_at, first_release_date,
+                        category, cover_image_id, rating_count, developers,
+                        publishers, genres, platforms, game_modes, cached_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(igdb_id) DO UPDATE SET
+                        name=excluded.name,
+                        summary=excluded.summary,
+                        updated_at=excluded.updated_at,
+                        first_release_date=excluded.first_release_date,
+                        category=excluded.category,
+                        cover_image_id=excluded.cover_image_id,
+                        rating_count=excluded.rating_count,
+                        developers=excluded.developers,
+                        publishers=excluded.publishers,
+                        genres=excluded.genres,
+                        platforms=excluded.platforms,
+                        game_modes=excluded.game_modes,
+                        cached_at=excluded.cached_at
+                '''
+            
+            app_module.db.execute(upsert_sql,
                 (
                     int(igdb_id),
                     defaults['name'],
@@ -204,10 +229,17 @@ def test_updates_endpoint_initializes_lookup_tables_without_migrations(tmp_path,
     with app_module.db_lock:
         for relation in app_module.LOOKUP_RELATIONS:
             join_table = relation['join_table']
-            cursor = app_module.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (join_table,),
-            )
+            # Use dialect-specific system table query
+            if hasattr(app_module.db, 'engine') and app_module.db.engine.dialect.name in {'mysql', 'mariadb'}:
+                cursor = app_module.db.execute(
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+                    (join_table,),
+                )
+            else:
+                cursor = app_module.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (join_table,),
+                )
             assert cursor.fetchone() is not None, f"{join_table} was not created"
 
 
